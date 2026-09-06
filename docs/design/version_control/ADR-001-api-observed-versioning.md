@@ -5,11 +5,13 @@
 
 ## Context
 
-Databricks Genie Agents are mutable workspace resources. They may be changed through Genie Workbench, Genie Space Optimizer, the Databricks UI, direct APIs, or CI/CD automation.
+Databricks Genie Agents are mutable workspace resources. They may be changed through Genie Workbench, Genie Space Optimizer, the Databricks UI, direct APIs, or automation.
 
-Git and Databricks Declarative Automation Bundles do not independently observe all live changes. Git contains only committed state, while the current bundle provisions supporting application and Job resources rather than owning the complete Genie configuration lifecycle.
+This design is **fully Databricks-native**. Operational version control, approvals, versions, deployments, and reconciliation are managed inside Genie Workbench and governed Databricks resources. Git and GitHub may store the application source code and documentation, but they must not be the authoritative version ledger for Genie Agents, the deployment-approval system, or a required part of the operational promotion path. No workflow may force a user to leave Genie Workbench to approve, restore, reconcile, or promote a Genie Agent.
 
-The Genie API may normalize submitted configuration. A successful update request or submitted JSON document therefore does not prove that the same representation is currently live. Authoritative state requires a follow-up Genie API read.
+Databricks Declarative Automation Bundles can now express `resources.genie_spaces`, but managing live Genie content through a bundle is rejected on authority grounds: bundle state would re-assert stale configuration on the next deploy, and `bundle deploy` centralizes cross-workspace credentials in a CLI act outside Workbench.
+
+The Genie API may normalize submitted configuration and exposes **no ETag, If-Match, or conditional-update token**. A successful update request or submitted JSON document therefore does not prove that the same representation is currently live, and server-side optimistic concurrency is unavailable. Authoritative state requires a follow-up Genie API read, and concurrency safety must be built in this control plane.
 
 The organization requires two distinct capabilities:
 
@@ -18,7 +20,7 @@ The organization requires two distinct capabilities:
 
 ## Decision
 
-1. Assign each managed Genie Agent a stable logical `space_key` independent of workspace-specific Genie IDs.
+1. Assign each managed Genie Agent a stable logical `space_key`, recorded in a durable `genie_space_registry`. Genie spaces are not Unity Catalog securables, so the registry is the identity; a deleted-and-recreated space requires an explicit, audited human rebind.
 2. Store every managed pre-mutation and post-mutation state, and every externally observed state, as an immutable version in governed Unity Catalog Delta tables.
 3. Treat authoritative Genie API read-back as evidence of live applied state.
 4. Preserve four representations where appropriate:
@@ -28,20 +30,24 @@ The organization requires two distinct capabilities:
    - Portable artifacts for governed cross-workspace promotion.
 5. Extend the repository's existing configuration and benchmark fingerprint logic and add governed metadata fingerprinting.
 6. Store durable operation and deployment transitions in Unity Catalog Delta.
-7. Use Lakebase for rebuildable operational coordination, including idempotency, leases with fencing tokens, current saga state, and current-head projections.
-8. Stop restore, deployment, adoption, merge, Workbench mutation, and optimization promotion when durable Lakebase coordination is unavailable. In-memory fallback must not authorize these operations.
-9. Use Git for approved portable artifacts and release manifests, not as the sole live-state version history.
-10. Maintain observed, approved, and deployed heads separately.
+7. Use **Unity Catalog Delta as the coordination authority for the first release**, through a single mutable per-binding compare-and-swap row (`genie_ops_coordination`) under Serializable isolation, providing idempotency, generation-fenced leases, current saga state, and observed/approved/deployed head projections. Lakebase is **not required for v1**; it is a legitimate future coordination backend (enforced keys, multi-record transactions), never merely a cache and never an automatic failover target.
+8. **Fail closed when the coordination authority or the mandatory pre-write evidence commit is unavailable.** In v1 these are a single Delta commit. Stop restore, deployment, adoption, merge, Workbench mutation, and optimization promotion when durable coordination or the pre-write evidence is unavailable. In-memory fallback must not authorize these operations, and coordination backends must never be switched automatically.
+9. Do not use Git or GitHub as the Genie Agent version ledger or the operational promotion path. Store approved portable artifacts and mappings as content-addressed packages in Unity Catalog Volumes governed by UC grants.
+10. Maintain observed, approved, and deployed heads separately; never compress them into a single "current version."
 11. Capture and persist unexpected live state before asking a user to adopt, reapply, compare, acknowledge, or manually reconcile it.
-12. Use GitHub Actions with OIDC or workload identity federation for review, approvals, and release orchestration.
-13. Use DAB-provisioned target-local Databricks Jobs for target drift checks, environment mapping, validation, Genie API mutation, authoritative read-back, tests, and deployment evidence.
-14. Use DABs to provision infrastructure and workflows, not as the authoritative Genie Agent content manager.
-15. Bind production approval to the portable artifact hash, mapping hash, transformer version, target environment, expected target base, and test-policy hash.
-16. Implement restore and deployment as idempotent sagas with explicit ambiguous and conflict states.
+12. Implement approvals inside Genie Workbench, bound to immutable digests, with requester/approver/deployer separation, two-person production approval, and group membership resolved server-side. There is no external environment gate.
+13. Use DAB-provisioned, target-local Databricks Jobs as the single guarded mutation path for target drift checks, environment mapping, validation, Genie API mutation, authoritative read-back, tests, and deployment evidence — including same-workspace optimizer apply and restore.
+14. Use DABs to provision infrastructure and workflows only, never as the authoritative Genie Agent content manager. Mark managed spaces `governed_by=workbench` and detect any governed space that also appears in bundle state (the dual-authority guard).
+15. Bind production approval to at least: source version ID, raw and canonical source fingerprints, portable artifact fingerprint, mapping fingerprint, transformer version, canonicalizer version, target workspace, target agent binding, expected target-base fingerprint, validation policy, benchmark policy, approver identity, approval timestamp, and expiration. Changing any bound input voids the approval.
+16. Implement restore and deployment as idempotent operations with explicit ambiguous, conflict, and quarantine states.
 17. Treat historical restore as a verified compensating operation, not an atomic rollback.
-18. Block governed mutations on unexpected live drift unless an authorized user adopts or explicitly overrides the drift.
+18. Block governed mutations on unexpected live drift unless an authorized user adopts or explicitly overrides the drift through audited break-glass.
 19. Use structured and exact-identifier environment mappings. Fail closed on ambiguous transformations rather than globally replacing arbitrary text.
 20. Implement reliable in-workspace capture, comparison, reconciliation, and restore before building cross-workspace promotion automation.
+21. Enforce the safety invariant **one unresolved mutation attempt per binding — not merely one unexpired lease**: unique per-binding coordination row, monotonic generation with a unique per-attempt identity (not the shared service-principal identity), and an atomic admission transition binding operation, request digest, approval digest, expected base, and generation.
+22. Treat an expired lease as suspected failure, not permission to take over: expiry quarantines the binding. Quarantine auto-clears only when the prior attempt's Job run is terminal and live state is stable across repeated reads beyond Genie's maximum server-side request lifetime; otherwise it pages an operator. Never authorize replay from base-equality alone, and never auto-compensate unless preauthorized and live state still matches the recorded post-stage.
+23. Reserve production Genie editing to the executor service principal (humans receive `CAN_RUN`/`CAN_VIEW`) as the one native prevention mechanism, and replace startup `run_as` self-healing with fail-closed verification.
+24. Require at least one production approver to be authorized target-side, evaluated by the target service principal against a target-controlled release-approver group at execution time. A source-workspace-only approval is insufficient.
 
 ## Consequences
 
@@ -50,56 +56,65 @@ The organization requires two distinct capabilities:
 - Direct UI or API changes are not silently overwritten after they have been observed.
 - Every managed mutation has a durable preimage and verified post-operation observation.
 - Historical restore preserves lineage rather than rewriting history.
-- Git remains reviewable and focused on approved releases.
-- Target deployments are verified against actual target state.
+- All operational governance stays inside Databricks and Workbench; there is no external CI/CD control plane to secure or correlate.
+- Target deployments are verified against actual target state and require target-side approval.
 - Deployment evidence includes intended, rendered, and observed identities.
-- DAB limitations do not constrain the version model.
+- DAB limitations do not constrain the version model, and bundle-managed content cannot silently overwrite governed spaces undetected.
+- The v1 coordination authority is a single system (Delta), so command admission and pre-write evidence are one commit.
 
 ### Negative
 
-- The system coordinates Genie API operations, Delta, Lakebase, GitHub, and Databricks Jobs without a shared transaction.
-- Lakebase becomes operationally required for governed mutations, even though it is not authoritative and can be rebuilt.
+- The system coordinates Genie API operations, Delta, and Databricks Jobs without a single distributed transaction; multi-table writes require a deliberately checkpointed protocol.
 - Restore and deployment cannot be described as strictly atomic.
 - Scheduled reconciliation cannot recover external intermediate states that are never observed.
 - Versioned canonicalization, idempotency, reconciliation, and recovery add implementation complexity.
-- GitHub and Databricks operation evidence must be correlated and retained.
+- Concurrency safety depends on a control-plane protocol rather than a server-side conditional update, so an irreducible time-of-check-to-time-of-use window remains outside ACL-locked production.
 
 ### Neutral
 
-- Direct UI editing remains technically possible unless separate organizational policy restricts it.
+- Direct UI editing remains technically possible unless separate organizational policy or production ACL lockdown restricts it.
 - Existing optimizer history remains optimization-specific and should not become the universal version ledger.
 - General automatic semantic merging is deferred. SQL-bearing and overlapping changes require human review.
+- Lakebase may later replace Delta coordination where its transactional features add value, but only as a deliberate, non-automatic migration.
 
 ## Alternatives Considered
 
-### GitHub Actions and DABs as the Complete Solution
+### DAB-first (bundle-managed Genie content)
 
-Rejected as the sole version-control architecture. It provides strong review and release governance but cannot observe out-of-band live changes without an additional workspace-side reconciler. A Git revert also does not prove that a live Genie Agent was safely restored.
+Rejected as the primary mechanism. `resources.genie_spaces` exists, so this is a capability, not an impossibility — but bundle state re-asserts stale configuration on the next deploy, destroying out-of-band-edit preservation, and `bundle deploy` centralizes cross-workspace credentials in a CLI act outside Workbench. It fails the out-of-band-preservation and no-leave-Workbench requirements.
 
-### Databricks-Managed Workflows Only
+### Git and GitHub Actions as the governance plane
 
-Rejected as the complete governance architecture. It provides strong proximity to live state, identities, data dependencies, and tests, but is less effective for Git-based review, immutable release selection, protected-environment approval, and multi-workspace orchestration.
+Rejected. Using GitHub Actions for release orchestration, GitHub environments for deployment approval, or Git as the authoritative version ledger violates the fully-Databricks-native constraint, forces users out of Workbench to approve and promote, and cannot observe out-of-band live changes. Git and GitHub are retained only for application source code and documentation.
 
-### Hybrid Architecture
+### Workbench SDK-only
 
-Accepted. Databricks owns observation, validation, mutation, and verification close to the live resource. GitHub owns reviewed desired state and release approval. Authority boundaries prevent either system from incorrectly claiming complete ownership.
+Rejected as the complete architecture only because provisioning belongs in DABs. Hand-rolling per-workspace Job creation, schema, grants, and entitlements through the SDK produces drift in the machinery that detects drift. Once provisioning is factored into DABs, this collapses into the native hybrid.
+
+### Native hybrid
+
+Accepted. DABs provision; Databricks Jobs execute the single guarded mutation path; Genie Workbench governs history, approvals, and promotion; Unity Catalog Delta is the durable and coordination authority; Genie API read-back proves live state.
 
 ## Implementation Constraints
 
-- Start with `genie_space_versions` and `genie_space_operations`; add specialized ledgers only when needed.
-- Use Databricks Jobs rather than Lakebase as the execution queue and retry engine.
+- Start with `genie_space_versions` and `genie_space_registry`, then `genie_space_operations` and `genie_ops_coordination`; add specialized ledgers only when needed. Physical table count is an implementation choice, but mutable coordination must not share a securable with append-only facts, and approval and release facts must be durable in Delta.
+- Enforce append-only via grants and Delta table properties/constraints, not naming convention.
+- Use Databricks Jobs rather than any second workflow engine as the execution queue and retry engine.
 - Fetch live state before every governed write even when a current-head projection exists.
-- Persist the pre-operation observation before submitting a mutation.
-- When a write returns but read-back fails, retry verification only and block further governed mutation until reconciled.
-- Do not implement a universal SQL rewrite engine in the first deployment release.
+- Persist the pre-operation observation before submitting a mutation, in the same admission commit.
+- When a write returns but read-back fails, transition to `applied_unverified`, quarantine, retry verification only, and block further governed mutation until reconciled.
+- Do not implement a universal SQL rewrite engine in the first release.
 - Do not use unrestricted string replacement across `serialized_space`.
 - Do not claim that every transient direct UI edit can be recovered.
+- Route optimizer apply and restore through the guarded Job path; retire the in-process, non-atomic `revert.py`.
+- Require explicit user-selected source and target CLI profiles; never auto-select or rely on a default profile for production promotion.
 
 ## Follow-Up Decisions
 
 - Snapshot retention and access policy.
 - ACL representation and promotion strategy.
 - Reconciliation schedules and service-level objectives.
-- Production direct-edit policy.
+- Production direct-edit policy and ACL lockdown.
 - Canonicalizer migration policy.
 - Benchmark and smoke-test promotion thresholds.
+- Whether and when to adopt Lakebase as a transactional coordination backend.
