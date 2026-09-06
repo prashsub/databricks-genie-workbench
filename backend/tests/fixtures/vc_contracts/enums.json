@@ -49,6 +49,19 @@
     "removed",
     "modified"
   ],
+  "Comparison": [
+    "equal",
+    "different",
+    "unknown"
+  ],
+  "PatchStage": [
+    "config_pending",
+    "config_in_flight",
+    "config_observed",
+    "description_pending",
+    "description_in_flight",
+    "description_observed"
+  ],
   "CoordinationState": [
     "idle",
     "observing",
