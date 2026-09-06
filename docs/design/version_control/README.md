@@ -43,7 +43,7 @@ Adopt the **native hybrid** architecture (Option 3) with explicit authority boun
 
 - **Genie API read-back** determines what is actually live.
 - **Unity Catalog Delta tables** store durable, append-only version and operation facts, and act as the **v1 coordination authority** through a per-binding compare-and-swap row.
-- **Databricks Jobs** are the single guarded mutation path for every managed write — Workbench edits, optimizer apply, restore, reconciliation, and promotion.
+- **Every write path is version-controlled through the same gate.** Everyday Workbench actions (create-agent, edit) execute in the application as the user, but are wrapped in the same version-capture and coordination gate as everything else. High-stakes governed operations (restore, production change, cross-workspace promotion) additionally run through **Databricks Jobs** for separation of duties, retries, and audit. The discipline is identical for all writers — acquire the coordination lease, capture the pre-state, apply, read back, capture the post-state — and no write bypasses version capture.
 - **Genie Workbench** is the sole control plane and user interface for history, comparison, restore, drift/reconcile, releases, approvals, and audit.
 - **DABs** provision the Workbench, Jobs, tables, permissions, identities, and environment configuration. **DABs never manage Genie Agent content.**
 - **Lakebase** is not required for the first release. It is a legitimate *future* coordination backend (enforced keys, multi-record transactions), never merely a cache and never an automatic failover target.
@@ -125,7 +125,7 @@ It cannot guarantee recovery of every intermediate external edit. If a user make
 
 **"Never silently overwrite" is a governed-writer policy, not an unconditional API guarantee.** Because Genie provides no conditional update, the honest guarantee is two-tier:
 
-- **Prevention by ACL where ACLs are enforced.** In production, humans receive `CAN_RUN`/`CAN_VIEW` and editing is reserved to the executor service principal, so routine writes flow only through the guarded Job path.
+- **Prevention by ACL where ACLs are enforced.** In production, humans receive `CAN_RUN`/`CAN_VIEW` and editing is reserved to the Workbench/executor service principal, so routine writes flow only through governed, version-captured paths.
 - **Serialization of governed writers always.** Every writer we control — Workbench, optimizer, restore, reconciliation, promotion — is serialized per binding by a generation-fenced admission row.
 - **Detect, preserve, attribute, and recover everywhere else.** Against a human editing in the Genie UI, a workspace admin, or a break-glass path, an irreducible time-of-check-to-time-of-use window remains. The product detects, preserves, attributes, and recovers; it does not claim to prevent.
 
@@ -140,7 +140,7 @@ Restore and deployment are verified compensating operations, not atomic distribu
 | Coordination (v1) | Unity Catalog Delta | One mutable per-binding compare-and-swap row (lease, generation, heads) under Serializable isolation |
 | Artifacts and evidence | Unity Catalog Volumes | Content-addressed promotion packages and large evidence artifacts, hashed from Delta |
 | Approval | Workbench + Databricks groups | Approval records bound to immutable digests; group membership resolved server-side |
-| Execution | Databricks Jobs | The sole mutation path: reconciliation, mapping, validation, mutation, verification, tests |
+| Execution | Workbench app (everyday create/edit) and Databricks Jobs (governed operations) | All mutation paths, each version-captured through the same gate; Jobs carry restore, promotion, reconciliation, validation, verification, and tests |
 | Provisioning | DABs | App, Jobs, schemas, permissions, identities, and environment configuration |
 | Authorization | Databricks identities and groups | Requester, approver, and deployer separation, resolved server-side |
 
@@ -334,6 +334,17 @@ This reduces dual-authority risk but does not fully neutralize workspace adminis
 
 ## Core Workflows
 
+### Create Agent (Workbench)
+
+Creating a Genie Agent through the Workbench create-agent flow is a first-class mutation and **initiates version control immediately**. There is no prior state to preserve, so the flow:
+
+1. Registers a stable logical `space_key` in `genie_space_registry` and marks it `governed_by=workbench`.
+2. Acquires the coordination row for the new binding.
+3. Creates the agent through the Genie API and reads it back.
+4. Persists the authoritative read-back as the **first immutable version** (`origin: workbench`, no `parent_version_id`).
+
+From that point the agent is under version control and every subsequent change — in-app edit, optimizer, restore, promotion, or an externally observed change — appends a new version.
+
 ### Managed Snapshot and Update
 
 Follow the two-PATCH safe write protocol above: admit atomically, capture pre-state, compare against the reviewed base, no-op gate, re-assert generation, PATCH config, checkpoint, conditionally PATCH description, read back, verify, record a terminal transition, update projections conditioned on the generation, and release the lease. If the update call returns but read-back fails, transition to `applied_unverified` and quarantine; retry only the read-back, never the mutation.
@@ -355,10 +366,21 @@ The Workbench should present categorized differences such as:
 
 Arrays with stable IDs compare by ID rather than list position. SQL-bearing changes default to manual review. The canonicalizer is versioned; on a version mismatch, dual-compute during migration and mark cross-version mismatches `unknown` rather than fabricating a diff.
 
+### Capture on Open (Align to the Live Source of Truth)
+
+The live Genie Agent is the source of truth. Whenever a user **opens a Genie Agent in Workbench**, the app reads the live state and compares it to the latest recorded version:
+
+1. Fetch live state and canonicalize.
+2. If its fingerprints differ from the latest recorded version, **immediately persist the observed live state as a new version** tagged `origin: external`, with `parent_version_id` pointing at the previous recorded version — **before** presenting anything to the user. Preserving the external state must never depend on a user decision.
+3. Only then surface the change and offer the reconciliation choices (adopt / compare / reapply / acknowledge).
+
+This keeps history continuous and truthful even for changes made through the Databricks UI or direct APIs, and guarantees the recorded head is realigned to the live agent on every open.
+
 ### External Drift Reconciliation
 
 Reconcile:
 
+- When a user opens a Genie Agent (capture-on-open; see above).
 - Before every governed mutation.
 - When a user opens version history.
 - After returning from the Genie UI.
@@ -398,7 +420,7 @@ Do not implement general automatic semantic merging in the first release.
 
 ### Historical Restore
 
-Restore is a governed Job mutation like any other (never the in-process `revert.py`). It creates a new version and never mutates history:
+Restore is a governed operation that runs through a Databricks Job (never the in-process `revert.py`). It creates a new version and never mutates history:
 
 1. Display the historical-to-current semantic diff.
 2. Admit the operation and acquire the coordination row (generation, attempt-id).
@@ -495,7 +517,7 @@ Scores prioritize live-state versioning and reconciliation under the Databricks-
 | Out-of-band-edit preservation | 1/5 | 5/5 | 5/5 |
 | No-leave-Workbench governance | 2/5 | 5/5 | 5/5 |
 | Provisioning repeatability | 5/5 | 2/5 | 5/5 |
-| Single guarded mutation path | 2/5 | 4/5 | 5/5 |
+| Every write path version-captured | 2/5 | 4/5 | 5/5 |
 | Separation of duties and audit | 3/5 | 4/5 | 5/5 |
 | Cross-workspace safety | 2/5 | 4/5 | 5/5 |
 | Dual-authority risk (higher is safer) | 1/5 | 5/5 | 5/5 |
@@ -560,7 +582,7 @@ Accepted. DABs provision; Jobs execute; Workbench governs; Delta is the durable 
 
 - Create `genie_space_operations` and `genie_ops_coordination`.
 - Implement Delta compare-and-swap admission (unique row, generation, atomic transition).
-- Route every mutation — including optimizer apply and restore — through the guarded Job path; retire in-process `revert.py`.
+- Route every mutation through the shared version-capture + coordination gate: everyday Workbench create/edit in-app, and governed operations (optimizer apply, restore, promotion) through Jobs; retire in-process `revert.py`.
 - Add authoritative read-back verification, `applied_unverified`/`applied_partial` handling, and quarantine with the two-signal exit.
 - Replace `run_as` startup self-healing with fail-closed verification.
 

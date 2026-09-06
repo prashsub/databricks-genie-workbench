@@ -21,7 +21,7 @@ The organization requires two distinct capabilities:
 ## Decision
 
 1. Assign each managed Genie Agent a stable logical `space_key`, recorded in a durable `genie_space_registry`. Genie spaces are not Unity Catalog securables, so the registry is the identity; a deleted-and-recreated space requires an explicit, audited human rebind.
-2. Store every managed pre-mutation and post-mutation state, and every externally observed state, as an immutable version in governed Unity Catalog Delta tables.
+2. Store every managed pre-mutation and post-mutation state, and every externally observed state, as an immutable version in governed Unity Catalog Delta tables. **Every write path initiates version control through the same gate** — including the Workbench create-agent flow (which registers the identity and persists the first version) and everyday in-app edits — and no write bypasses version capture.
 3. Treat authoritative Genie API read-back as evidence of live applied state.
 4. Preserve four representations where appropriate:
    - Complete API response envelope for audit.
@@ -34,9 +34,9 @@ The organization requires two distinct capabilities:
 8. **Fail closed when the coordination authority or the mandatory pre-write evidence commit is unavailable.** In v1 these are a single Delta commit. Stop restore, deployment, adoption, merge, Workbench mutation, and optimization promotion when durable coordination or the pre-write evidence is unavailable. In-memory fallback must not authorize these operations, and coordination backends must never be switched automatically.
 9. Do not use Git or GitHub as the Genie Agent version ledger or the operational promotion path. Store approved portable artifacts and mappings as content-addressed packages in Unity Catalog Volumes governed by UC grants.
 10. Maintain observed, approved, and deployed heads separately; never compress them into a single "current version."
-11. Capture and persist unexpected live state before asking a user to adopt, reapply, compare, acknowledge, or manually reconcile it.
+11. Capture and persist unexpected live state before asking a user to adopt, reapply, compare, acknowledge, or manually reconcile it. In particular, when a user opens a Genie Agent in Workbench, read the live state and, if it differs from the recorded head, persist it immediately as a new `origin: external` version to realign to the source of truth **before** presenting any choice. Preserving external state must never depend on a user decision.
 12. Implement approvals inside Genie Workbench, bound to immutable digests, with requester/approver/deployer separation, two-person production approval, and group membership resolved server-side. There is no external environment gate.
-13. Use DAB-provisioned, target-local Databricks Jobs as the single guarded mutation path for target drift checks, environment mapping, validation, Genie API mutation, authoritative read-back, tests, and deployment evidence — including same-workspace optimizer apply and restore.
+13. Execute everyday Workbench mutations (create-agent, edit) in the application as the user, wrapped in the shared version-capture and coordination gate; execute high-stakes governed operations (restore, production change, cross-workspace promotion, reconciliation, optimizer apply) through DAB-provisioned, target-local Databricks Jobs for separation of duties, retries, authoritative read-back, tests, and deployment evidence. All paths use the same discipline: acquire the lease, capture the pre-state, apply, read back, capture the post-state.
 14. Use DABs to provision infrastructure and workflows only, never as the authoritative Genie Agent content manager. Mark managed spaces `governed_by=workbench` and detect any governed space that also appears in bundle state (the dual-authority guard).
 15. Bind production approval to at least: source version ID, raw and canonical source fingerprints, portable artifact fingerprint, mapping fingerprint, transformer version, canonicalizer version, target workspace, target agent binding, expected target-base fingerprint, validation policy, benchmark policy, approver identity, approval timestamp, and expiration. Changing any bound input voids the approval.
 16. Implement restore and deployment as idempotent operations with explicit ambiguous, conflict, and quarantine states.
@@ -93,7 +93,7 @@ Rejected as the complete architecture only because provisioning belongs in DABs.
 
 ### Native hybrid
 
-Accepted. DABs provision; Databricks Jobs execute the single guarded mutation path; Genie Workbench governs history, approvals, and promotion; Unity Catalog Delta is the durable and coordination authority; Genie API read-back proves live state.
+Accepted. DABs provision; the Workbench app performs everyday create/edit mutations and Databricks Jobs perform governed operations, all through one shared version-capture and coordination gate; Genie Workbench governs history, approvals, and promotion; Unity Catalog Delta is the durable and coordination authority; Genie API read-back proves live state.
 
 ## Implementation Constraints
 
@@ -106,7 +106,7 @@ Accepted. DABs provision; Databricks Jobs execute the single guarded mutation pa
 - Do not implement a universal SQL rewrite engine in the first release.
 - Do not use unrestricted string replacement across `serialized_space`.
 - Do not claim that every transient direct UI edit can be recovered.
-- Route optimizer apply and restore through the guarded Job path; retire the in-process, non-atomic `revert.py`.
+- Route every mutation through the shared version-capture + coordination gate. Everyday Workbench create/edit run in-app; governed operations (optimizer apply, restore, promotion, reconciliation) run through Jobs. Retire the in-process, non-atomic `revert.py`.
 - Require explicit user-selected source and target CLI profiles; never auto-select or rely on a default profile for production promotion.
 
 ## Follow-Up Decisions
