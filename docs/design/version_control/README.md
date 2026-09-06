@@ -210,6 +210,8 @@ Append-only authoritative observations:
 | `benchmark_fingerprint` | Canonical benchmark identity |
 | `metadata_fingerprint` | Governed top-level metadata identity |
 | `canonicalizer_version` | Version of comparison rules |
+| `optimizer_run_id` | Optimizer run that produced this version, when `origin` is `optimizer` |
+| `champion_id` | Optimizer champion applied to the live agent, when applicable |
 | `release_id` | Optional promotion release association |
 
 Application and deployment principals should not receive `UPDATE` or `DELETE` privileges on this table; enrollment is the only `INSERT` path for coordination rows (see below).
@@ -436,6 +438,14 @@ Restore is a governed operation that runs through a Databricks Job (never the in
 
 Never automatically compensate after an ambiguous result if doing so could overwrite an unrelated direct edit. Preserve the observed state and require reconciliation.
 
+### Optimizer Reconciliation
+
+The Genie Space Optimizer explores many iterations and selects a champion. Its detailed iteration, baseline, and champion telemetry stays in the optimizer's own history and is **not** promoted into the version ledger. Only the **final applied state** becomes a version:
+
+- When the optimizer **applies a champion** to the live agent, that apply flows through the shared version-capture and coordination gate and produces **one immutable version**, tagged `origin: optimizer`, with `optimizer_run_id` and `champion_id` linking back to the optimizer's own record.
+- Intermediate iterations and unapplied candidates are never written to `genie_space_versions`. A run that is abandoned, or whose champion is not applied, creates no version.
+- Net: one optimizer run yields at most one new version — the applied champion — fully attributable and reconciled like any other governed write. Reviewers can drill into the run's internals through the linked `optimizer_run_id`.
+
 ## Cross-Workspace Promotion
 
 Promotion is **pull-based**: `immutable version -> portable package -> immutable mapping -> target-local preflight -> approval -> target-local execution -> receipt`. An application service principal in one workspace has no implicit rights in another, and this design never fixes that by giving one workspace broad credentials into another.
@@ -478,6 +488,38 @@ Do not perform unrestricted text replacement across the serialized document. Map
 6. Scan executable fields for unresolved source identifiers.
 7. Fail closed on ambiguous or unsupported transformations.
 8. Require reviewed explicit overrides when necessary.
+
+## Workbench UI and Front-End
+
+The entire experience lives inside Genie Workbench. Two surfaces are added.
+
+### Overview Page (All Agents)
+
+Each managed agent row shows:
+
+- **Version indicator** — current recorded version number / short id.
+- **Drift badge**, computed from the projected heads (cheap, not a live API call per row, with an on-demand refresh):
+
+| Badge | Meaning |
+|---|---|
+| In sync | Live fingerprint matches the recorded head |
+| Drifted | Live state changed outside Workbench; links to the captured `origin: external` version |
+| Pending release | A version is approved but not yet deployed |
+| Unknown / unreachable | History is incomplete or live state cannot be fetched |
+
+### Agent Page — "Version Control and Promotion" Tab
+
+A dedicated tab on the Genie Agent page provides:
+
+- **History timeline** — every version with version number, actor, origin (`workbench`, `optimizer`, `external`, `restore`, `promotion`), and timestamp.
+- **Diff** — semantic comparison between any two versions (not raw JSON).
+- **Restore / forward** — revert to any historical version or move forward to a newer captured version; both create a new version and never rewrite history.
+- **Reconcile** — shown when drifted; offers adopt / compare / reapply / acknowledge.
+- **Validate** — check target dependencies and permissions and run smoke / benchmark tests before pushing.
+- **Promote** — select a version, resolve the target mapping, validate, request approval, push to a target workspace, and view the returned receipt.
+- **Approvals and audit** — approval records, bound digests, approver identities, and expiry.
+
+These surfaces are read-mostly projections of the durable ledger; all mutations they trigger go through the same version-capture and coordination gate described above.
 
 ## Native Approval Workflow
 
@@ -574,9 +616,10 @@ Accepted. DABs provision; Jobs execute; Workbench governs; Delta is the durable 
 - Extract shared canonicalization and fingerprint services.
 - Add metadata fingerprinting.
 - Create `genie_space_versions` and `genie_space_registry`.
-- Capture authoritative state before and after Workbench and GSO mutations.
+- Capture authoritative state on every write path: Workbench create-agent, in-app edits, and the optimizer champion apply (only the final applied state, tagged `origin: optimizer` with `optimizer_run_id`/`champion_id`).
+- Add capture-on-open so opening an agent realigns the recorded head to live state.
 - Add history and semantic comparison APIs.
-- Add initial version-history UI in Workbench.
+- Add initial version-history UI plus overview-page version indicators and drift badges.
 
 ### Phase 2: Guarded Mutation and Coordination
 
@@ -592,7 +635,7 @@ Accepted. DABs provision; Jobs execute; Workbench governs; Delta is the durable 
 - Reconcile before managed writes and on user refresh.
 - Track observed, approved, and deployed heads separately.
 - Add drift classification, the dual-authority guard, and notifications.
-- Implement adopt, reapply, compare, and manual resolution workflows.
+- Implement adopt, reapply, compare, and manual resolution workflows, surfaced in the agent-page reconcile panel.
 
 ### Phase 4: Native Approvals
 
@@ -606,6 +649,11 @@ Accepted. DABs provision; Jobs execute; Workbench governs; Delta is the durable 
 - Add content-addressed UC Volume packages (same metastore) or Delta Sharing (across metastores) and receipts.
 - Add environment mapping, target preflight, target drift gates, and target-side approval.
 - Apply, read back, test, and record deployment evidence with guarded compensation.
+
+### Phase 5b: Workbench Front-End
+
+- Build the agent-page "Version Control and Promotion" tab: history timeline, semantic diff, restore/forward, reconcile, validate, promote, and approvals/audit.
+- Wire overview-page version indicators and drift badges to the projected heads with on-demand refresh.
 
 ### Phase 6: Hardening
 

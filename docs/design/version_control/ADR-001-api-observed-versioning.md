@@ -48,6 +48,8 @@ The organization requires two distinct capabilities:
 22. Treat an expired lease as suspected failure, not permission to take over: expiry quarantines the binding. Quarantine auto-clears only when the prior attempt's Job run is terminal and live state is stable across repeated reads beyond Genie's maximum server-side request lifetime; otherwise it pages an operator. Never authorize replay from base-equality alone, and never auto-compensate unless preauthorized and live state still matches the recorded post-stage.
 23. Reserve production Genie editing to the executor service principal (humans receive `CAN_RUN`/`CAN_VIEW`) as the one native prevention mechanism, and replace startup `run_as` self-healing with fail-closed verification.
 24. Require at least one production approver to be authorized target-side, evaluated by the target service principal against a target-controlled release-approver group at execution time. A source-workspace-only approval is insufficient.
+25. Capture only the Genie Space Optimizer's **final applied champion** as a version (`origin: optimizer`, with `optimizer_run_id` and `champion_id`); never promote intermediate iterations or unapplied candidates into the version ledger. The optimizer's own iteration and champion telemetry remains separate. One optimizer run yields at most one new version.
+26. Deliver the experience through Workbench-native front-end surfaces: overview-page version indicators and drift badges computed from the projected heads, and a dedicated agent-page "Version Control and Promotion" tab for history, semantic diff, restore/forward, reconcile, validate, promote, and approvals/audit. These surfaces are read-mostly projections of the durable ledger; any mutation they trigger passes through the shared version-capture and coordination gate.
 
 ## Consequences
 
@@ -118,3 +120,5 @@ Accepted. DABs provision; the Workbench app performs everyday create/edit mutati
 - Canonicalizer migration policy.
 - Benchmark and smoke-test promotion thresholds.
 - Whether and when to adopt Lakebase as a transactional coordination backend.
+- Retention and linkage policy between optimizer telemetry and the version ledger.
+- Front-end refresh strategy for drift badges (projection cadence vs. on-demand live checks) at scale.
