@@ -36,8 +36,9 @@ untangling what already exists:
 - **Process-bound creation.** Agent creation is an SSE `StreamingResponse` LLM
   loop with server-side, in-memory session state
   (`backend/services/create_agent_session.py`, plus ~3,446 lines of
-  `create_agent_tools.py`). This state does not exist outside the App process
-  and cannot simply be injected around.
+  `create_agent_tools.py`). It initially *looked* un-headless-able, but a later
+  code-rooted round found the transport seam is ~4 lines and the turn protocol is
+  already externalized — so create is **full scope** on CLI and MCP. See §8a.
 - **Already-clean domain.** `backend/services/config_fingerprint.py` is 261
   lines with **zero** databricks/auth/sdk imports — moving it to a domain layer
   is a `git mv`. A refactor plan whose first-named step is this free rename is
@@ -220,6 +221,7 @@ Toolsets, enabled independently and off-by-default for writes:
 | `optimize` | `start_optimize_run` → `get_optimize_run` → `apply_optimize_run{expected_fingerprint}` | Job |
 | `versions` | `snapshot_version`, `list_versions`, `restore_version` | ledger |
 | `promotion` | `plan_promotion`, `apply_promotion` (bound to immutable version + approved plan + target fingerprint) | ledger + Jobs |
+| `create` | `create_agent_start`, `create_agent_turn` (one call = one turn), `create_agent_get_plan`, `create_agent_apply_plan`, `create_agent_abandon` | warehouse (Tier 1) |
 
 Design rules for MCP:
 - **Long ops never block.** They return an `operation_id`; callers poll
@@ -233,8 +235,61 @@ Design rules for MCP:
 - **Write tools bind `expected_fingerprint` + `idempotency_key`.**
   `expected_fingerprint` is a **precondition, not proof of atomic CAS** — atomic
   compare-and-swap remains the `DeltaLedger` coordination row's job.
-- **Deliberately omit** the conversational create agent over MCP (double
-  reasoning/cost, and it depends on process-bound SSE session state).
+- **Conversational create is FULL SCOPE on both CLI and MCP** (requirement
+  reversal — see §8a). It reuses the *existing* turn protocol: `create_agent.chat()`
+  is already an async generator of transport-agnostic events, the turn boundary is
+  already externalized (`needs_continuation` / `MAX_TOOL_ROUNDS`), so **MCP needs no
+  streaming** — one `create_agent_turn` call = one turn. Writes are gated two-phase:
+  the LLM plans with `create_space`/`update_space` **suppressed**, then a caller-signed
+  plan object is applied via the deterministic `_fast_create` path. No LLM-authored
+  write ever reaches Genie PATCH without explicit caller approval.
+
+---
+
+## 8a. Conversational create — the headless seam (full scope)
+
+A later stress-test round **reversed the earlier decision to defer create**. Create
+must be reachable headless on both CLI and MCP. Re-reading the code showed this is
+far cheaper than feared — the seam already exists:
+
+- `CreateGenieAgent.chat()` is **already an async generator of transport-agnostic
+  dicts** (`tool_call`, `message_delta`, `created`, `done`). The SSE coupling is
+  ~4 lines (`_sse_event()`); `event_stream()` is a keepalive wrapper.
+- The **turn boundary is already externalized**: `done.needs_continuation`,
+  `continuation_count`, `MAX_TOOL_ROUNDS = 15`; the frontend continues by POSTing an
+  empty message. So the loop is already request/response-per-turn — **MCP needs no
+  streaming and no polling infrastructure**; one tool call = one turn.
+- A **deterministic no-LLM apply path already exists** (`_fast_create`:
+  `generate_config → validate_config → create_space`), and `present_plan` is a pure
+  pass-through.
+- Session persistence is **already a half-built port** (L1 in-memory + L2 Lakebase).
+
+**Extraction shape (not a rewrite, not a parallel batch path):**
+
+```
+core/usecases/create/
+  session.py    CreateSession state (serializable; NO _lock, clients, generators)
+  ports.py      SessionStore { InMemory | File | Lakebase/Delta }
+  turn.py       run_turn(ctx, session, message, selections) -> AsyncIterator[Event]
+  drive.py      run_to_completion(...)  # loops run_turn while needs_continuation
+```
+
+- **Web**: unchanged (keeps `_sse_event`).
+- **CLI**: `gwb create chat --session S -m "…" --stream ndjson`, `--interactive`
+  prompts on `pending_decision`; plus explicit `resume`/`message`/`approve` commands.
+- **MCP**: the create toolset above; one turn per call; returns transcript +
+  `next_action` (`waiting_for_input` / `waiting_for_approval` / `done`).
+- **Batch create** (convenience) is a driver loop over the same turn protocol —
+  **never a third code path**.
+
+**Two pre-existing bugs to fix in P0 regardless** (durable/headless sessions make
+them exploitable): (1) `get_session_async()` performs **no identity check** — bind
+`created_by` at start and verify per turn, or a leaked `session_id` is session
+hijack; (2) duplicate-create-on-timeout is already a live bug
+(`test_create_timeout_dedup.py`) — an `idempotency_key` on `create_space`/`update_space`
+is a hard prerequisite. `AgentSession._lock` is a process-local `asyncio.Lock` that
+silently vanishes under durable multi-process sessions — replace with a `turn_seq`
+optimistic-CAS in the store that rejects out-of-order turns.
 
 ---
 
@@ -297,36 +352,137 @@ CI dry-runs every command/tool referenced in every SKILL.md.
 
 ---
 
+## 11a. Regression strategy & safety (the core risk)
+
+A ~7k-line refactor is regression-prone — so the strategy is **extract, don't
+rewrite**, proven by the fact that this repo *already did this once* (PR-0
+extracted scanner scoring into `genie_space_optimizer.iq_scan.scoring`, guarded by
+`test_scanner_parity.py`, which asserts `backend.calculate_score is
+gso.calculate_score` **and** byte-identical fixtures). That "re-export, don't
+re-implement + identity assertion" pattern is the template for every extraction.
+
+**1. Golden JSON is necessary but NOT sufficient — freeze effect traces.**
+Response-body goldens miss the dangerous half. Also capture, under scripted
+dependencies (fixed clock/id/model), an **effect log**: the ordered list of SQL
+statements, `jobs.run_now` params, Genie PATCH bodies, the *actual principal* used,
+and the set of **forbidden** calls that must NOT fire. The extraction gate: old and
+extracted paths produce equivalent **results *and* effect traces**.
+
+Known blind spots and their coverage:
+
+| Blind spot | Coverage |
+|---|---|
+| Coverage already stale (suite hits a route with no decorator) | Enumerate `app.routes`; CI fails on any route without a fixture |
+| Router-level mutable globals (`_live_fp_cache` keyed by principal; legacy-schema cache) | Run every fixture cold+warm, assert equality, reset globals, hoist behind a `Cache` port |
+| Auth-dependent branches (`call_with_sp_fallback`, on-Apps sniff) | Matrix {OBO user, SP fallback} × {on-Apps, local}; assert *which branch fired* |
+| Side effects invisible to response goldens (`/trigger`, `/apply`, `/revert`) | Effect-log golden (SQL + Job params + PATCH bodies) |
+| Nondeterminism (timestamps, run_ids, floats) | Canonical scrubber by key-path allowlist; fail if a scrubbed key's type/shape changes |
+| Error contracts (`HTTPException` status/detail are frontend contract) | Freeze 4xx/5xx bodies, incl. legacy-schema fallback |
+| Type coercion (`_delta_accuracy_to_unit_scale` — 0.9 vs 90) | Compare parsed JSON *and* assert key-presence sets |
+
+Use property tests only where there is a real invariant (canonicalization
+idempotence, config-key-order independence in `config_fingerprint.py`). Freeze
+*intended* compatibility, not known-unsafe behavior; document deliberate changes
+separately.
+
+**2. Regression-testing the nondeterministic LLM loop — never grade prose.**
+- **Cassettes:** record real `_async_stream_llm` chunk streams + tool results;
+  replay deterministically. Assert on (a) tool-call **name+args sequence**, (b)
+  event-type sequence, (c) `config_fingerprint()` of the final config (a pure,
+  SDK-free **deterministic oracle** for a nondeterministic producer), (d)
+  `session.history` shape.
+- **Contract-test all ~19 tools** (`handle_tool_call` is a plain dict dispatch).
+- **The repair functions ARE the regression suite.** `_try_repair_json`,
+  `_heal_orphaned_tool_calls`, `_repair_config`, `_recover_config_from_history`,
+  `_sanitize_messages` (+ `test_compaction_400.py`) are each a scar from a real
+  model misbehavior — each needs a cassette that *reproduces* the misbehavior, or
+  the next refactor silently deletes the healing.
+- **`_fast_create` is fully golden-testable** (no LLM) — make it the default apply
+  path so nondeterminism is confined to *planning*.
+- **Live-model canary — invariants, not equality.** Nightly seeded scenarios
+  assert: config validates, tables ⊆ requested schemas, **zero write tools in
+  plan-only mode**, rounds ≤ 15, cost < budget. Trend plan quality; alert on drift,
+  don't fail per-run.
+
+**3. Resumability & idempotency — reconcile, never replay.** For any durable
+mutation the sequence is: persist pending action → obtain approval where required →
+execute with an idempotency key → **persist the result before continuing**. If a
+process dies after a remote create/PATCH but before recording success, mark the
+action **outcome-unknown and reconcile** — never blindly replay. `SessionStore`
+must never serialize credentials, SDK clients, generators, or live tasks; trusted
+execution context is reconstructed each invocation.
+
+**4. Safe rollback — flags, shadow reads only, version-pinning.**
+- **Per-use-case flag read at the edge** (`WB_CORE_<usecase>=legacy|core`); the
+  router keeps both paths for one release.
+- **Shadow-compare reads only** (`WB_SHADOW=1` runs legacy+core, returns legacy,
+  logs normalized diffs). **Never shadow writes** — `/trigger` would launch two
+  Jobs; comparing LLM loops replays one recorded stream, never two live loops.
+- **Pin each session/operation to its implementation version** — a flag flip must
+  never route a half-completed new session into the old in-memory code. Sessions
+  carry `schema_version` and the new core **refuses to load** an old format (the
+  1-hour `SESSION_TTL` self-clears format-rollback risk).
+- The deprecated `get_workspace_client()` reader is the **migration bridge, not a
+  rollback plan** — and reverting code does **not** undo an already-applied Genie
+  change. **No schema-changing migration in the same release as an extraction.**
+
+**Release gate for headless conversational create (no partial credit):**
+write-tool suppression + two-phase apply · `idempotency_key` on create/update ·
+bound session identity · `turn_seq` CAS · effect journal + crash reconciliation ·
+cassette coverage of the repair functions · per-surface flags · the existing web
+SSE contract still passing. Minimum defensible meaning of "full conversational
+create, headless and safe": **CLI and MCP each complete a multi-turn create, pause
+for approval, survive reconnect, and recover an interrupted mutation without
+duplicating it — while the web SSE contract still passes.**
+
+---
+
 ## 12. Phased research roadmap (not an implementation commitment)
 
-- **P0 — Extraction groundwork.** Invert the ContextVar via `run_in_context`;
-  golden-fixture-freeze the `auto_optimize` responses *before* touching them;
-  `git mv` the already-pure domain (`config_fingerprint`, plus the pure parts of
-  `genie_client`, `uc_client`) into core.
-- **P1 — Read surface, both transports.** Tier-0/1 CLI
-  (`gwb agents/config/scan/analyze/diff`, `--json`) **and** the read-only MCP
-  toolset over the same core — proving the parity contract before any write
-  exists. MCP *writes* wait for durable operations.
-- **P2 — `FileLedger` + safe lifecycle.** snapshot / restore / diff /
-  promotion-package. Where a no-UI team gets real value with zero provisioning.
+Create is now **full scope** and lands in P1/P2 (not deferred).
+
+- **P0 — Extraction groundwork + safety harness.** Build the **effect-trace
+  harness** across all 22 routes (route-table–driven so CI fails on any route
+  without a fixture; matrixed over the OBO/SP/on-Apps identity cases; cold/warm
+  cache runs). Invert the ContextVar via `run_in_context` with deprecation
+  logging (it must carry identity across `ThreadPoolExecutor` submits). `git mv`
+  the already-pure domain (`config_fingerprint`, pure parts of `genie_client`,
+  `uc_client`) into core with `test_scanner_parity`-style **identity assertions**
+  (re-export, don't re-implement). **Fix two pre-existing bugs now:** bind create
+  session identity, and add `idempotency_key` to `create_space`/`update_space`.
+- **P1 — Read surface + safe create (both transports).** Tier-0/1 read CLI +
+  read MCP over the same core (proving the parity contract). **Headless create in
+  its safe 80%:** `gwb create plan` (write tools suppressed) → `gwb create
+  apply-plan` (`_fast_create`), same two tools over MCP. `WorkbenchContext` +
+  `SessionStore` port; lift `run_turn` out of `event_stream`; cassette harness for
+  the LLM loop. MCP *governed writes* still wait for durable operations.
+- **P2 — Full conversational create + `FileLedger` + safe lifecycle.** Full
+  multi-turn `create chat` (NDJSON/interactive) on CLI and the MCP turn tools;
+  durable `SessionStore` with `turn_seq` CAS + effect journal + reconcile-on-crash;
+  budget caps → `budget_exhausted`; typed `pending_decision`. `FileLedger`
+  snapshot / restore / diff / promotion-package for no-UI teams.
 - **P3 — Durable operations + governed hosting.** Unify handles under
   `Operation` over the existing Job; `DeltaLedger`; hosted MCP as a headless App
   with OBO; AI Gateway registration.
 - **P4 — Promotion + publication.** promotion with approval gates;
   `gwb skills publish` → UC Skills; Supervisor integration.
 
-**Explicitly deferred / out of scope:** conversational create over MCP; a
-`query_space` data-plane tool; MCP-as-subprocess-of-CLI; hand-written UC Skills
-parallel to SKILL.md; a Workbench-side authz layer; any write attributed to a
-service principal standing in for a human.
+**Still explicitly out of scope:** a `query_space` data-plane tool;
+MCP-as-subprocess-of-CLI; hand-written UC Skills parallel to SKILL.md; a
+Workbench-side authz layer; any write attributed to a service principal standing
+in for a human; any **LLM-authored** write reaching Genie without a caller-signed
+plan.
 
 ---
 
 ## 13. Open questions (record, don't over-debate)
 
-1. **`create` headless-ness.** Deterministic `create_agent_from_config` is
-   cheap and P2-viable; the conversational SSE author is last or never headless.
-   Exact seam for extracting session state is unresolved.
+1. **MCP shape for conversational create.** Resolved to full scope (§8a). One
+   narrow open item: whether the one-call-per-turn model (opus — exploits the
+   existing empty-message continuation) is sufficient, or whether a richer
+   `operation_id` + event-cursor + optional-notifications surface (astra) is needed
+   for very long executions. Start with one-turn-per-call; add async only if a
+   concrete op needs it.
 2. **Inline execution backend.** Whether a second `ExecutionBackend` impl is
    warranted now, or whether "inline" is mostly a test double that should be
    added only for concrete operations that need it.

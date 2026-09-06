@@ -86,6 +86,64 @@ separate. Holds where the code supports it:
 
 ---
 
+## Round 2 — regression stress-test under full-scope create
+
+The user (a) **rejected deferring conversational create** — it must be reachable on
+both CLI and MCP — and (b) asked both heads to stress-test whether the refactor is
+regression-ridden given its scale.
+
+**🟠 opus.** Re-read the create-flow code and materially reversed itself: the seam
+it earlier said "didn't exist" is already there. `create_agent.chat()` is already a
+transport-agnostic async generator (SSE coupling ≈ 4 lines); the turn boundary is
+already externalized (`needs_continuation`, `MAX_TOOL_ROUNDS=15`), so **MCP needs no
+streaming — one call = one turn**; a deterministic `_fast_create` apply path already
+exists; the session store is already half-built (L1 memory + L2 Lakebase). Safety
+falls out of existing code: run the loop with `create_space`/`update_space`
+suppressed → caller signs a plan → deterministic apply. On regression: golden JSON
+is necessary but insufficient (7 evidenced blind spots — stale route coverage,
+principal-keyed mutable caches, auth-branch matrix, **invisible side effects → add an
+effect-log golden**, scrubber-hidden nondeterminism, error contracts, type
+coercion); template = **re-export + identity assertion** (the repo's own
+`test_scanner_parity.py`); LLM loop via **cassettes** freezing tool-call sequence +
+`config_fingerprint()` oracle, never prose; **"the repair functions ARE the
+regression suite."** Rollback: per-use-case edge flags, **shadow reads only**,
+deprecated-reader bridge, session `schema_version` refusal, no migration+extraction
+in one release. Flagged two pre-existing bugs to fix in P0: no identity check in
+`get_session_async()`, and duplicate-create-on-timeout (idempotency key required).
+Corrected its own tier table: **create is Tier 1**, not Tier 2.
+
+**🔵 astra.** Conceded create is now a release requirement on both surfaces, but
+"extract the existing behavior, don't rewrite the 3,446-line tool loop." Golden
+responses are "necessary and dangerously incomplete" → freeze an **effect trace**
+(ordered SDK/model/storage calls + actual principal + forbidden calls). Seam =
+transport-independent **driver + `SessionStore` port**, batch-create only as a
+convenience over the same loop; capabilities `start/submit_message/get(cursor)/
+resolve_approval/cancel`, turns serialized by an **expected session revision**,
+deduped by request id. Non-negotiable: an **effect journal** — persist pending →
+approve → execute-with-idempotency → persist result before continuing; crash after
+remote create but before recording = **outcome-unknown → reconcile, never replay**;
+never serialize creds/clients/generators. LLM testing: scripted fake model +
+sanitized record/replay + per-tool contracts; live models judged on invariants, not
+prose. Rollback: **pin each session/operation to its implementation version**;
+shadow pure derivations only, never live create/PATCH; "the deprecated auth reader
+is a migration bridge, not a rollback plan — reverting code doesn't undo an applied
+Genie change."
+
+**Convergence:** create moves onto the critical path and is headless-able by
+extracting a transport-independent driver over the *existing* turn protocol + a
+`SessionStore` port (not a rewrite, not a parallel batch path); freeze **effect
+traces**, not just JSON; test the LLM loop by freezing the tool-call sequence + a
+config fingerprint (never prose); two-phase safe create (plan with writes
+suppressed → caller-approved apply); **idempotency + reconcile-never-replay**;
+rollback via per-surface flags, shadow-reads-only, version-pinning, and no
+migration+extraction in the same release.
+
+**Narrow residual differences:** (1) MCP create shape — opus's one-call-per-turn
+vs astra's richer operation_id+cursor(+optional notifications) for long runs;
+(2) how much is already "free" (opus quantified it from code); (3) create's tier
+(opus corrected to Tier 1, vindicating astra's "local foreground" framing for
+create specifically).
+
 ## Converged decisions (now in README.md)
 
 1. Extraction, not packaging, is the project.
@@ -123,3 +181,16 @@ separate. Holds where the code supports it:
    concrete op needs it (astra). *Open.*
 5. **Create extraction seam** — deterministic `create_agent_from_config` is
    viable; the conversational SSE author is last/never headless. *Open.*
+
+## Round 2 additions to converged decisions
+
+12. Conversational create is **full scope** on CLI and MCP, extracted over the
+    existing turn protocol (§8a); no LLM-authored write reaches Genie without a
+    caller-signed plan (two-phase: suppress write tools → approve plan →
+    `_fast_create`).
+13. Regression safety = **effect-trace goldens** (not just JSON) + **re-export
+    with identity assertion** + **cassettes/invariants** for the LLM loop +
+    **idempotency & reconcile-never-replay** + **shadow-reads-only / version-pinned**
+    rollback. Fix two pre-existing bugs first: create session identity binding and
+    create idempotency keys.
+
