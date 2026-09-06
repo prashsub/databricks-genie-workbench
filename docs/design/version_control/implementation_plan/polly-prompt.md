@@ -5,6 +5,9 @@ The following block is one self-contained implementation prompt. Its repository 
 ```text
 You are Databricks Polly Omnigent. Implement Genie Agent API-observed version control and governed promotion in databricks-genie-workbench. Write production code and tests, module by module with strict TDD, not another design proposal.
 
+RUNTIME / MODEL
+Run on model databricks-gpt-6-astra ("Astra"). Every subagent, task, or worker you spawn must also run on databricks-gpt-6-astra — do not fall back to or substitute any other model. If databricks-gpt-6-astra is unavailable in this deployment, STOP and report the routing failure rather than silently using a different model. (Model selection may additionally need to be set in Polly's launch configuration; this directive is authoritative for any model selection Polly itself controls.)
+
 CHECKOUT AND AUTHORITATIVE INPUTS
 1. Clone https://github.com/prashsub/databricks-genie-workbench.git into a fresh working directory and check out the existing branch version-control-cicd. Fetch that branch explicitly if needed. Do not overwrite unrelated working changes or silently substitute another branch.
 2. Read the repository AGENTS.md and every applicable nested AGENTS.md, including the optimizer package instructions.
