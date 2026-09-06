@@ -29,8 +29,9 @@ Git and GitHub may continue to store the Genie Workbench **application source co
 The architecture is built from:
 
 - **Databricks Declarative Automation Bundles (DABs)** — provisioning only.
-- **Databricks Jobs and Workflows** — the sole execution/mutation plane.
-- **Databricks CLI and Python SDK** — invoked from Jobs, never with an auto-selected profile.
+- **Databricks Jobs and Workflows** — the execution plane for governed operations (restore, promotion, reconciliation, optimizer champion apply).
+- **Genie Workbench application** — executes everyday create/edit as the user, through the same shared version-capture and coordination gate.
+- **Databricks CLI and Python SDK** — used by both the app and Jobs with explicit executor authentication; never an auto-selected profile.
 - **Genie REST APIs** — the authoritative source of live state via read-back.
 - **Unity Catalog Delta tables** — durable, append-only version and operation facts, and the v1 coordination authority.
 - **Lakebase** — an optional future transactional coordination backend (not required for the first release).
@@ -55,7 +56,7 @@ Neither Git nor a DAB alone can meet the version-control requirement: changes ma
 DABs now expose `resources.genie_spaces` (with `file_path` or inline `serialized_space`) and `databricks bundle generate genie-space --existing-id ... --watch --force` (CLI >= 1.3.0, `engine: direct`). Rejecting DAB-first is therefore an **authority choice, not a capability claim**:
 
 - Bundle state would believe it owns `serialized_space` and re-assert a stale document on the next `bundle deploy`, overwriting out-of-band edits the system is required to preserve.
-- `bundle deploy` runs against a target host from a CLI context, which turns promotion into "a human runs a CLI with production credentials" — violating the no-leave-Workbench constraint and centralizing cross-workspace credentials.
+- Driving promotion through `bundle deploy` places release control in a bundle/CLI deployment path rather than inside Workbench, and tends to centralize cross-workspace credentials — conflicting with the no-leave-Workbench and least-privilege constraints. (This is an authority objection, not a claim that bundles must be run by a human.)
 - `bundle generate genie-space --watch --force` is a shipped command that overwrites local outputs from remote state; a subsequent deploy is the competing write. Bundle-managed Genie content is therefore an active dual-authority hazard, not a hypothetical one.
 
 The registry marks each managed space `governed_by=workbench`, and the reconciler flags any governed space that also appears in bundle state. See **Dual-Authority Guard** below.
@@ -72,14 +73,16 @@ Genie Workbench already has several components that should be generalized rather
 - `backend/services/genie_client.py` can retrieve complete Genie Agent state, including `serialized_space`. The write path is `PATCH /api/2.0/genie/spaces/{space_id}` with `{"serialized_space": json.dumps(...)}` — effectively a **whole-document replace (last-writer-wins)** — plus a **separate** top-level `description` PATCH.
 - `backend/routers/auto_optimize.py` has conservative current-version and drift checks that avoid declaring drift when history is incomplete.
 - `packages/genie-space-optimizer/` stores optimization snapshots and distinguishes submitted configuration from authoritative post-write observations. Its `revert.py` performs best-effort, **non-atomic**, in-process compensation — which is the source of the unrecoverable partial-write behavior this design replaces with a guarded Job path.
-- `databricks.yml` provisions the optimization Job and supporting deployment resources, but not the complete Genie Agent lifecycle. The application itself is deployed by `deploy.sh`, not the bundle.
-- Lakebase is currently optional and may fall back to in-memory state. That fallback must never authorize version-changing operations.
+- `databricks.yml` provisions the optimization Job and supporting deployment resources, but not the complete Genie Agent lifecycle. The application itself is deployed by `scripts/deploy.sh`, not the bundle; the transition from script-based deployment to DAB provisioning is an implementation task.
+- Lakebase support already exists in `backend/services/lakebase.py` and `backend/services/gso_lakebase.py`; it is optional and may fall back to in-memory state. Retained telemetry/session use is fine, but that fallback must never authorize version-changing operations.
 
-Existing optimizer history is useful but is not a universal version ledger. It captures optimization-specific baselines, iterations, and champions rather than every Workbench, UI, API, restore, or promotion change.
+The create flow to integrate lives in `backend/routers/create.py` and `backend/services/create_agent.py` (with `create_agent_session.py`, `create_agent_tools.py`, and `genie_creator.py`); follow-on writes from these paths must also pass through the gate. The exact location of the optimizer `revert.py` and the startup `run_as` self-healing behavior are asserted from prior inspection and must be re-verified at implementation time.
+
+Existing optimizer history is useful but is not a universal version ledger. It captures optimization-specific baselines, iterations, and champions rather than every managed, external, optimizer, restore, or promotion change.
 
 ### No conditional-update API
 
-The Genie API exposes **no ETag, If-Match, or conditional-update token** in the supported workspaces (confirmed against the current client). Server-side optimistic concurrency is therefore unavailable, and safety must be built in this control plane. See **Safe Write and Concurrency Model**.
+V1 assumes **no usable conditional-update capability in its supported deployment matrix** and deliberately retains the existing two-PATCH client protocol. (A request-body `etag` and combined `serialized_space`+`description` update are documented in Public Preview; this design does not rely on preview behavior and treats optimistic concurrency as unavailable until verified in the target deployments.) Safety is therefore built in this control plane. See **Safe Write and Concurrency Model**.
 
 ## Requirements
 
@@ -123,7 +126,7 @@ The system can guarantee preservation of:
 
 It cannot guarantee recovery of every intermediate external edit. If a user makes two direct UI edits between reconciliation runs, only the state visible at the next API read may be recoverable unless Databricks exposes a complete configuration event stream.
 
-**"Never silently overwrite" is a governed-writer policy, not an unconditional API guarantee.** Because Genie provides no conditional update, the honest guarantee is two-tier:
+**"Never silently overwrite" is a governed-writer policy, not an unconditional API guarantee.** Because Genie provides no conditional update, the honest guarantee is three-part:
 
 - **Prevention by ACL where ACLs are enforced.** In production, humans receive `CAN_RUN`/`CAN_VIEW` and editing is reserved to the Workbench/executor service principal, so routine writes flow only through governed, version-captured paths.
 - **Serialization of governed writers always.** Every writer we control — Workbench, optimizer, restore, reconciliation, promotion — is serialized per binding by a generation-fenced admission row.
@@ -198,7 +201,7 @@ Append-only authoritative observations:
 | `observed_at` | Observation timestamp |
 | `observation_reason` | Managed write, reconciliation, restore, deployment, or manual refresh |
 | `observed_by` | User, application principal, deployment principal, or unknown |
-| `origin` | Workbench, UI, API, GSO, promotion, restore, or unknown |
+| `origin` | `workbench`, `external`, `optimizer`, `restore`, `promotion`, or `unknown` (distinct from `observed_by`, which is the observer identity, not the inferred change author) |
 | `parent_version_id` | Previous observed or reconciliation-base version |
 | `restored_from_version_id` | Historical source when created by restore |
 | `operation_id` | Correlated governed operation |
@@ -293,11 +296,12 @@ Because Genie exposes no conditional-update API, advisory leases and fencing tok
 
 Coordination uses Delta optimistic concurrency: a `MERGE` against a single per-binding row conflicts on same-row writes under Serializable/WriteSerializable isolation, so a losing concurrent writer fails or no-ops. This is a genuine compare-and-swap, subject to three invariants:
 
-1. **Exactly one row per binding.** Delta does not enforce primary keys, so enrollment is the *only* `INSERT` path (executors are denied `INSERT`), the admission `MERGE` requires exactly one matching ownership row and aborts otherwise, and a reconcile check quarantines any binding with more than one row.
+1. **Exactly one row per binding.** Delta primary/unique constraints are informational and do not prevent concurrent duplicate enrollment, so uniqueness is an explicit protocol invariant: enrollment is **serialized** and is the *only* `INSERT` path, the admission `MERGE` requires exactly one matching ownership row and aborts otherwise, and a reconcile check quarantines any binding with more than one row. Enforcing insert-only vs update-only authority requires Unity Catalog fine-grained DML privileges (separate INSERT/UPDATE/DELETE, in Beta as of August 2026) on compatible compute; without them, `MODIFY` is broader than the intended authority. Append-only fact tables set `delta.appendOnly=true`, and runtime principals must not be able to alter that property.
 2. **Generation, not identity.** Acquisition increments `generation` and binds a unique `attempt_id`. Renewal and the pre-PATCH re-assert require the same `(attempt_id, generation)`. A predicate keyed on the shared deployer SP identity would let a stale worker pass its own ownership check and must not be used.
-3. **One atomic admission transition.** A single `MERGE` binds `active_operation_id`, the idempotency key (equal to the full request digest), `approval_digest`, `expected_base_fingerprint`, and `generation` together, at Serializable isolation. The same idempotency key with a *different* request digest is a hard rejection, never a dedup. The authoritative acquisition test is reading `holder`/`generation`/`attempt_id` back, not the statement exit code.
+3. **One write-authorizing admission transition, at Serializable isolation** (pin Serializable; do not leave it as "Serializable/WriteSerializable"). A single `MERGE` on the existing ownership row (no `INSERT` branch in executor admission) binds `active_operation_id`, a distinct `idempotency_key` and `request_digest` (scoped to the target binding — keep them as separate columns, not one value), the consumed `approval_id`/`approval_digest`, the committed preimage version id, `expected_base_fingerprint`, and `generation`. The same `idempotency_key` with a *different* `request_digest` is a hard rejection, never a dedup. The authoritative acquisition test is reading `holder`/`generation`/`attempt_id` back, not the statement exit code.
+4. **Durable approval and idempotency consumption must survive row reuse.** Because the mutable coordination row is overwritten by the next operation, completed-operation and consumed-approval facts live in the append-only `genie_space_operations`/approval records, not only in the coordination row. Before authorizing, check durable completed/consumed records under exclusive binding ownership; CAS-bind an approval to exactly one operation and durably publish its consumption before the row is reused. A crash must preserve the unresolved claim; define safe *same-operation* resume versus forbidden approval reuse.
 
-Delta-only means "admit the command" and "durably record the pre-write evidence" are a single commit. Where an operation must update several tables, use a deliberately checkpointed protocol; four tables do not become atomic merely by residing in Delta.
+Admission does not assume a cross-table transaction. Because `genie_ops_coordination` and `genie_space_versions` are separate securables, the protocol is: (a) **reserve** the binding without authorizing any Genie write; (b) fetch and **commit the immutable preimage evidence** to the version table; (c) perform **one write-authorizing compare-and-swap** on the coordination row that binds the operation id, generation, consumed approval, and the committed preimage version id/digest. No PATCH precedes that CAS. The rule is "admission atomically binds already-committed evidence," not "evidence and admission are one commit." Databricks does support multi-table transactions under explicit catalog-commit/compute prerequisites, but this design does not depend on that.
 
 ### The two-PATCH write
 
@@ -308,8 +312,8 @@ A Genie write is two non-atomic operations: the `serialized_space` PATCH (whole-
 3. **Capture pre-state durably** (config + description) before any write. This is the "preserve external state before overwrite" guarantee and runs unconditionally.
 4. **Compare against the base the approver actually reviewed**, not merely the ledger head. On mismatch, preserve the observed state and block (`conflicted`); offer adopt / reapply / compare / acknowledge; no override without break-glass.
 5. **Re-assert `(attempt_id, generation)`** immediately before writing; abort if lost.
-6. **PATCH `serialized_space`.** On timeout or 5xx, do **not** blindly retry. Re-GET: matches intent → done; ambiguous → quarantine (`applied_unverified`). Base-equality alone never authorizes replay, because the original request may still be pending server-side.
-7. **Checkpoint, then handle `description`.** Record the intervening observation. Complete the description PATCH only when the observed configuration matches the expected normalized result and the description still matches its approved preimage; if unrelated configuration drift appeared, completion is permitted only under an explicitly approved field-independent policy and the operation is still classified `conflicted`. Otherwise stop at `applied_partial`. Because configuration, benchmark, and metadata are fingerprinted separately, a partial application is precisely diagnosable.
+6. **PATCH `serialized_space`.** On timeout or 5xx, do **not** blindly retry. A matching read-back records an *observed* match but does not prove the timed-out request has terminated, so it does not by itself resolve the attempt or authorize another writer. Keep the attempt unresolved and block subsequent PATCHes until the recovery condition (trusted termination evidence) is satisfied; classify `applied_unverified`. Base-equality alone never authorizes replay.
+7. **Checkpoint, then handle `description`.** Record the intervening observation. Complete the description PATCH only when the observed configuration matches the expected normalized result and the description still matches its approved preimage; if unrelated configuration drift appeared, completion is permitted only under an explicitly approved field-independent policy and the operation is still classified `conflicted`. Otherwise stop at `applied_partial`. Because configuration, benchmark, and metadata are fingerprinted separately, a partial application is precisely diagnosable. Fencing, re-assertion, ambiguous-outcome handling, and retry suppression apply to the description PATCH exactly as to the `serialized_space` PATCH.
 8. **GET again** and persist the authoritative post version with `operation_id`, `attempt_id`, `generation`, `parent_version_id`, and `restored_from_version_id`.
 9. **Verify and test.** Compare observed vs. intended fingerprints (expect normalization), run smoke/benchmark checks, and record a terminal state conditioned on the fencing generation.
 
@@ -317,7 +321,7 @@ A Genie write is two non-atomic operations: the `serialized_space` PATCH (whole-
 
 - **Expired lease does not authorize takeover.** Expiry transitions the binding to `quarantined`; it never grants ownership.
 - **Ambiguous outcome quarantines the binding.** No blind retry, no unconditional compensation. Auto-compensation is allowed only when preauthorized *and* live state still matches this operation's recorded post-stage state.
-- **Operable quarantine exit.** A binding auto-clears only on two signals: (1) the prior attempt's Job run is in a terminal state per the Jobs API, and (2) live state (config + description fingerprints) is stable across at least three consecutive GETs spanning longer than Genie's maximum server-side request lifetime. Both signals plus a recorded classification against the last checkpoint clear quarantine and bump the generation; either signal missing keeps it quarantined and pages an operator. This keeps conservative recovery operable rather than requiring an unsafe "force clear" button.
+- **Quarantine exit requires trusted termination evidence for the *exact* prior attempt, regardless of executor type.** Signal 1 is proof the prior attempt can issue no further writes: a terminal Job execution (including retries and child runs) for Job-executed operations, or a specified app-worker termination mechanism for everyday Workbench writes. Lease expiry or a missing heartbeat is **not** termination proof. Signal 2 is live-state stability across at least three consecutive GETs spanning longer than Genie's maximum server-side request lifetime, measured from *after* established termination. Both signals plus a recorded classification against the last checkpoint clear quarantine and bump the generation; either missing keeps it quarantined and pages an operator. Automatic clearance depends on the request-lifetime bound being verified (see Open Questions); **until it is verified, automatic clearance is unavailable and quarantine clears only by audited human action.**
 - **Per-workspace serialization is a throttle, not a safety property.** Per-binding admission is the only correctness mechanism; any per-workspace serialization must carry an explicit "not a safety mechanism" note so it can be relaxed later.
 
 ### Fail-closed rule
@@ -340,10 +344,11 @@ This reduces dual-authority risk but does not fully neutralize workspace adminis
 
 Creating a Genie Agent through the Workbench create-agent flow is a first-class mutation and **initiates version control immediately**. There is no prior state to preserve, so the flow:
 
-1. Registers a stable logical `space_key` in `genie_space_registry` and marks it `governed_by=workbench`.
-2. Acquires the coordination row for the new binding.
-3. Creates the agent through the Genie API and reads it back.
-4. Persists the authoritative read-back as the **first immutable version** (`origin: workbench`, no `parent_version_id`).
+1. Registers a stable logical `space_key` in `genie_space_registry` with a **provisional binding** (no `space_id` yet) and marks it `governed_by=workbench`, plus a durable create-intent record. The physical binding cannot be acquired first because `space_id` only exists after the create response.
+2. Creates the agent through the Genie API. On a **lost/ambiguous response**, do not blindly replay the create and do not match by display name; resolve the possible orphan through an audited step, then continue.
+3. Appends the physical `(workspace_id, space_id)` binding to the registry and persists the returned identity **before any follow-on edit**.
+4. Reads the agent back and persists the authoritative read-back as the **first immutable version** (`origin: workbench`, no `parent_version_id`).
+5. Records binding revision/tombstone events so approvals cannot outlive a delete-and-human-rebind.
 
 From that point the agent is under version control and every subsequent change — in-app edit, optimizer, restore, promotion, or an externally observed change — appends a new version.
 
@@ -376,7 +381,7 @@ The live Genie Agent is the source of truth. Whenever a user **opens a Genie Age
 2. If its fingerprints differ from the latest recorded version, **immediately persist the observed live state as a new version** tagged `origin: external`, with `parent_version_id` pointing at the previous recorded version — **before** presenting anything to the user. Preserving the external state must never depend on a user decision.
 3. Only then surface the change and offer the reconciliation choices (adopt / compare / reapply / acknowledge).
 
-This keeps history continuous and truthful even for changes made through the Databricks UI or direct APIs, and guarantees the recorded head is realigned to the live agent on every open.
+Capturing external state realigns only the **observed** head; it must **not** update the approved or deployed heads or clear drift — an unapproved external change stays visibly drifted against policy. Concurrent opens must be serialized so they do not regress the head, duplicate the same observation, or mislabel an active managed-PATCH checkpoint as `external`. If persistence fails, show history as stale and disable reconciliation actions rather than claiming a successful realignment.
 
 ### External Drift Reconciliation
 
@@ -412,8 +417,8 @@ Suggested drift states:
 
 When a new external state is found, save it before offering:
 
-- **Adopt:** Generate a portable artifact from the observed version and record it as an approved desired state in Workbench.
-- **Reapply:** Reapply the approved or deployed version after confirmation.
+- **Adopt:** Capture the observed version and file an *adoption request*; recording it as the approved desired state must satisfy the same approval policy (in production, full approval — a capture is not an approval).
+- **Reapply:** Reapplying the approved or deployed version is a governed write that obtains **fresh authorization bound to the newly captured target base**; a confirmation button must never resurrect an approval invalidated by the drift.
 - **Compare:** Review semantic differences.
 - **Merge manually:** Required for overlapping instructions, joins, SQL, or benchmark changes.
 - **Acknowledge:** Record intentional environment-specific divergence where policy permits it.
@@ -444,7 +449,7 @@ The Genie Space Optimizer explores many iterations and selects a champion. Its d
 
 - When the optimizer **applies a champion** to the live agent, that apply flows through the shared version-capture and coordination gate and produces **one immutable version**, tagged `origin: optimizer`, with `optimizer_run_id` and `champion_id` linking back to the optimizer's own record.
 - Intermediate iterations and unapplied candidates are never written to `genie_space_versions`. A run that is abandoned, or whose champion is not applied, creates no version.
-- Net: one optimizer run yields at most one new version — the applied champion — fully attributable and reconciled like any other governed write. Reviewers can drill into the run's internals through the linked `optimizer_run_id`.
+- Net: a run produces **at most one champion version** (`origin: optimizer`). Any external preimage observation discovered at apply time, or recovery evidence, is an *additional* version and is not an optimizer iteration version — so "capture every managed write" and "never capture intermediate iterations" both hold. Candidate evaluation must not mutate the managed binding; use isolated optimizer-owned evaluation resources. Reviewers drill into run internals through the linked `optimizer_run_id`.
 
 ## Cross-Workspace Promotion
 
@@ -464,7 +469,9 @@ Promotion is **pull-based**: `immutable version -> portable package -> immutable
 
 ### Target-Local Databricks Job Responsibilities
 
-- Receive an **operation id only**, then fetch the approved package and recompute its digest itself (nothing in transit can be substituted).
+- **Dispatch:** target-local Jobs discover pending operation ids for their own `workspace_id` (e.g. target-local polling of an inbound table/Volume, or a file-arrival trigger). "Receive an operation id" is a payload contract, not a dispatch mechanism.
+- Fetch the approved package and recompute its digest itself (nothing in transit can be substituted).
+- Treat outbound packages, target approvals, and receipts as **separate securables** (Volume path prefixes are not independent grant boundaries); target receipts live in target-owned storage and are reverse-shared. Content-addressing detects substitution but does not prevent deletion or overwrite.
 - Load environment mappings and verify their fingerprint against the approval.
 - Fetch target live state and block unexplained drift.
 - Capture the target pre-deployment version.
@@ -502,8 +509,8 @@ Each managed agent row shows:
 
 | Badge | Meaning |
 |---|---|
-| In sync | Live fingerprint matches the recorded head |
-| Drifted | Live state changed outside Workbench; links to the captured `origin: external` version |
+| In sync | Live fingerprint matches the **approved/deployed** policy-relevant state (not merely the latest observed head, which capture-on-open keeps equal to live) |
+| Drifted | Live state diverges from the approved/deployed state; links to the captured `origin: external` version |
 | Pending release | A version is approved but not yet deployed |
 | Unknown / unreachable | History is incomplete or live state cannot be fetched |
 
@@ -576,10 +583,11 @@ Rejected as the complete architecture only because provisioning belongs in DABs.
 
 ### Native hybrid
 
-Accepted. DABs provision; Jobs execute; Workbench governs; Delta is the durable and coordination authority; Genie read-back proves live state.
+Accepted. DABs provision; the Workbench app performs everyday create/edit and Databricks Jobs perform governed operations, all through one shared version-capture and coordination gate; Workbench governs history, approvals, and promotion; Delta is the durable and coordination authority; Genie read-back proves live state.
 
 ## Security Model
 
+- **Capture-on-open in production needs a trusted reader.** Exporting `serialized_space` requires `include_serialized_space=true` and at least `CAN_EDIT`; production humans limited to `CAN_VIEW`/`CAN_RUN` cannot perform full capture through OBO alone. Assign production configuration reads to a trusted target-local service identity (which therefore holds edit-capable Genie permission), authorize history/snapshot viewing separately in Workbench, and do not elevate ordinary viewers merely to enable capture.
 - Use separate observer and deployer service principals where practical; the deployer SP is strictly more powerful than any human user, so Jobs must re-verify requester authorization server-side.
 - Grant the observer only the permissions required to retrieve tracked configurations.
 - Grant the deployer update access only to managed target Spaces and required workspace folders.
@@ -616,16 +624,15 @@ Accepted. DABs provision; Jobs execute; Workbench governs; Delta is the durable 
 - Extract shared canonicalization and fingerprint services.
 - Add metadata fingerprinting.
 - Create `genie_space_versions` and `genie_space_registry`.
-- Capture authoritative state on every write path: Workbench create-agent, in-app edits, and the optimizer champion apply (only the final applied state, tagged `origin: optimizer` with `optimizer_run_id`/`champion_id`).
-- Add capture-on-open so opening an agent realigns the recorded head to live state.
+- **Phase 1 is observation-only:** record versions from reads (including capture-on-open, which realigns only the observed head) without enabling any governed write path yet.
 - Add history and semantic comparison APIs.
 - Add initial version-history UI plus overview-page version indicators and drift badges.
 
-### Phase 2: Guarded Mutation and Coordination
+### Phase 2: Guarded Mutation and Coordination (first write-enabled milestone)
 
-- Create `genie_space_operations` and `genie_ops_coordination`.
-- Implement Delta compare-and-swap admission (unique row, generation, atomic transition).
-- Route every mutation through the shared version-capture + coordination gate: everyday Workbench create/edit in-app, and governed operations (optimizer apply, restore, promotion) through Jobs; retire in-process `revert.py`.
+- Create `genie_space_operations` and `genie_ops_coordination`. **No write path is enabled until coordination, mandatory pre-write drift checks, and fail-closed behavior exist.**
+- Implement Delta compare-and-swap admission (serialized enrollment, unique row, generation, atomic write-authorizing transition binding already-committed preimage evidence).
+- Route every mutation through the shared version-capture + coordination gate: everyday Workbench create/edit in-app, and governed operations (optimizer champion apply, restore, promotion) through Jobs; retire in-process `revert.py`.
 - Add authoritative read-back verification, `applied_unverified`/`applied_partial` handling, and quarantine with the two-signal exit.
 - Replace `run_as` startup self-healing with fail-closed verification.
 
@@ -668,8 +675,9 @@ The first milestone demonstrates durable pre/post history, arbitrary-version res
 
 - **Concurrency:** two concurrent governed writers on one `space_key` produce exactly one admitted mutation sequence (which may legitimately contain both a config and a description PATCH) plus one `conflicted`/`quarantined` row — never two independent overwrites.
 - **Dual authority:** a `bundle deploy` of a `governed_by=workbench` space is detected and flagged within one reconcile cycle.
-- **Fail-closed:** when the coordination authority is unavailable, all version-changing operations stop and history browsing still works.
-- **Recovery:** an ambiguous PATCH outcome results in quarantine, not a blind retry, and clears only on the two-signal condition.
+- **Fail-closed:** when the coordination authority is unavailable, all version-changing operations stop; history browsing continues when only coordination writes fail, though a shared Delta/UC outage may also affect reads.
+- **Recovery:** an ambiguous PATCH outcome results in quarantine, not a blind retry, and clears only on trusted-termination + stability signals (or audited human action until the request-lifetime bound is verified).
+- **Failure coverage:** description-PATCH timeout, app-worker crash mid-write, lost create response, concurrent opens, duplicate enrollment, historical approval reuse, and crashes between the evidence, CAS, and PATCH stages are each exercised.
 
 ## Open Questions
 
