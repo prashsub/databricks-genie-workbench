@@ -3,6 +3,7 @@
 from .bundles import deployment_inventory, guard_bundle
 from .provisioning import provision
 from .permissions import verify_coordination_permissions, verify_fact_permissions
+from .capabilities import storage_write_ready
 
 from collections.abc import Callable
 from threading import RLock

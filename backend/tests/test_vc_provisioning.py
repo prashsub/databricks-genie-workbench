@@ -136,3 +136,21 @@ def test_executor_cannot_insert_coordination_and_enrollment_is_serialized(live_p
     assert job["settings"]["max_concurrent_runs"] == 1
     assert job["settings"]["queue"]["enabled"] is True
     assert job["settings"]["run_as"]["service_principal_name"] == live_platform.principal("enrollment")
+
+
+def test_missing_fine_grained_dml_or_serializable_disables_writes():
+    check = getattr(platform, "storage_write_ready", None)
+    assert callable(check), "Unknown or unsupported capabilities must deny every write"
+    valid = dict(fine_grained_dml=True, serializable=True, nonowner_runtime=True,
+                 append_only=True, enrollment_isolated=True)
+    probe = Mock(return_value=valid)
+    assert check(probe) is True
+    for capability in valid:
+        for value in (False, None, "true", 1):
+            probe.return_value = dict(valid, **{capability: value})
+            assert check(probe) is False
+        probe.return_value = {key: value for key, value in valid.items() if key != capability}
+        assert check(probe) is False
+    probe.side_effect = TimeoutError("warehouse unavailable")
+    assert check(probe) is False
+    assert check(None) is False

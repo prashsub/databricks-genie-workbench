@@ -11,6 +11,7 @@ No live profile was selected and no platform mutations were attempted.
 | t04 | Existing draft test fails: missing `provision` callable | Corrected draft names to VC/1.0; validate complete owner set, digests, idempotence and owner verification before ordered execution/grants. Owner DDL/runner delivery remains a deployment blocker. |
 | t05 | Missing effective fact-permission verifier assertion | Offline append-only/nonowner/exact SELECT+INSERT checks pass. Real positive INSERT and denied UPDATE/DELETE/ALTER/DROP/REPLACE probes written and integration-marked: NOT EXECUTED, deployment blocker. |
 | t06 | Missing coordination grant verifier assertion | Separate nonowner INSERT enrollment and UPDATE-only executor; serialized queued enrollment and exact Serializable required. Real grant/isolation/Job probes marked integration, NOT EXECUTED. Concurrent enrollment/CAS proof still depends on M02/M03 live suites. |
+| t07 | Missing storage capability gate assertion | Every missing/false/nonboolean capability and probe outage disables writes; no MODIFY fallback or cached success. |
 
 Integration tests live in the three owned `test_vc_*.py` files (not the plan's
 unowned `integration/test_vc_permissions.py`). They import the owned integration
