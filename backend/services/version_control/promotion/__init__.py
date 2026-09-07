@@ -1,7 +1,7 @@
 """Target-local cross-workspace promotion."""
 
 from backend.services.version_control import contracts as vc
-from .packages import build, encode
+from .packages import build, encode, immutable_put
 
 
 class PromotionService:
@@ -17,8 +17,8 @@ class PromotionService:
         manifest, files = build(version, mapping, policy)
         prefix = f'{self.outbound_volume}/sha256/{manifest.package_digest}'
         for name, content in files.items():
-            self.store.put_if_absent(f'{prefix}/{name}', content)
+            immutable_put(self.store, f'{prefix}/{name}', content)
         reference = vc.PackageRef(manifest.package_digest, f'{prefix}/manifest.json')
-        self.store.put_if_absent(reference.manifest_uri, encode(manifest))
+        immutable_put(self.store, reference.manifest_uri, encode(manifest))
         self.store.publish(reference)
         return reference

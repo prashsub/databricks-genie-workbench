@@ -15,6 +15,12 @@ def digest(value):
     return sha256(encode(value)).hexdigest()
 
 
+def immutable_put(store, path, content):
+    store.put_if_absent(path, content)
+    if store.read(path) != content:
+        raise ValueError('Immutable artifact collision or incomplete upload')
+
+
 def mapping_digest(mapping):
     return vc.canonical_json_hash('vc-mapping/1', vc.to_wire(mapping), digest_field='mapping_digest')
 

@@ -71,3 +71,28 @@ def test_package_pins_immutable_source_and_excludes_source_environment_ids(packa
     for filename, digest in manifest['file_digests'].items():
         assert sha256(rig.store.read(prefix + '/' + filename)).hexdigest() == digest
     rig.ledger.get_version.assert_called_once_with(rig.source, rig.version.version_id)
+
+
+@pytest.mark.parametrize('failure', ['collision', 'missing', 'equal'])
+def test_existing_digest_path_is_never_overwritten_and_incomplete_package_not_published(package_rig, failure):
+    rig = package_rig
+    reference = rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
+    original = dict(rig.store.files)
+    rig.store.published.clear()
+    artifact_path = reference.manifest_uri.replace('manifest.json', 'artifact.json')
+    if failure == 'equal':
+        assert rig.service.package(rig.version.version_id, rig.mapping, rig.policy) == reference
+        assert rig.store.files == original
+    else:
+        rig.store.files.pop(reference.manifest_uri)
+        if failure == 'collision':
+            rig.store.files[artifact_path] = b'substituted'
+        else:
+            rig.store.files.pop(artifact_path)
+            rig.store.put_if_absent = Mock()
+        with pytest.raises((ValueError, KeyError)):
+            rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
+        assert reference.manifest_uri not in rig.store.files
+        assert not rig.store.published
+        if failure == 'collision':
+            assert rig.store.files[artifact_path] == b'substituted'
