@@ -111,6 +111,20 @@ class ApprovalService:
         record = self.get(request.approval_id)
         inputs = record.request.inputs
         self._fresh(inputs, record.request.requested_at)
+        if executor.workspace_id != inputs.target_binding.workspace_id or executor.actor_kind != 'service':
+            raise PermissionError('Target service executor required')
+        target = self.target_identity(executor)
+        target.verify_run_as(executor.execution_ref, executor.principal_id)
+        if inputs.target_binding.environment == 'dev' and inputs.operation_type == 'edit':
+            if not self.identity.can_edit(inputs.requester_id, inputs.target_binding):
+                raise PermissionError('Requester edit right required')
+            return AuthorizationGrant(inputs.target_binding, request.identity,
+                                      f'rights:{inputs.operation_id}:{input_digest(inputs)}',
+                                      inputs.expected_base_fingerprints, inputs.rendered_target_digest,
+                                      inputs.expires_at, None, None)
+        if inputs.operation_type in ('release', 'promotion') and 'release-requesters' not in self.identity.groups(
+                inputs.requester_id, inputs.target_binding.workspace_id):
+            raise PermissionError('Requester release policy group required')
         approvers = {vote.approver_id for vote in record.votes if vote.decision == 'approve'}
         if (len(approvers) < 2 or any(vote.decision != 'approve' for vote in record.votes)
                 or inputs.requester_id in approvers or executor.principal_id in approvers):
@@ -118,10 +132,6 @@ class ApprovalService:
         if any('approvers' not in self.identity.groups(subject, inputs.target_binding.workspace_id)
                for subject in approvers):
             raise PermissionError('Approver policy membership revoked')
-        if executor.workspace_id != inputs.target_binding.workspace_id or executor.actor_kind != 'service':
-            raise PermissionError('Target service executor required')
-        target = self.target_identity(executor)
-        target.verify_run_as(executor.execution_ref, executor.principal_id)
         if not any('target-approvers' in target.groups(subject, executor.workspace_id) for subject in approvers):
             raise PermissionError('Target-side approver membership required')
         return AuthorizationGrant(inputs.target_binding, request.identity, record.request.approval_id,

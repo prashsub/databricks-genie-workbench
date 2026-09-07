@@ -260,3 +260,23 @@ def test_approval_writes_default_off_and_non_utc_expiry_rejected():
         service.request(context.bound, context.identity.actors['requester'])
     with pytest.raises(ValueError, match='UTC'):
         replace(context.bound, expires_at=NOW.replace(tzinfo=None))
+
+
+def test_dev_grant_requires_requester_edit_right_but_release_requires_policy_group():
+    context = setup_approval(environment='dev')
+    submit(context)
+    grant = context.service.authorize(context.request, context.executor)
+    assert grant.authorization_reference.startswith('rights:')
+    assert grant.approval_id is None
+    context.identity.edit_rights.clear()
+    with pytest.raises(PermissionError, match='edit right'):
+        context.service.authorize(context.request, context.executor)
+    release = setup_approval(environment='dev', operation_type='release')
+    approve(release)
+    with pytest.raises(PermissionError, match='release policy'):
+        release.service.authorize(release.request, release.executor)
+    release.identity.memberships[('requester', '123')] = frozenset({'release-requesters'})
+    assert release.service.authorize(release.request, release.executor).approval_id == uid(2)
+    release.target_identity.memberships.clear()
+    with pytest.raises(PermissionError, match='Target-side'):
+        release.service.authorize(release.request, release.executor)
