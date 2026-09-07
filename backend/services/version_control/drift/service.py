@@ -10,13 +10,34 @@ class Classification(vc.DriftResult):
     common_base: str | None = None
     policy_target: str | None = None
     allowed_actions: tuple[str, ...] = ()
+    quarantined: bool = False
+    unresolved_operation_id: str | None = None
+    conflicted: bool = False
 
 
 class DriftService:
     def __init__(self, *, canonicalizer: vc.Canonicalizer):
         self.canonicalizer = canonicalizer
 
-    def classify(self, heads: vc.Heads, versions: vc.VersionLookup, reachability: str):
+    def classify(self, heads: vc.Heads, versions: vc.VersionLookup, reachability: str, *,
+                 unresolved_operation_id=None, quarantined=False, conflicted=False):
+        reasons = []
+        state = None
+        if quarantined:
+            state = vc.DriftState.UNKNOWN
+            reasons.append("Binding quarantined; manual identity/recovery resolution required")
+        if conflicted:
+            state = vc.DriftState.CONFLICTED
+            reasons.append("Conflicting policy authority")
+        if unresolved_operation_id:
+            state = vc.DriftState.APPLIED_UNVERIFIED
+            reasons.append("Unresolved operation; application not verified")
+        if reachability != "reachable":
+            state = vc.DriftState.UNREACHABLE if reachability == "unreachable" else vc.DriftState.UNKNOWN
+            reasons.append("Live state unreachable" if reachability == "unreachable" else "Reachability unknown")
+        if state is not None:
+            return Classification(state, tuple(reasons), quarantined=quarantined,
+                                  unresolved_operation_id=unresolved_operation_id, conflicted=conflicted)
         if None in (heads.observed, heads.approved, heads.deployed):
             return Classification(vc.DriftState.UNKNOWN, ("Missing policy or observation head",))
         try:

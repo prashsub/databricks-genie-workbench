@@ -74,3 +74,28 @@ def test_meaningful_changes_are_not_clean(change):
         vc.Heads(version_id(2), version_id(1), version_id(1)),
         lookup({version_id(1): before, version_id(2): after}), "reachable")
     assert result.state == vc.DriftState.EXTERNAL_AHEAD
+
+
+@pytest.mark.parametrize("reachability,unresolved,quarantined,conflicted,expected", [
+    ("unreachable", None, False, False, "unreachable"),
+    ("reachable", version_id(9), False, False, "applied_unverified"),
+    ("reachable", None, True, False, "unknown"),
+    ("reachable", None, False, True, "conflicted"),
+    ("unreachable", version_id(9), True, True, "unreachable"),
+    ("unknown", None, False, False, "unknown"),
+])
+def test_unreachable_and_unverified_override_ordinary_badges(
+        reachability, unresolved, quarantined, conflicted, expected):
+    from backend.services.version_control.drift import DriftService
+
+    versions = lookup({version_id(1): snapshot("same")})
+    result = DriftService(canonicalizer=FakeCanonicalizer()).classify(
+        vc.Heads(*(version_id(1),) * 3), versions, reachability,
+        unresolved_operation_id=unresolved, quarantined=quarantined, conflicted=conflicted)
+    assert result.state.value == expected
+    assert result.quarantined is quarantined
+    assert result.unresolved_operation_id == unresolved
+    assert result.conflicted is conflicted
+    assert result.allowed_actions == ()
+    assert result.reasons
+    versions.get.assert_not_called()
