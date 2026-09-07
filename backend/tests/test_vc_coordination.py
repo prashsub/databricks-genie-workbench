@@ -85,6 +85,106 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+@pytest.mark.parametrize('cause', ['reviewed-base', 'different-digest', 'revoked-grant',
+                                    'uncommitted-preimage', 'consumed-approval'])
+def test_definite_presend_rejection_releases_binding_and_publishes_conflict(h, cause):
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    before = h.store.read(h.binding.binding_id)
+
+    if cause == 'reviewed-base':
+        h.grant = replace(h.grant, expected_base_fingerprints=replace(
+            h.grant.expected_base_fingerprints, config='9' * 64))
+    elif cause == 'different-digest':
+        # A prior durable fact bound this idempotency key to a different digest.
+        other = c.RequestIdentity(uid(), h.request.idempotency_key, 'e' * 64)
+        h.service._fact(before, other, c.FactStatus.CONFIRMED)
+    elif cause == 'revoked-grant':
+        h.validate_authorization.return_value = False
+    elif cause == 'uncommitted-preimage':
+        h.ledger.verify_committed.return_value = False
+    elif cause == 'consumed-approval':
+        h.facts.approval_use.side_effect = lambda b, a: c.ApprovalUse(
+            b, a, (c.FactRef(uid(), 'k', 'd' * 64),), (uid(),), False)
+
+    with pytest.raises(CoordinationError):
+        h.service.admit(reservation, h.preimage, h.grant)
+
+    # 2. row released to IDLE, all attempt identity cleared.
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.IDLE and not row.unresolved
+    assert row.attempt_id is None and row.holder is None
+    assert row.approval_id is None and row.pre_version_id is None
+    # 3. heads / observed_sequence preserved.
+    assert row.heads == c.Heads(None, None, None)
+    assert row.observed_sequence == before.observed_sequence
+
+    # 4. exactly one durable fact for this key names the rejected request.
+    facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows
+             if c.from_wire(c.OperationFact, r.payload).binding == h.binding
+             and c.from_wire(c.OperationFact, r.payload).request.idempotency_key == h.request.idempotency_key
+             and c.from_wire(c.OperationFact, r.payload).request.request_digest == h.request.request_digest]
+    assert len(facts) == 1
+    f = facts[0]
+    assert f.fact_kind == c.FactKind.OPERATION
+    assert f.status == c.FactStatus.CONFLICTED
+    assert f.attempt_id == reservation.fence.attempt_id
+    assert f.request == h.request
+
+    # 5. the rejected fence is dead.
+    with pytest.raises(CoordinationError):
+        h.service.renew(reservation.fence)
+    with pytest.raises(CoordinationError):
+        h.service.assert_owner(reservation.fence)
+
+    # 6. binding is not bricked: a fresh reserve succeeds.
+    h.request = c.RequestIdentity(uid(), 'key-fresh', 'a' * 64)
+    fresh = h.service.reserve(h.binding, h.request, h.executor)
+    assert isinstance(fresh, c.Reservation)
+
+    # 7. after expiry there is nothing to quarantine.
+    h.service.renew(fresh.fence)  # keep alive
+    row = h.store.read(h.binding.binding_id)
+    assert row.state != c.CoordinationState.QUARANTINED
+
+
+def test_drift_conflict_leaves_binding_observable_and_reusable(h):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    # Reviewed-base drift: committed preimage differs from the reviewed base.
+    h.grant = replace(h.grant, expected_base_fingerprints=replace(
+        h.grant.expected_base_fingerprints, config='9' * 64))
+    with pytest.raises(CoordinationError):
+        h.service.admit(reservation, h.preimage, h.grant)
+
+    # observe_exclusively succeeds and yields a lease.
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    assert lease.observed_sequence == 1
+
+    # advance_heads records the external observation.
+    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
+    version_id = uid()
+    context = c.CaptureContext(h.binding, 'observer-1', h.clock.now(), 'open',
+        c.ActorContext('observer', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
+        attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
+    h.ledger.get_version.return_value = c.Version(version_id, snapshot, context)
+    heads = h.service.advance_heads(lease.fence, c.HeadUpdate(version_id, None, None, None))
+    assert heads == c.Heads(version_id, None, None)
+
+    # A new reserve + admit against the newly captured base succeeds.
+    h.request = c.RequestIdentity(uid(), 'key-reapply', 'a' * 64)
+    newfp = h.grant.expected_base_fingerprints
+    h.preimage = c.ObservationRef(version_id, h.binding.binding_id, 1,
+                                  newfp.state_digest, '5' * 64)
+    h.grant = replace(h.grant, request=h.request)
+    reservation2 = h.service.reserve(h.binding, h.request, h.executor)
+    claim = h.service.admit(reservation2, h.preimage, h.grant)
+    assert isinstance(claim, c.AdmissionClaim)
+
+
 def test_conflict_facts_carry_the_rejected_requests_own_identity(h):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier

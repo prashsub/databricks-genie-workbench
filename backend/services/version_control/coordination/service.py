@@ -240,16 +240,17 @@ class CoordinationService:
                 or authorization.expires_at <= self.clock.now()
                 or bool(authorization.approval_id) != bool(authorization.approval_digest)
                 or not self._io(self.validate_authorization, authorization, reservation.executor)):
-            raise CoordinationError('Authorization is stale, mismatched or revoked')
+            self._reject(row, reservation.request, 'Authorization is stale, mismatched or revoked')
         if (preimage.binding_id, preimage.binding_revision) != (
                 row.binding.binding_id, row.binding.binding_revision):
-            raise OwnershipError('Preimage belongs to another binding/revision')
+            self._reject(row, reservation.request,
+                         'Preimage belongs to another binding/revision')
         if isinstance(preimage, c.ObservationRef):
             if not self._io(self.ledger.verify_committed, preimage):
-                raise CoordinationError('Preimage not committed')
+                self._reject(row, reservation.request, 'Preimage not committed')
             if preimage.state_digest != authorization.expected_base_fingerprints.state_digest:
-                self._fact(row, reservation.request, c.FactStatus.CONFLICTED)
-                raise CoordinationError('Committed preimage differs from reviewed base')
+                self._reject(row, reservation.request,
+                             'Committed preimage differs from reviewed base')
             evidence = dict(pre_version_id=preimage.version_id,
                             preimage_digest=preimage.state_digest, create_intent_event_id=None)
         elif isinstance(preimage, c.CreateIntentRef):
@@ -257,7 +258,8 @@ class CoordinationService:
                     or preimage.operation_id != reservation.request.operation_id
                     or preimage.request_digest != reservation.request.request_digest
                     or not self._io(self.verify_create_intent, preimage)):
-                raise CoordinationError('Committed provisional create intent required')
+                self._reject(row, reservation.request,
+                             'Committed provisional create intent required')
             evidence = dict(pre_version_id=None, preimage_digest=None,
                             create_intent_event_id=preimage.event_id)
         else:
@@ -266,7 +268,8 @@ class CoordinationService:
         if authorization.approval_id is not None:
             use = self._io(self.facts.approval_use, row.binding, authorization.approval_id)
             if use.ambiguous or use.consumptions or use.operation_ids:
-                raise CoordinationError('Consumed or ambiguous approval cannot authorize another attempt')
+                self._reject(row, reservation.request,
+                             'Consumed or ambiguous approval cannot authorize another attempt')
         row = self._cas(row, lambda r: (r.state == c.CoordinationState.RESERVED
             and r.lease_expires_at > self.clock.now()
             and authorization.expires_at > self.clock.now()),
@@ -303,13 +306,35 @@ class CoordinationService:
                              approval_consumption_published=True)
         return row
 
-    def _history(self, row, request):
-        history = self._io(self.facts.lookup_request, row.binding, request.idempotency_key)
+    @staticmethod
+    def _presend(row):
+        """Durable proof that no Genie mutation can have been issued for this attempt."""
+        return (row.mutation_stage in {None, c.PatchStage.CONFIG_PENDING}
+                and 'resume_classification' not in (row.checkpoint or {}))
+
+    def _history_raw(self, row, idempotency_key):
+        """lookup_request + ambiguity check ONLY. No digest predicate, so _reject can call it."""
+        history = self._io(self.facts.lookup_request, row.binding, idempotency_key)
         if history.ambiguous:
             raise CoordinationError('Ambiguous durable request history')
+        return history
+
+    def _reject(self, row, request, message, *, status=c.FactStatus.CONFLICTED):
+        """Definite pre-send rejection: publish the terminal fact, then free the binding."""
+        if not self._presend(row):
+            raise AuthorityUnavailable('Possible send cannot be closed as a definite rejection')
+        ref = self._fact(row, request, status)
+        if not any(f.event_id == ref.event_id
+                   for f in self._history_raw(row, request.idempotency_key).facts):
+            raise AuthorityUnavailable('Rejection fact not durably verified; row stays unresolved')
+        self._release(row)
+        raise CoordinationError(message)
+
+    def _history(self, row, request):
+        history = self._history_raw(row, request.idempotency_key)
         if any(f.request.request_digest != request.request_digest for f in history.facts):
-            self._fact(row, request, c.FactStatus.CONFLICTED)
-            raise CoordinationError('Idempotency key already bound to a different request digest')
+            self._reject(row, request,
+                         'Idempotency key already bound to a different request digest')
         return history
 
     def _release(self, row, *, generation=None):
