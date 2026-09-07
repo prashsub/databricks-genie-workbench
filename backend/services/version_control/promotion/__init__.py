@@ -13,6 +13,29 @@ class PromotionService:
     def __init__(self, **ports):
         self.__dict__.update(ports)
 
+    def dispatch_pending(self, target_workspace_id, cursor=None):
+        if self.flags.enabled('vc_promotion_enabled') is not True or target_workspace_id != self.workspace_id:
+            raise PermissionError('Only enabled target-local dispatch is allowed')
+        executor = self._executor(self.identity.executor(self.target_selection))
+        candidates = self.pending.scan(target_workspace_id, cursor)
+        handles = []
+        for candidate in candidates.items:
+            if candidate.status != vc.OperationStatus.REQUESTED:
+                continue
+            operation = self.facts.get_request(candidate.operation_id)
+            request = operation.request
+            if (not isinstance(request, vc.MutationRequest) or request.operation_type != 'promotion'
+                    or request.binding.workspace_id != target_workspace_id
+                    or request.identity.operation_id != candidate.operation_id or operation.approval is None
+                    or operation.approval.status != vc.FactStatus.APPROVED):
+                continue
+            try:
+                self.approvals.authorize(request, executor)
+            except PermissionError:
+                continue
+            handles.append(self.dispatcher.submit_local(candidate.operation_id, 'promotion'))
+        return vc.DispatchPage(tuple(handles), candidates.next_cursor)
+
     def execute(self, operation_id, executor):
         if self.flags.enabled('vc_promotion_enabled') is not True:
             raise PermissionError('Promotion writes disabled')

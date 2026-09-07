@@ -15,3 +15,4 @@ All commands run from the m07 worktree. Each numbered task is committed separate
 | 8 | Named recomputation test: 8 NotImplementedError failures | Promotion: 13 passed; source bytes also re-canonicalized |
 | 9 | 5 DID NOT RAISE failures: source approval, host/workspace, run_as, DEFAULT | Promotion: 19 passed |
 | 10 | 7 DID NOT RAISE failures: missing/revised binding, drift, busy/stale/quarantine/unknown | Promotion: 26 passed |
+| 11 | Named polling test: NotImplementedError | Dispatch: 1 passed |
