@@ -237,3 +237,21 @@ def test_same_key_different_digest_rejected_after_row_reuse(h):
     with pytest.raises(CoordinationError, match='digest'):
         reserve(h)
     assert h.store.read(h.binding.binding_id).state != c.CoordinationState.ADMITTED
+
+
+def test_duplicate_completed_request_returns_receipt_without_admission(h):
+    from backend.services.version_control.coordination import ExistingReceipt
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    complete(h, claim)
+    original_id = h.request.operation_id
+    h.request = replace(h.request, operation_id=uid())
+    before = h.store.read(h.binding.binding_id).generation
+    with pytest.raises(ExistingReceipt) as caught:
+        reserve(h)
+    assert caught.value.receipt.operation_id == original_id
+    assert caught.value.receipt.status == c.FactStatus.CONFIRMED
+    row = h.store.read(h.binding.binding_id)
+    assert row.generation == before + 1
+    assert not row.unresolved and row.state == c.CoordinationState.IDLE

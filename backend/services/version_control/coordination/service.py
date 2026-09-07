@@ -18,6 +18,14 @@ class AuthorityUnavailable(CoordinationError):
     pass
 
 
+class ExistingReceipt(CoordinationError):
+    """Non-admitting result channel; preserves the frozen reserve() return type."""
+
+    def __init__(self, receipt: c.OperationFact):
+        super().__init__('Request already completed; return original durable receipt')
+        self.receipt = receipt
+
+
 class CoordinationService:
     def __init__(self, *, store, facts: c.OperationFacts, ledger: c.VersionLedger,
                  clock, resolve_binding, verify_enrollment, insert_enrolled,
@@ -129,7 +137,14 @@ class CoordinationService:
         except OwnershipError:
             self._fact(row, operation, c.FactStatus.CONFLICTED)
             raise
-        self._history(row, operation)
+        history = self._history(row, operation)
+        receipts = [f for f in history.facts if f.fact_kind == c.FactKind.RECEIPT]
+        if receipts:
+            identities = {(f.operation_id, f.status, f.post_version_id) for f in receipts}
+            if len(identities) != 1:
+                raise CoordinationError('Ambiguous completed receipts')
+            self._release(row)  # This reservation never acquired write authority.
+            raise ExistingReceipt(receipts[0])
         return c.Reservation(self._fence(row), operation, executor, row.lease_expires_at)
 
     def _owned(self, fence, *, allow_quarantine=False):
