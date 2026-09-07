@@ -5,6 +5,7 @@ from hashlib import sha256
 import json
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control.platform.identity import canonical_host
 from .packages import build, digest, encode, immutable_put, mapping_digest, policy_digests, portable
 
 
@@ -15,6 +16,7 @@ class PromotionService:
     def execute(self, operation_id, executor):
         if self.flags.enabled('vc_promotion_enabled') is not True:
             raise PermissionError('Promotion writes disabled')
+        executor = self._executor(executor)
         operation = self.facts.get_request(operation_id)
         request = operation.request
         release, manifest, mapping, policy, artifact, rendered = self._inputs(operation_id)
@@ -44,11 +46,32 @@ class PromotionService:
         if (inputs.preflight_evidence_digest != evidence.preflight_evidence_digest
                 or inputs.permission_policy_digest != evidence.permission_policy_digest):
             raise ValueError('Target preflight evidence changed')
+        self.approvals.authorize(request, executor)
         return self.gate.execute(request, executor)
 
+    def _executor(self, executor):
+        selection = self.target_selection
+        if (selection.profile is not None and (not selection.profile.strip() or selection.profile.upper() == 'DEFAULT')):
+            raise PermissionError('Explicit non-default target profile or verified OBO required')
+        if (executor.workspace_id != self.workspace_id or canonical_host(executor.host) != self.target_host
+                or selection.workspace_id != self.workspace_id or canonical_host(selection.host) != self.target_host
+                or not executor.execution_ref.startswith('job/')):
+            raise PermissionError('Promotion requires the explicitly selected target-local Job')
+        verified = self.identity.executor(selection)
+        if verified != executor:
+            raise PermissionError('Unverified target executor identity')
+        self.identity.verify_run_as(executor.execution_ref, executor.principal_id)
+        return verified
+
     def preflight(self, operation_id, executor):
+        if self.flags.enabled('vc_promotion_enabled') is not True:
+            raise PermissionError('Promotion writes disabled')
+        executor = self._executor(executor)
         request = self.facts.get_request(operation_id).request
         release, manifest, mapping, policy, artifact, rendered = self._inputs(operation_id)
+        if (request.binding.workspace_id != self.workspace_id or release.target_binding != request.binding
+                or canonical_host(release.target_host) != self.target_host):
+            raise PermissionError('Wrong target release intent')
         environment = rendered.environment
         if not all(environment.get(key) for key in ('warehouse_id', 'parent_path', 'consumers')):
             raise PermissionError('Explicit target warehouse, folder and consumers required')

@@ -13,3 +13,4 @@ All commands run from the m07 worktree. Each numbered task is committed separate
 | 6 | 3 failures: missing target environment, stale binding and injected warehouse accepted | Mapping: 21 passed |
 | 7 | After correcting fixture payload, 5 NotImplementedError failures in named test | Promotion: 5 passed |
 | 8 | Named recomputation test: 8 NotImplementedError failures | Promotion: 13 passed; source bytes also re-canonicalized |
+| 9 | 5 DID NOT RAISE failures: source approval, host/workspace, run_as, DEFAULT | Promotion: 19 passed |

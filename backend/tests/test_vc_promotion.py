@@ -41,6 +41,7 @@ def promotion_rig(package_rig):
     rig.tests.run.return_value = {'validation': {'passed': True}, 'benchmark': {'passed': True}}
     rig.identity = Mock(spec=vc.IdentityProvider)
     rig.identity.can_edit.return_value = True
+    rig.identity.executor.return_value = rig.executor
     rig.gate = Mock(spec=vc.MutationGate)
     rig.registry = Mock(spec=vc.Registry)
     rig.registry.resolve.return_value = rig.target
@@ -53,6 +54,8 @@ def promotion_rig(package_rig):
     rig.service.transformer = MappingTransformer()
     rig.service.workspace_id = 'target'
     rig.service.target_host = rig.executor.host
+    rig.service.target_selection = vc.ExplicitExecutorSelection('target', rig.executor.host, 'target-sp',
+                                                               rig.executor.execution_ref, 'target-profile')
     return rig
 
 
@@ -129,3 +132,26 @@ def test_executor_recomputes_artifact_mapping_render_and_policy_digests(promotio
     else:
         rig.service.execute(rig.request.identity.operation_id, rig.executor)
         rig.gate.execute.assert_called_once_with(rig.request, rig.executor)
+
+
+@pytest.mark.parametrize('case', ['source_only', 'wrong_host', 'wrong_workspace', 'wrong_run_as', 'default_profile', 'disabled'])
+def test_source_only_approval_or_wrong_target_host_cannot_deploy(promotion_rig, case):
+    rig = promotion_rig
+    approve(rig)
+    executor = rig.executor
+    if case == 'source_only':
+        rig.approvals.authorize.side_effect = PermissionError('No target approver remains eligible')
+    elif case == 'wrong_host':
+        executor = replace(executor, host='https://source.example.com')
+    elif case == 'wrong_workspace':
+        executor = replace(executor, workspace_id='source')
+    elif case == 'wrong_run_as':
+        rig.identity.verify_run_as.side_effect = PermissionError('Wrong run_as')
+    elif case == 'default_profile':
+        rig.service.target_selection = replace(rig.service.target_selection, profile='DEFAULT')
+    elif case == 'disabled':
+        from backend.services.version_control.platform.feature_flags import FeatureFlags
+        rig.service.flags = FeatureFlags()
+    with pytest.raises(PermissionError):
+        rig.service.execute(rig.request.identity.operation_id, executor)
+    rig.gate.execute.assert_not_called()
