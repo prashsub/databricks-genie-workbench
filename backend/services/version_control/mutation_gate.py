@@ -180,8 +180,10 @@ class MutationGate:
         context = vc.CaptureContext(
             request.binding, f"{fence.attempt_id}:{reason}", datetime.now(timezone.utc), reason,
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
-            vc.Origin.EXTERNAL if reason == "preimage" else vc.Origin.WORKBENCH,
+            vc.Origin.EXTERNAL if reason == "preimage" else (
+                vc.Origin.RESTORE if request.operation_type == "restore" else vc.Origin.WORKBENCH),
             parent_version_id=parent, operation_id=request.identity.operation_id,
+            restored_from_version_id=request.source_version_id if request.operation_type == "restore" and reason == "postimage" else None,
             attempt_id=fence.attempt_id, generation=fence.generation)
         observation = self.ledger.append_observation(snapshot, context)
         if not self.ledger.verify_committed(observation):
