@@ -133,6 +133,44 @@ def test_reviewed_base_mismatch_preserves_external_preimage_and_blocks(rig):
     rig.transport.patch_description_once.assert_not_called()
 
 
+def test_pre_send_base_conflict_releases_binding_without_quarantine(rig):
+    occupied = False
+    reserve = rig.coordination.reserve.side_effect
+
+    def reserve_exclusively(*args):
+        nonlocal occupied
+        if occupied:
+            raise RuntimeError("An unresolved attempt already owns this binding")
+        occupied = True
+        return reserve(*args)
+
+    def finish_presend(claim, result):
+        nonlocal occupied
+        assert claim.request == rig.identity
+        assert claim.preimage == result.preimage
+        assert result.status == vc.OperationStatus.CONFLICTED
+        assert not result.unresolved
+        assert "config_in_flight" not in rig.trace
+        assert rig.facts.append.call_args.args[0].status == vc.FactStatus.CONFLICTED
+        occupied = False
+
+    rig.coordination.reserve.side_effect = reserve_exclusively
+    rig.coordination.finish.side_effect = finish_presend
+    rig.state["description"] = "external edit"
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.status == vc.OperationStatus.CONFLICTED
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+    assert rig.versions[result.preimage.version_id].snapshot.restorable_metadata["description"] == "external edit"
+    rig.coordination.quarantine.assert_not_called()
+    rig.coordination.finish.assert_called_once()
+    rig.coordination.admit.assert_not_called()
+    corrected = replace(rig.request, identity=vc.RequestIdentity(uid(), "corrected-key", "b" * 64),
+                        expected_base=result.preimage.state_digest)
+    reservation = rig.coordination.reserve(corrected.binding, corrected.identity, rig.executor)
+    assert reservation.request == corrected.identity
+
+
 def test_two_patch_happy_path_checkpoints_and_reasserts_each_send(rig):
     result = rig.gate.execute(rig.request, rig.executor)
     assert result is not None, "Both PATCHes need checkpointed final evidence"

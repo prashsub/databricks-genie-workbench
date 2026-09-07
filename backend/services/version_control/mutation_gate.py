@@ -30,9 +30,9 @@ class MutationGate:
         snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
         preimage = self._capture(request, executor, reservation.fence, snapshot, "preimage")
         if snapshot.state_digest != request.expected_base:
-            self.coordination.quarantine(reservation.fence, "Reviewed base changed before admission")
-            return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.CONFLICTED,
-                                      preimage, None, True, (preimage.version_id,))
+            claim = vc.AdmissionClaim(**vc.to_wire(reservation.fence), request=reservation.request,
+                                      preimage=preimage, approval_id=None, approval_digest=None)
+            return self._finish(request, executor, claim, vc.OperationStatus.CONFLICTED)
         authorization = self.approvals.authorize(request, executor)
         claim = self.coordination.admit(reservation, preimage, authorization)
         desired = self.canonicalizer.observe({
