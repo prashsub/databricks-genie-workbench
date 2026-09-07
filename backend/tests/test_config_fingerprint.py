@@ -10,6 +10,8 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from backend.services.version_control.contracts import canonical_json_hash, to_wire
 
 from backend.services.config_fingerprint import (
@@ -166,6 +168,33 @@ def test_benchmark_change_does_not_change_config_identity() -> None:
     quoted = deepcopy(space)
     quoted["benchmarks"]["questions"][0]["answer"][0]["content"] = ["SELECT '2'"]
     assert adapter.observe(quoted).fingerprints.benchmark != changed.fingerprints.benchmark
+
+
+@pytest.mark.parametrize("envelope", [
+    {"serialized_space": {}},
+    {"serialized_space": "{not json", "_parsed_space": _space()},
+    {"serialized_space": "null"},
+    {"serialized_space": "[]"},
+    {"serialized_space": "{}"},
+    {"serialized_space": {"version": 2}},
+    {"serialized_space": None, "_parsed_space": _space()},
+    {"serialized_space": {"instructions": []}},
+    {"serialized_space": {**_space(), "benchmarks": []}},
+    {"serialized_space": {**_space(), "benchmarks": {"questions": "bad"}}},
+    {"serialized_space": {**_space(), "benchmarks": {"questions": [None]}}},
+    {"serialized_space": {**_space(), "data_sources": {"tables": "bad"}}},
+    {"serialized_space": {**_space(), "version": True}},
+    {"serialized_space": _space(), "description": []},
+    {"description": "missing payload"},
+    {},
+    None,
+])
+def test_malformed_serialized_space_is_rejected_not_empty(envelope: dict) -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    with pytest.raises(ValueError, match="serialized_space|description|envelope"):
+        Canonicalizer().observe(envelope)
+    assert Canonicalizer().observe({"serialized_space": {"instructions": {}}})
 
 
 def test_unwrap_bare_serialized_space() -> None:

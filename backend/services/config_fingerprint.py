@@ -77,11 +77,13 @@ class Canonicalizer:
     """VC/1.0 adapter extending the legacy fingerprint entry point."""
 
     def observe(self, envelope: dict, version: str = "vc-c14n/1") -> Snapshot:
+        if not isinstance(envelope, dict):
+            raise ValueError("envelope must be a JSON object")
         response = deepcopy(envelope)
-        serialized = response.get("serialized_space", response.get("_parsed_space", response))
-        if isinstance(serialized, str):
-            serialized = json.loads(serialized)
+        serialized = _extract_restorable_space(response)
         metadata = {key: response[key] for key in ("description",) if key in response}
+        if "description" in metadata and metadata["description"] is not None and not isinstance(metadata["description"], str):
+            raise ValueError("description must be a string or null")
         canonical = {
             "config": _canonical_config(serialized),
             "benchmark": _canonical_benchmark(serialized),
@@ -105,6 +107,36 @@ class Canonicalizer:
             fingerprints=fingerprints,
             state_digest=fingerprints.state_digest,
         )
+
+
+def _extract_restorable_space(response: dict) -> dict:
+    serialized = response.get("serialized_space", response.get("_parsed_space", response))
+    if isinstance(serialized, str):
+        try:
+            serialized = json.loads(serialized)
+        except ValueError as error:
+            raise ValueError("serialized_space must contain valid JSON") from error
+    if not isinstance(serialized, dict) or not any(key in serialized for key in _SERIALIZED_SPACE_KEYS):
+        raise ValueError("serialized_space must contain a recognized payload section")
+    if "version" in serialized and (type(serialized["version"]) is not int or serialized["version"] < 1):
+        raise ValueError("serialized_space version must be a positive integer")
+    for key in _SERIALIZED_SPACE_KEYS:
+        if key in serialized and not isinstance(serialized[key], dict):
+            raise ValueError(f"serialized_space {key} must be an object")
+    _validate_collections(serialized)
+    return serialized
+
+
+def _validate_collections(node: Any) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _VC_COLLECTION_KEYS:
+                if not isinstance(value, list) or not all(isinstance(entry, dict) for entry in value):
+                    raise ValueError(f"serialized_space {key} must be an array of objects")
+            _validate_collections(value)
+    elif isinstance(node, list):
+        for value in node:
+            _validate_collections(value)
 
 
 def _canonical_benchmark(serialized: dict) -> dict:
