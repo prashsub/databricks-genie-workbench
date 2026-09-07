@@ -179,12 +179,18 @@ class CoordinationService:
             raise
         history = self._history(row, operation)
         receipts = [f for f in history.facts if f.fact_kind == c.FactKind.RECEIPT]
-        if receipts:
-            identities = {(f.operation_id, f.status, f.post_version_id) for f in receipts}
+        completed = [f for f in receipts
+                     if f.status in {c.FactStatus.CONFIRMED, c.FactStatus.NOOP}]
+        if completed:
+            identities = {(f.operation_id, f.status, f.post_version_id) for f in completed}
             if len(identities) != 1:
                 raise CoordinationError('Ambiguous completed receipts')
             self._release(row)  # This reservation never acquired write authority.
-            raise ExistingReceipt(receipts[0])
+            raise ExistingReceipt(completed[0])
+        if receipts:
+            # Terminal non-success: a conflict for the request, not a completion.
+            self._reject(row, operation,
+                         'Request already terminated non-successfully; file a new governed request')
         return c.Reservation(self._fence(row), operation, executor, row.lease_expires_at)
 
     def _owned(self, fence, *, allow_quarantine=False):

@@ -85,6 +85,74 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+@pytest.mark.parametrize('terminal', ['failed', 'conflicted'])
+def test_terminal_non_success_receipt_is_a_conflict_not_a_completion(h, terminal):
+    from backend.services.version_control.coordination import ExistingReceipt
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    status = {'failed': c.OperationStatus.FAILED,
+              'conflicted': c.OperationStatus.CONFLICTED}[terminal]
+    h.service.finish(claim, c.OperationResult(claim.request.operation_id, status,
+        claim.preimage, None, False, ('pre-send-rejected',)))
+    row = h.store.read(h.binding.binding_id)
+    assert not row.unresolved
+
+    # Retry with a new operation_id but the SAME idempotency key + digest.
+    second = replace(h.request, operation_id=uid())
+    h.request = second
+    with pytest.raises(CoordinationError) as caught:
+        reserve(h)
+    # 1. not an ExistingReceipt "completion".
+    assert not isinstance(caught.value, ExistingReceipt)
+    # 2. a new OPERATION/CONFLICTED fact for the SECOND request.
+    facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
+    new = [f for f in facts if f.request.operation_id == second.operation_id
+           and f.fact_kind == c.FactKind.OPERATION and f.status == c.FactStatus.CONFLICTED]
+    assert len(new) == 1
+    # 3. row released.
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.IDLE and not row.unresolved
+    assert row.attempt_id is None
+    # 4. no quarantine on expiry.
+    h.request = c.RequestIdentity(uid(), 'key-later', 'a' * 64)
+    fresh = h.service.reserve(h.binding, h.request, h.executor)
+    h.clock.advance(timedelta(seconds=61))
+    with pytest.raises(CoordinationError):
+        h.service.renew(fresh.fence)
+    # the fresh reserve genuinely expired -> quarantined; but the terminal path
+    # itself did not brick the binding (proved by 3).
+
+
+def test_confirmed_and_noop_receipts_still_return_existing_receipt(h):
+    from backend.services.version_control.coordination import ExistingReceipt
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    complete(h, claim)  # CONFIRMED with committed postimage
+    original_id = claim.request.operation_id
+    h.request = replace(h.request, operation_id=uid())
+    with pytest.raises(ExistingReceipt) as caught:
+        reserve(h)
+    assert caught.value.receipt.status == c.FactStatus.CONFIRMED
+    assert caught.value.receipt.operation_id == original_id
+
+
+def test_mixed_history_prefers_confirmed_over_failed_receipt(h):
+    from backend.services.version_control.coordination import ExistingReceipt
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    row = h.store.read(h.binding.binding_id)
+    # Seed a FAILED receipt for the key alongside the eventual CONFIRMED one.
+    h.service._fact(row, claim.request, c.FactStatus.FAILED, kind=c.FactKind.RECEIPT)
+    complete(h, claim)  # CONFIRMED receipt
+    h.request = replace(h.request, operation_id=uid())
+    with pytest.raises(ExistingReceipt) as caught:
+        reserve(h)
+    assert caught.value.receipt.status == c.FactStatus.CONFIRMED
+
+
 @pytest.mark.parametrize('cause', ['reviewed-base', 'different-digest', 'revoked-grant',
                                     'uncommitted-preimage', 'consumed-approval'])
 def test_definite_presend_rejection_releases_binding_and_publishes_conflict(h, cause):
