@@ -16,8 +16,25 @@ class Classification(vc.DriftResult):
 
 
 class DriftService:
-    def __init__(self, *, canonicalizer: vc.Canonicalizer):
+    def __init__(self, *, canonicalizer: vc.Canonicalizer, observer: vc.Observer | None = None,
+                 executor: vc.ExecutorContext | None = None):
         self.canonicalizer = canonicalizer
+        self.observer = observer
+        self.executor = executor
+
+    def prepare_choice(self, binding: vc.BindingRef) -> vc.ObservationResult:
+        if self.observer is None or self.executor is None or self.executor.workspace_id != binding.workspace_id:
+            raise RuntimeError("Target-local observer unavailable")
+        captured = self.observer.capture(binding, "reconcile", self.executor)
+        status = captured.status
+        if (captured.busy or status.stale or status.quarantined or status.unresolved_operation_id
+                or status.binding_id != binding.binding_id
+                or status.binding_revision != binding.binding_revision
+                or status.heads.observed is None
+                or status.drift in (vc.DriftState.UNKNOWN, vc.DriftState.UNREACHABLE,
+                                    vc.DriftState.APPLIED_UNVERIFIED, vc.DriftState.CONFLICTED)):
+            raise RuntimeError("Fresh durable observation unavailable or binding blocked")
+        return captured
 
     def classify(self, heads: vc.Heads, versions: vc.VersionLookup, reachability: str, *,
                  unresolved_operation_id=None, quarantined=False, conflicted=False):
