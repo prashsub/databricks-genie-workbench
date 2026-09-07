@@ -53,6 +53,18 @@ _SERIALIZED_SPACE_KEYS = ("data_sources", "instructions", "config", "benchmarks"
 # meaningful.
 _FRAGMENT_ARRAY_KEYS = frozenset({"content", "sql"})
 
+_VC_COLLECTION_KEYS = {
+    "tables": "identifier",
+    "metric_views": "identifier",
+    "column_configs": "column_name",
+    **dict.fromkeys(
+        ("text_instructions", "example_question_sqls", "join_specs", "joins",
+         "filters", "expressions", "measures", "parameters", "questions",
+         "sample_questions", "sql_functions"),
+        "id",
+    ),
+}
+
 # Genie also canonicalizes unquoted literals/phrases by adding boundary single
 # quotes (for example ``Segment = Enterprise`` -> ``Segment = 'Enterprise'``
 # and ``Highest churn risk`` -> ``'Highest churn risk'``). Ignore only quotes
@@ -112,7 +124,7 @@ def _canonical_config(serialized: dict) -> dict:
         if metric_views:
             sources["tables"] = tables
             sources["metric_views"] = metric_views
-    return canonicalize(config)
+    return canonicalize(config, _collection_keys=_VC_COLLECTION_KEYS)
 
 
 def unwrap_serialized_space(config: Any) -> dict | None:
@@ -193,6 +205,7 @@ def canonicalize(
     normalize_boundary_quotes: bool = True,
     _depth: int = 0,
     _parent_key: str | None = None,
+    _collection_keys: dict[str, str] | None = None,
 ) -> Any:
     """Recursively canonicalize a parsed serialized_space object.
 
@@ -217,6 +230,7 @@ def canonicalize(
                 normalize_boundary_quotes=normalize_boundary_quotes,
                 _depth=_depth + 1,
                 _parent_key=key,
+                _collection_keys=_collection_keys,
             )
             for key, value in node.items()
             if not (_depth == 0 and key == "benchmarks")
@@ -240,14 +254,16 @@ def canonicalize(
                 normalize_boundary_quotes=normalize_boundary_quotes,
                 _depth=_depth + 1,
                 _parent_key=_parent_key,
+                _collection_keys=_collection_keys,
             )
             for value in node
         ]
-        if items and all(
-            isinstance(value, dict) and isinstance(value.get("id"), str)
+        identity_key = "id" if _collection_keys is None else _collection_keys.get(_parent_key)
+        if identity_key and items and all(
+            isinstance(value, dict) and isinstance(value.get(identity_key), str)
             for value in items
-        ):
-            items.sort(key=lambda value: value["id"])
+        ) and len({value[identity_key] for value in items}) == len(items):
+            items.sort(key=lambda value: value[identity_key])
         return items
     if isinstance(node, str):
         return (

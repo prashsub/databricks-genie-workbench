@@ -97,6 +97,36 @@ def test_normalized_metric_views_quotes_fragments_and_wrappers_match() -> None:
 # ── unwrap_serialized_space ──────────────────────────────────────────────
 
 
+def test_unordered_ids_sort_but_meaningful_order_survives() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    original = _space()
+    original["data_sources"]["tables"].append({"identifier": "cat.sch.t2"})
+    original["instructions"]["text_instructions"].append({"id": "a2", "content": ["Second"]})
+    original["instructions"]["sql_snippets"] = {
+        "expressions": [{"id": "s1", "sql": ["SELECT ", "1"]}]
+    }
+    original["instructions"]["steps"] = [{"id": "step1"}, {"id": "step2"}]
+    reordered = deepcopy(original)
+    reordered["data_sources"]["tables"].reverse()
+    reordered["instructions"]["text_instructions"].reverse()
+    assert adapter.observe(original).fingerprints == adapter.observe(reordered).fingerprints
+    for path in (
+        ("instructions", "steps"),
+        ("instructions", "sql_snippets", "expressions", 0, "sql"),
+    ):
+        changed = deepcopy(original)
+        target = changed
+        for key in path:
+            target = target[key]
+        target.reverse()
+        assert adapter.observe(original).fingerprints.config != adapter.observe(changed).fingerprints.config
+    changed = deepcopy(original)
+    changed["instructions"]["text_instructions"][0]["content"] = ["helpful", "Be "]
+    assert adapter.observe(original).fingerprints.config != adapter.observe(changed).fingerprints.config
+
+
 def test_unwrap_bare_serialized_space() -> None:
     assert unwrap_serialized_space(_space()) == _space()
 
