@@ -1,0 +1,1124 @@
+diff --git a/backend/services/config_fingerprint.py b/backend/services/config_fingerprint.py
+index f4a8341..55d1789 100644
+--- a/backend/services/config_fingerprint.py
++++ b/backend/services/config_fingerprint.py
+@@ -15,15 +15,19 @@ Fingerprint contract (all three steps matter equally):
+    GSO's preflight mutates the latter in place (e.g. injecting
+    ``_data_profile``) before persisting the snapshot, so the parsed copy can
+    diverge from what the Genie API round-trips. Internal ``_``-prefixed
+-   top-level keys are stripped regardless of source.
++   top-level keys are stripped for hashing regardless of source; VC snapshots
++   retain the exact, unstripped payload for restoration.
+ 2. **Canonicalize** — configuration hashing drops the top-level ``benchmarks``
+    block, while benchmark hashing isolates that block and treats an omitted
+    block as an empty question set. ``content`` and ``sql`` fragments are
+    concatenated; boundary quotes added by Genie are ignored for configuration
+    hashing but preserved for benchmark ground-truth SQL; object keys are
+-   sorted; arrays whose elements all carry a string ``id`` are sorted by id
+-   (Genie's validation rules require id-sorted arrays, so this only normalizes
+-   ordering the API itself does not treat as meaningful).
++   sorted. The legacy ``_collection_keys=None`` path retains blanket sorting
++   of string-id arrays for persisted-hash compatibility. The VC path sorts
++   only declared id-addressed collections (t4), retaining other array order.
++   Duplicate-id arrays retain their order in both paths. VC data sources
++   merge tables and metric views by identifier: read-back loses that split,
++   so the hash must ignore it and its METRIC_VIEW type markers.
+ 3. **Hash** — SHA-256 over the compact JSON serialization.
+ 
+ Pure functions only — no I/O, fully unit-testable offline.
+@@ -34,8 +38,18 @@ from __future__ import annotations
+ import hashlib
+ import json
+ import re
++from copy import deepcopy
+ from typing import Any
+ 
++from backend.services.version_control.contracts import (
++    Comparison,
++    DiffItem,
++    Fingerprints,
++    Snapshot,
++    canonical_json_hash,
++    to_wire,
++)
++
+ # Recognized as a bare serialized_space object when any of these keys is present.
+ _SERIALIZED_SPACE_KEYS = ("data_sources", "instructions", "config", "benchmarks")
+ 
+@@ -46,6 +60,29 @@ _SERIALIZED_SPACE_KEYS = ("data_sources", "instructions", "config", "benchmarks"
+ # meaningful.
+ _FRAGMENT_ARRAY_KEYS = frozenset({"content", "sql"})
+ 
++_VC_COLLECTION_KEYS = {
++    "sources": "identifier",
++    "tables": "identifier",
++    "metric_views": "identifier",
++    "column_configs": "column_name",
++    **dict.fromkeys(
++        (
++            "text_instructions",
++            "example_question_sqls",
++            "join_specs",
++            "joins",
++            "filters",
++            "expressions",
++            "measures",
++            "parameters",
++            "questions",
++            "sample_questions",
++            "sql_functions",
++        ),
++        "id",
++    ),
++}
++
+ # Genie also canonicalizes unquoted literals/phrases by adding boundary single
+ # quotes (for example ``Segment = Enterprise`` -> ``Segment = 'Enterprise'``
+ # and ``Highest churn risk`` -> ``'Highest churn risk'``). Ignore only quotes
+@@ -54,6 +91,219 @@ _FRAGMENT_ARRAY_KEYS = frozenset({"content", "sql"})
+ _BOUNDARY_SINGLE_QUOTE_RE = re.compile(r"(?<![A-Za-z0-9])'|'(?![A-Za-z0-9])")
+ 
+ 
++class Canonicalizer:
++    """VC/1.0 adapter extending the legacy fingerprint entry point."""
++
++    def __init__(self, *, dual_compute_version: str | None = None) -> None:
++        self._versions = {"vc-c14n/1": _canonical_state_v1}
++        if (
++            dual_compute_version is not None
++            and dual_compute_version not in self._versions
++        ):
++            raise ValueError("Unsupported dual-compute canonicalizer version")
++        self._dual_compute_version = dual_compute_version
++
++    def observe(self, envelope: dict, version: str = "vc-c14n/1") -> Snapshot:
++        if version not in self._versions:
++            raise ValueError(f"Unsupported canonicalizer version: {version}")
++        if not isinstance(envelope, dict):
++            raise ValueError("envelope must be a JSON object")
++        response = deepcopy(envelope)
++        serialized = _extract_restorable_space(response)
++        metadata = {}
++        if "description" in response:
++            metadata["description"] = response["description"]
++        if (
++            "description" in metadata
++            and metadata["description"] is not None
++            and not isinstance(metadata["description"], str)
++        ):
++            raise ValueError("description must be a string or null")
++        canonical = self._versions[version](serialized, metadata)
++        fingerprints = Fingerprints(
++            config=canonical_json_hash(
++                "vc-config/1", {"value": canonical["config"]}
++            ),
++            benchmark=canonical_json_hash(
++                "vc-benchmark/1", {"value": canonical["benchmark"]}
++            ),
++            metadata=canonical_json_hash(
++                "vc-metadata/1", {"value": canonical["metadata"]}
++            ),
++            canonicalizer_version=version,
++        )
++        return Snapshot(
++            response_envelope=response,
++            serialized_space=serialized,
++            restorable_metadata=metadata,
++            response_envelope_digest=canonical_json_hash(
++                "vc-envelope/1", {"envelope": response}
++            ),
++            raw_state_digest=canonical_json_hash(
++                "vc-raw-state/1",
++                {"serialized_space": serialized, "metadata": metadata},
++            ),
++            canonical_state=canonical,
++            fingerprints=fingerprints,
++            state_digest=fingerprints.state_digest,
++        )
++
++    def compare(self, left: Snapshot, right: Snapshot) -> Comparison:
++        pair = self._comparable_pair(left, right)
++        if pair is None:
++            return Comparison.UNKNOWN
++        left, right = pair
++        return (
++            Comparison.EQUAL
++            if left.fingerprints == right.fingerprints
++            else Comparison.DIFFERENT
++        )
++
++    def semantic_diff(self, left: Snapshot, right: Snapshot) -> list[DiffItem]:
++        # Local import breaks the config_fingerprint ↔ canonical_diff cycle.
++        from backend.services.version_control.canonical_diff import semantic_diff
++
++        pair = self._comparable_pair(left, right)
++        if pair is None:
++            raise ValueError(
++                "Cannot diff incompatible canonicalizer versions without dual compute"
++            )
++        return semantic_diff(*pair)
++
++    def _comparable_pair(
++        self, left: Snapshot, right: Snapshot
++    ) -> tuple[Snapshot, Snapshot] | None:
++        left_version = left.fingerprints.canonicalizer_version
++        right_version = right.fingerprints.canonicalizer_version
++        if left_version == right_version and left_version in self._versions:
++            return left, right
++        if self._dual_compute_version is None:
++            return None
++        try:
++            for snapshot in (left, right):
++                if (
++                    canonical_json_hash(
++                        "vc-envelope/1", {"envelope": snapshot.response_envelope}
++                    )
++                    != snapshot.response_envelope_digest
++                ):
++                    return None
++            return (
++                self.observe(
++                    to_wire(left.response_envelope), self._dual_compute_version
++                ),
++                self.observe(
++                    to_wire(right.response_envelope), self._dual_compute_version
++                ),
++            )
++        except (ValueError, TypeError):
++            return None
++
++
++def _canonical_state_v1(serialized: dict, metadata: dict) -> dict:
++    return {
++        "config": _canonical_config(serialized),
++        "benchmark": _canonical_benchmark(serialized),
++        "metadata": metadata,
++    }
++
++
++def _extract_restorable_space(response: dict) -> dict:
++    """Validate the payload without stripping keys needed for exact restoration.
++
++    Prefer serialized_space over the optimizer-mutated _parsed_space copy;
++    internal keys are removed only later, when computing the config hash.
++    """
++    serialized = response.get(
++        "serialized_space", response.get("_parsed_space", response)
++    )
++    if isinstance(serialized, str):
++        try:
++            serialized = json.loads(serialized)
++        except ValueError as error:
++            raise ValueError("serialized_space must contain valid JSON") from error
++    if not isinstance(serialized, dict) or not any(
++        key in serialized for key in _SERIALIZED_SPACE_KEYS
++    ):
++        raise ValueError(
++            "serialized_space must contain a recognized payload section"
++        )
++    if "version" in serialized and (
++        type(serialized["version"]) is not int or serialized["version"] < 1
++    ):
++        raise ValueError("serialized_space version must be a positive integer")
++    for key in _SERIALIZED_SPACE_KEYS:
++        if key in serialized and not isinstance(serialized[key], dict):
++            raise ValueError(f"serialized_space {key} must be an object")
++    _validate_collections(serialized)
++    return serialized
++
++
++def _validate_collections(node: Any) -> None:
++    """Reject malformed addressed collections rather than hashing false empties."""
++    if isinstance(node, dict):
++        for key, value in node.items():
++            if key in _VC_COLLECTION_KEYS:
++                if not isinstance(value, list) or not all(
++                    isinstance(entry, dict) for entry in value
++                ):
++                    raise ValueError(
++                        f"serialized_space {key} must be an array of objects"
++                    )
++            _validate_collections(value)
++    elif isinstance(node, list):
++        for value in node:
++            _validate_collections(value)
++
++
++def _canonical_benchmark(serialized: dict) -> dict:
++    """Unify empty benchmark shapes while preserving ground-truth SQL quotes."""
++    benchmarks = serialized.get("benchmarks") or {}
++    return canonicalize(
++        {**benchmarks, "questions": benchmarks.get("questions") or []},
++        normalize_boundary_quotes=False,
++        _collection_keys=_VC_COLLECTION_KEYS,
++    )
++
++
++def _canonical_config(serialized: dict) -> dict:
++    """Hash only recoverable config semantics, leaving restoration data intact.
++
++    Genie flattens metric views into tables without preserving their kind.
++    Always emit one sources collection, even when empty, without guessing
++    kind from identifier prefixes. Drop METRIC_VIEW markers on either input.
++    Accept sources itself so canonical observations remain idempotent.
++
++    Duplicate identifiers merge fields, with later entries winning conflicts
++    (sources, then tables, then metric_views); unaddressed entries are retained.
++    """
++    config = _strip_internal_keys(deepcopy(_with_default_version(serialized)))
++    sources = config.setdefault("data_sources", {})
++    entries = [
++        entry
++        for key in ("sources", "tables", "metric_views")
++        for entry in sources.pop(key, [])
++    ]
++    by_identifier: dict[str, dict] = {}
++    unaddressed = []
++    for entry in entries:
++        entry = {
++            key: value
++            for key, value in entry.items()
++            if not (
++                key in ("table_type", "type", "object_type")
++                and "METRIC_VIEW" in str(value).upper()
++            )
++        }
++        identifier = entry.get("identifier")
++        if isinstance(identifier, str):
++            by_identifier.setdefault(identifier, {}).update(entry)
++        else:
++            unaddressed.append(entry)
++    sources["sources"] = [*by_identifier.values(), *unaddressed]
++    return canonicalize(config, _collection_keys=_VC_COLLECTION_KEYS)
++
++
+ def unwrap_serialized_space(config: Any) -> dict | None:
+     """Reduce any stored/live config shape to the parsed serialized_space object.
+ 
+@@ -132,6 +382,7 @@ def canonicalize(
+     normalize_boundary_quotes: bool = True,
+     _depth: int = 0,
+     _parent_key: str | None = None,
++    _collection_keys: dict[str, str] | None = None,
+ ) -> Any:
+     """Recursively canonicalize a parsed serialized_space object.
+ 
+@@ -143,9 +394,12 @@ def canonicalize(
+     * Genie-added boundary single quotes are optionally ignored while
+       apostrophes inside words remain significant; benchmark ground-truth SQL
+       disables this because SQL quote punctuation changes semantics;
+-    * arrays whose elements are all dicts with a string ``id`` are sorted by
+-      that id — Genie's validation rules require id-sorted arrays, so element
+-      order there carries no meaning;
++    * the legacy ``_collection_keys=None`` path retains blanket string-id
++      array sorting, frozen for compatibility with persisted fingerprints;
++    * the VC path sorts only collections declared in ``_collection_keys`` by
++      their identity field (t4), never arbitrary arrays containing id fields;
++    * duplicate-id arrays are no longer sorted: the uniqueness guard preserves
++      their input order in both paths rather than assuming stable addressing;
+     * everything else (scalars and non-id array order) is preserved — those
+       are meaningful configuration.
+     """
+@@ -156,6 +410,7 @@ def canonicalize(
+                 normalize_boundary_quotes=normalize_boundary_quotes,
+                 _depth=_depth + 1,
+                 _parent_key=key,
++                _collection_keys=_collection_keys,
+             )
+             for key, value in node.items()
+             if not (_depth == 0 and key == "benchmarks")
+@@ -179,14 +434,24 @@ def canonicalize(
+                 normalize_boundary_quotes=normalize_boundary_quotes,
+                 _depth=_depth + 1,
+                 _parent_key=_parent_key,
++                _collection_keys=_collection_keys,
+             )
+             for value in node
+         ]
+-        if items and all(
+-            isinstance(value, dict) and isinstance(value.get("id"), str)
+-            for value in items
++        identity_key = (
++            "id" if _collection_keys is None else _collection_keys.get(_parent_key)
++        )
++        if (
++            identity_key
++            and items
++            and all(
++                isinstance(value, dict)
++                and isinstance(value.get(identity_key), str)
++                for value in items
++            )
++            and len({value[identity_key] for value in items}) == len(items)
+         ):
+-            items.sort(key=lambda value: value["id"])
++            items.sort(key=lambda value: value[identity_key])
+         return items
+     if isinstance(node, str):
+         return (
+diff --git a/backend/services/version_control/canonical_diff.py b/backend/services/version_control/canonical_diff.py
+new file mode 100644
+index 0000000..c3605f2
+--- /dev/null
++++ b/backend/services/version_control/canonical_diff.py
+@@ -0,0 +1,181 @@
++"""Deterministic semantic diffs of comparable canonical observations."""
++
++from typing import Any
++
++from backend.services.config_fingerprint import _VC_COLLECTION_KEYS
++from backend.services.version_control.contracts import (
++    DiffCategory,
++    DiffChange,
++    DiffItem,
++    Snapshot,
++    canonical_json_hash,
++    to_wire,
++)
++
++_MISSING = object()
++_CATEGORIES = {
++    "data_sources": DiffCategory.SOURCES,
++    "sources": DiffCategory.SOURCES,
++    "tables": DiffCategory.SOURCES,
++    "metric_views": DiffCategory.SOURCES,
++    "column_configs": DiffCategory.COLUMNS,
++    "columns": DiffCategory.COLUMNS,
++    "text_instructions": DiffCategory.INSTRUCTIONS,
++    "join_specs": DiffCategory.JOINS,
++    "joins": DiffCategory.JOINS,
++    "filters": DiffCategory.FILTERS,
++    "parameters": DiffCategory.PARAMETERS,
++    "sql_snippets": DiffCategory.SQL,
++    "example_question_sqls": DiffCategory.SQL,
++    "sql_functions": DiffCategory.SQL,
++    "expressions": DiffCategory.SQL,
++    "measures": DiffCategory.SQL,
++    "sample_questions": DiffCategory.QUESTIONS,
++    "questions": DiffCategory.QUESTIONS,
++    "benchmark": DiffCategory.BENCHMARKS,
++    "metadata": DiffCategory.METADATA,
++    "bindings": DiffCategory.BINDINGS,
++    "warehouse_id": DiffCategory.BINDINGS,
++    "space_id": DiffCategory.BINDINGS,
++    "workspace_id": DiffCategory.BINDINGS,
++}
++
++
++def semantic_diff(left: Snapshot, right: Snapshot) -> list[DiffItem]:
++    """Return JSON-pointer paths, using stable IDs for addressed collections.
++
++    Incompatible versions raise rather than returning a misleading empty diff.
++    Use the Canonicalizer adapter to opt into verified dual computation.
++    Unknown fields stay visible and require review instead of being discarded.
++    """
++    if (
++        left.fingerprints.canonicalizer_version != "vc-c14n/1"
++        or right.fingerprints.canonicalizer_version != "vc-c14n/1"
++    ):
++        raise ValueError("Cannot diff incompatible canonicalizer versions")
++    items: list[DiffItem] = []
++    _walk(
++        to_wire(left.canonical_state),
++        to_wire(right.canonical_state),
++        (),
++        None,
++        None,
++        items,
++    )
++    return sorted(
++        items, key=lambda item: (item.category.value, item.path, item.change.value)
++    )
++
++
++def _category(key: str, current: DiffCategory | None) -> DiffCategory | None:
++    if current in (DiffCategory.BENCHMARKS, DiffCategory.METADATA):
++        return current
++    return _CATEGORIES.get(key, current)
++
++
++def _index(value: Any, identity: str) -> dict | None:
++    if value is _MISSING:
++        return {}
++    if not isinstance(value, list) or not all(
++        isinstance(entry, dict) and isinstance(entry.get(identity), str)
++        for entry in value
++    ):
++        return None
++    indexed = {entry[identity]: entry for entry in value}
++    return indexed if len(indexed) == len(value) else None
++
++
++def _walk(
++    before: Any,
++    after: Any,
++    path: tuple[str, ...],
++    field: str | None,
++    category: DiffCategory | None,
++    items: list[DiffItem],
++) -> None:
++    if (
++        before is not _MISSING
++        and after is not _MISSING
++        and canonical_json_hash("vc-diff-value/1", {"value": before})
++        == canonical_json_hash("vc-diff-value/1", {"value": after})
++    ):
++        return
++    if isinstance(before, dict) and isinstance(after, dict):
++        for key in sorted(before.keys() | after.keys()):
++            _walk(
++                before.get(key, _MISSING),
++                after.get(key, _MISSING),
++                (*path, key),
++                key,
++                _category(key, category),
++                items,
++            )
++        return
++    identity = _VC_COLLECTION_KEYS.get(field)
++    if identity:
++        left_index, right_index = _index(before, identity), _index(after, identity)
++        if left_index is not None and right_index is not None:
++            if not left_index and not right_index:
++                _emit(before, after, path, category, items)
++                return
++            for key in sorted(left_index.keys() | right_index.keys()):
++                left_value, right_value = (
++                    left_index.get(key, _MISSING),
++                    right_index.get(key, _MISSING),
++                )
++                if left_value is _MISSING or right_value is _MISSING:
++                    _emit(left_value, right_value, (*path, key), category, items)
++                else:
++                    _walk(
++                        left_value,
++                        right_value,
++                        (*path, key),
++                        None,
++                        category,
++                        items,
++                    )
++            return
++    _emit(before, after, path, category, items)
++
++
++def _contains_sql(value: Any) -> bool:
++    if isinstance(value, dict):
++        return str(value.get("format", "")).upper() == "SQL" or any(
++            "sql" in key.lower() or _contains_sql(child)
++            for key, child in value.items()
++        )
++    return isinstance(value, list) and any(_contains_sql(child) for child in value)
++
++
++def _emit(
++    before: Any,
++    after: Any,
++    path: tuple[str, ...],
++    category: DiffCategory | None,
++    items: list[DiffItem],
++) -> None:
++    change = (
++        DiffChange.ADDED
++        if before is _MISSING
++        else DiffChange.REMOVED
++        if after is _MISSING
++        else DiffChange.MODIFIED
++    )
++    review = (
++        category in (DiffCategory.SQL, DiffCategory.JOINS, DiffCategory.FILTERS)
++        or any("sql" in key.lower() for key in path)
++        or _contains_sql(before)
++        or _contains_sql(after)
++        or category is None
++    )
++    items.append(
++        DiffItem(
++            category=category or DiffCategory.INSTRUCTIONS,
++            path="/"
++            + "/".join(key.replace("~", "~0").replace("/", "~1") for key in path),
++            change=change,
++            before=None if before is _MISSING else before,
++            after=None if after is _MISSING else after,
++            review_required=review,
++        )
++    )
+diff --git a/backend/tests/fixtures/vc_canonicalization/metric_view_declared_type.json b/backend/tests/fixtures/vc_canonicalization/metric_view_declared_type.json
+new file mode 100644
+index 0000000..2d730e5
+--- /dev/null
++++ b/backend/tests/fixtures/vc_canonicalization/metric_view_declared_type.json
+@@ -0,0 +1,29 @@
++{
++  "submitted": {
++    "data_sources": {
++      "tables": [
++        {
++          "identifier": "cat.sch.sales"
++        }
++      ],
++      "metric_views": [
++        {
++          "identifier": "cat.sch.revenue_summary"
++        }
++      ]
++    }
++  },
++  "observed": {
++    "data_sources": {
++      "tables": [
++        {
++          "identifier": "cat.sch.revenue_summary",
++          "table_type": "METRIC_VIEW"
++        },
++        {
++          "identifier": "cat.sch.sales"
++        }
++      ]
++    }
++  }
++}
+diff --git a/backend/tests/fixtures/vc_canonicalization/metric_view_without_prefix.json b/backend/tests/fixtures/vc_canonicalization/metric_view_without_prefix.json
+new file mode 100644
+index 0000000..c770858
+--- /dev/null
++++ b/backend/tests/fixtures/vc_canonicalization/metric_view_without_prefix.json
+@@ -0,0 +1,28 @@
++{
++  "submitted": {
++    "data_sources": {
++      "tables": [
++        {
++          "identifier": "cat.sch.sales"
++        }
++      ],
++      "metric_views": [
++        {
++          "identifier": "cat.sch.revenue_summary"
++        }
++      ]
++    }
++  },
++  "observed": {
++    "data_sources": {
++      "tables": [
++        {
++          "identifier": "cat.sch.revenue_summary"
++        },
++        {
++          "identifier": "cat.sch.sales"
++        }
++      ]
++    }
++  }
++}
+diff --git a/backend/tests/fixtures/vc_canonicalization/metric_views_absent_empty.json b/backend/tests/fixtures/vc_canonicalization/metric_views_absent_empty.json
+new file mode 100644
+index 0000000..efdf03f
+--- /dev/null
++++ b/backend/tests/fixtures/vc_canonicalization/metric_views_absent_empty.json
+@@ -0,0 +1,21 @@
++{
++  "submitted": {
++    "data_sources": {
++      "tables": [
++        {
++          "identifier": "cat.sch.sales"
++        }
++      ],
++      "metric_views": []
++    }
++  },
++  "observed": {
++    "data_sources": {
++      "tables": [
++        {
++          "identifier": "cat.sch.sales"
++        }
++      ]
++    }
++  }
++}
+diff --git a/backend/tests/fixtures/vc_canonicalization/metric_views_without_tables.json b/backend/tests/fixtures/vc_canonicalization/metric_views_without_tables.json
+new file mode 100644
+index 0000000..4ff2c2f
+--- /dev/null
++++ b/backend/tests/fixtures/vc_canonicalization/metric_views_without_tables.json
+@@ -0,0 +1,20 @@
++{
++  "submitted": {
++    "data_sources": {
++      "metric_views": [
++        {
++          "identifier": "cat.sch.mv_revenue"
++        }
++      ]
++    }
++  },
++  "observed": {
++    "data_sources": {
++      "tables": [
++        {
++          "identifier": "cat.sch.mv_revenue"
++        }
++      ]
++    }
++  }
++}
+diff --git a/backend/tests/fixtures/vc_canonicalization/readback.json b/backend/tests/fixtures/vc_canonicalization/readback.json
+new file mode 100644
+index 0000000..8252a0d
+--- /dev/null
++++ b/backend/tests/fixtures/vc_canonicalization/readback.json
+@@ -0,0 +1,12 @@
++{
++  "submitted": {
++    "version": 2,
++    "data_sources": {"tables": [{"identifier": "cat.sch.sales"}], "metric_views": [{"identifier": "cat.sch.mv_revenue"}]},
++    "instructions": {"text_instructions": [{"id": "b", "content": ["Segment = Enterprise"]}, {"id": "a", "content": ["Be helpful"]}]}
++  },
++  "observed": {
++    "version": 2,
++    "data_sources": {"tables": [{"identifier": "cat.sch.mv_revenue"}, {"identifier": "cat.sch.sales"}]},
++    "instructions": {"text_instructions": [{"id": "a", "content": ["Be ", "helpful"]}, {"id": "b", "content": ["Segment = ", "'Enterprise'"]}]}
++  }
++}
+diff --git a/backend/tests/test_config_fingerprint.py b/backend/tests/test_config_fingerprint.py
+index 6761608..26545f4 100644
+--- a/backend/tests/test_config_fingerprint.py
++++ b/backend/tests/test_config_fingerprint.py
+@@ -7,6 +7,13 @@ current-version endpoint relies on. No Databricks connectivity required.
+ from __future__ import annotations
+ 
+ import json
++from copy import deepcopy
++from dataclasses import replace
++from pathlib import Path
++
++import pytest
++
++from backend.services.version_control.contracts import Comparison, canonical_json_hash, to_wire
+ 
+ from backend.services.config_fingerprint import (
+     benchmark_fingerprint,
+@@ -27,9 +34,322 @@ def _space(*, instruction: str = "Be helpful", with_version: bool = True) -> dic
+     return space
+ 
+ 
++def test_existing_fingerprint_api_remains_compatible() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    assert callable(Canonicalizer)
++    assert unwrap_serialized_space(_space()) == _space()
++    assert canonicalize(_space()) == canonicalize(canonicalize(_space()))
++    assert config_fingerprint(_space()) == (
++        "cf766aabfb0dece9cb89c197a4ccf7e03e46cd0d503708fd05abfd5fee282eb5"
++    )
++    assert benchmark_fingerprint(_space()) == (
++        "5c9253d29ca1fc9c4f7683bfe5dadd87e2dbce3e46af6ee80404bc7259b41e1e"
++    )
++
++
++def test_observe_preserves_exact_restorable_state_and_envelope() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    payload = _space(with_version=False)
++    payload["_unknown_executable"] = {"secret": "retained", "steps": [2, 1]}
++    envelope = {
++        "serialized_space": json.dumps(payload, indent=2),
++        "_parsed_space": _space(instruction="mutated preflight"),
++        "description": "Exact 'description'\n",
++        "title": "Not governed in v1",
++        "space_id": "physical-id",
++    }
++    original = deepcopy(envelope)
++    snapshot = Canonicalizer().observe(envelope)
++    assert envelope == original
++    assert to_wire(snapshot.response_envelope) == original
++    assert to_wire(snapshot.serialized_space) == payload
++    assert to_wire(snapshot.restorable_metadata) == {"description": envelope["description"]}
++    assert snapshot.state_digest == snapshot.fingerprints.state_digest
++    assert snapshot.response_envelope_digest == canonical_json_hash(
++        "vc-envelope/1", {"envelope": original}
++    )
++    assert snapshot.raw_state_digest == canonical_json_hash(
++        "vc-raw-state/1", {"serialized_space": payload, "metadata": {"description": envelope["description"]}}
++    )
++    envelope["_parsed_space"]["version"] = 999
++    assert to_wire(snapshot.response_envelope) == original
++
++
++def test_vc_config_fingerprint_ignores_all_internal_underscore_keys() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    clean = adapter.observe({"_parsed_space": _space()})
++    polluted = adapter.observe(
++        {"_parsed_space": {**_space(), "_preflight_notes": {"runs": 3}}}
++    )
++    assert polluted.fingerprints.config == clean.fingerprints.config
++    assert polluted.fingerprints.metadata == clean.fingerprints.metadata
++    assert polluted.fingerprints.benchmark == clean.fingerprints.benchmark
++    # t2: the exact restorable state must retain internal bookkeeping keys.
++    assert "_preflight_notes" in to_wire(polluted.serialized_space)
++
++
++def _metric_view_fixture(name: str) -> tuple[dict, dict]:
++    """Apply fixture source shapes to the same otherwise unchanged space."""
++    path = Path(__file__).parent / "fixtures/vc_canonicalization" / f"{name}.json"
++    fixture = json.loads(path.read_text())
++    return {**_space(), **fixture["submitted"]}, {**_space(), **fixture["observed"]}
++
++
++def test_metric_view_flattening_does_not_depend_on_mv_name_prefix() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    submitted, observed = _metric_view_fixture("metric_view_without_prefix")
++    assert (
++        adapter.observe(submitted).fingerprints.config
++        == adapter.observe(observed).fingerprints.config
++    )
++
++
++def test_metric_view_flattening_honours_declared_table_type() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    submitted, observed = _metric_view_fixture("metric_view_declared_type")
++    expected = adapter.observe(submitted)
++    assert expected.fingerprints.config == adapter.observe(observed).fingerprints.config
++    for marker in ("table_type", "type", "object_type"):
++        marked = deepcopy(observed)
++        entry = marked["data_sources"]["tables"][0]
++        entry[marker] = entry.pop("table_type")
++        assert adapter.observe(marked).fingerprints.config == expected.fingerprints.config
++        # A duplicate identifier with different fields is still one source.
++        entry["description"] = "Revenue"
++        marked["data_sources"]["metric_views"] = submitted["data_sources"]["metric_views"]
++        described = deepcopy(submitted)
++        described["data_sources"]["metric_views"][0]["description"] = "Revenue"
++        assert (
++            adapter.observe(marked).fingerprints.config
++            == adapter.observe(described).fingerprints.config
++        )
++        assert to_wire(adapter.observe(marked).serialized_space) == marked
++
++
++def test_absent_and_empty_metric_views_are_equal() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    empty, absent = _metric_view_fixture("metric_views_absent_empty")
++    assert (
++        adapter.observe(absent).fingerprints.config
++        == adapter.observe(empty).fingerprints.config
++    )
++    for sources in ({}, {"tables": []}, {"metric_views": []}):
++        snapshot = adapter.observe({**_space(), "data_sources": sources})
++        assert to_wire(snapshot.canonical_state["config"]["data_sources"]) == {
++            "sources": []
++        }
++    no_sources = adapter.observe({"instructions": {}})
++    assert to_wire(no_sources.canonical_state["config"]["data_sources"]) == {
++        "sources": []
++    }
++
++
++def test_metric_views_without_tables_key_matches_flattened_readback() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    submitted, observed = _metric_view_fixture("metric_views_without_tables")
++    assert (
++        adapter.observe(submitted).fingerprints.config
++        == adapter.observe(observed).fingerprints.config
++    )
++
++
++def test_normalized_metric_views_quotes_fragments_and_wrappers_match() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    fixture = json.loads((Path(__file__).parent / "fixtures/vc_canonicalization/readback.json").read_text())
++    adapter = Canonicalizer()
++    submitted = fixture["submitted"]
++    observed = fixture["observed"]
++    legacy = {key: value for key, value in observed.items() if key != "version"}
++    wrappers = [
++        observed,
++        {"serialized_space": json.dumps(observed), "_parsed_space": _space()},
++        {"_parsed_space": {**legacy, "_data_profile": {"ignored": True}}},
++    ]
++    expected = adapter.observe(submitted)
++    for wrapper in wrappers:
++        actual = adapter.observe(wrapper)
++        assert actual.fingerprints == expected.fingerprints
++        assert actual.canonical_state == expected.canonical_state
++
++
+ # ── unwrap_serialized_space ──────────────────────────────────────────────
+ 
+ 
++def test_unordered_ids_sort_but_meaningful_order_survives() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    original = _space()
++    original["data_sources"]["tables"].append({"identifier": "cat.sch.t2"})
++    original["instructions"]["text_instructions"].append({"id": "a2", "content": ["Second"]})
++    original["instructions"]["sql_snippets"] = {
++        "expressions": [{"id": "s1", "sql": ["SELECT ", "1"]}]
++    }
++    original["instructions"]["steps"] = [{"id": "step1"}, {"id": "step2"}]
++    reordered = deepcopy(original)
++    reordered["data_sources"]["tables"].reverse()
++    reordered["instructions"]["text_instructions"].reverse()
++    assert adapter.observe(original).fingerprints == adapter.observe(reordered).fingerprints
++    for path in (
++        ("instructions", "steps"),
++        ("instructions", "sql_snippets", "expressions", 0, "sql"),
++    ):
++        changed = deepcopy(original)
++        target = changed
++        for key in path:
++            target = target[key]
++        target.reverse()
++        assert adapter.observe(original).fingerprints.config != adapter.observe(changed).fingerprints.config
++    changed = deepcopy(original)
++    changed["instructions"]["text_instructions"][0]["content"] = ["helpful", "Be "]
++    assert adapter.observe(original).fingerprints.config != adapter.observe(changed).fingerprints.config
++
++
++def test_description_changes_only_metadata_fingerprint() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    envelope = {"serialized_space": _space(), "description": "Revenue", "title": "Title"}
++    original = adapter.observe(envelope)
++    changed = adapter.observe({**envelope, "description": "'Revenue'"})
++    assert original.fingerprints.config == changed.fingerprints.config
++    assert original.fingerprints.benchmark == changed.fingerprints.benchmark
++    assert original.fingerprints.metadata != changed.fingerprints.metadata
++    assert original.state_digest != changed.state_digest
++    assert to_wire(changed.canonical_state["metadata"]) == {"description": "'Revenue'"}
++    assert original.fingerprints == adapter.observe({**envelope, "title": "Other"}).fingerprints
++    assert adapter.observe({"serialized_space": _space()}).fingerprints.metadata != (
++        adapter.observe({"serialized_space": _space(), "description": ""}).fingerprints.metadata
++    )
++
++
++def test_benchmark_change_does_not_change_config_identity() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    space = {**_space(), "benchmarks": {"questions": [_benchmark_question("b1")]}}
++    original = adapter.observe(space)
++    changed_space = deepcopy(space)
++    changed_space["benchmarks"]["questions"][0]["answer"][0]["content"] = ["SELECT 2"]
++    changed = adapter.observe(changed_space)
++    assert original.fingerprints.config == changed.fingerprints.config
++    assert original.fingerprints.metadata == changed.fingerprints.metadata
++    assert original.fingerprints.benchmark != changed.fingerprints.benchmark
++    assert original.state_digest != changed.state_digest
++    assert original.canonical_state["benchmark"] != changed.canonical_state["benchmark"]
++    config_edit = {**space, "instructions": _space(instruction="Changed")["instructions"]}
++    assert adapter.observe(config_edit).fingerprints.benchmark == original.fingerprints.benchmark
++    empties = [_space(), {**_space(), "benchmarks": {}}, {**_space(), "benchmarks": {"questions": []}}]
++    assert len({adapter.observe(empty).state_digest for empty in empties}) == 1
++    quoted = deepcopy(space)
++    quoted["benchmarks"]["questions"][0]["answer"][0]["content"] = ["SELECT '2'"]
++    assert adapter.observe(quoted).fingerprints.benchmark != changed.fingerprints.benchmark
++
++
++@pytest.mark.parametrize("envelope", [
++    {"serialized_space": {}},
++    {"serialized_space": "{not json", "_parsed_space": _space()},
++    {"serialized_space": "null"},
++    {"serialized_space": "[]"},
++    {"serialized_space": "{}"},
++    {"serialized_space": {"version": 2}},
++    {"serialized_space": None, "_parsed_space": _space()},
++    {"serialized_space": {"instructions": []}},
++    {"serialized_space": {**_space(), "benchmarks": []}},
++    {"serialized_space": {**_space(), "benchmarks": {"questions": "bad"}}},
++    {"serialized_space": {**_space(), "benchmarks": {"questions": [None]}}},
++    {"serialized_space": {**_space(), "data_sources": {"tables": "bad"}}},
++    {"serialized_space": {**_space(), "version": True}},
++    {"serialized_space": _space(), "description": []},
++    {"description": "missing payload"},
++    {},
++    None,
++])
++def test_malformed_serialized_space_is_rejected_not_empty(envelope: dict) -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    with pytest.raises(ValueError, match="serialized_space|description|envelope"):
++        Canonicalizer().observe(envelope)
++    assert Canonicalizer().observe({"serialized_space": {"instructions": {}}})
++
++
++def test_cross_canonicalizer_comparison_is_unknown_without_dual_compute() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++
++    adapter = Canonicalizer()
++    original = adapter.observe({"serialized_space": _space(), "description": "Original"})
++    changed = adapter.observe({"serialized_space": _space(), "description": "Changed"})
++    historical_fingerprints = replace(original.fingerprints, canonicalizer_version="vc-c14n/99")
++    historical = replace(original, fingerprints=historical_fingerprints, state_digest=historical_fingerprints.state_digest)
++    assert adapter.compare(original, original) is Comparison.EQUAL
++    assert adapter.compare(original, changed) is Comparison.DIFFERENT
++    assert adapter.compare(original, historical) is Comparison.UNKNOWN
++    assert adapter.compare(historical, historical) is Comparison.UNKNOWN
++    with pytest.raises(ValueError, match="canonicalizer"):
++        adapter.observe(_space(), version="vc-c14n/99")
++    dual = Canonicalizer(dual_compute_version="vc-c14n/1")
++    before = to_wire(historical)
++    assert dual.compare(original, historical) is Comparison.EQUAL
++    assert dual.compare(changed, historical) is Comparison.DIFFERENT
++    assert to_wire(historical) == before
++    missing_raw = replace(historical, response_envelope={})
++    assert dual.compare(original, missing_raw) is Comparison.UNKNOWN
++    with pytest.raises(ValueError, match="canonicalizer"):
++        Canonicalizer(dual_compute_version="vc-c14n/99")
++
++
++def test_canonicalizer_is_idempotent_and_hash_is_domain_separated() -> None:
++    from backend.services.config_fingerprint import Canonicalizer
++    from backend.services.version_control.contracts import Fingerprints, from_wire
++
++    adapter = Canonicalizer()
++    fixture_root = Path(__file__).parent / "fixtures"
++    golden = json.loads((fixture_root / "vc_canonicalization/readback.json").read_text())
++    for payload in (golden["submitted"], golden["observed"], _space()):
++        original = adapter.observe({"serialized_space": payload, "description": "Résumé"})
++        canonical = to_wire(original.canonical_state)
++        repeated = adapter.observe({
++            "serialized_space": {**canonical["config"], "benchmarks": canonical["benchmark"]},
++            **canonical["metadata"],
++        })
++        assert original.canonical_state == repeated.canonical_state
++        assert original.fingerprints == repeated.fingerprints
++        assert adapter.semantic_diff(original, repeated) == []
++        for component in ("config", "benchmark", "metadata"):
++            assert getattr(original.fingerprints, component) == canonical_json_hash(
++                f"vc-{component}/1", {"value": canonical[component]}
++            )
++    shared = json.loads((fixture_root / "vc_contracts/fingerprints.json").read_text())
++    fingerprints = from_wire(Fingerprints, shared["examples"][0])
++    assert fingerprints.state_digest == canonical_json_hash("vc-state/1", to_wire(fingerprints))
++    assert canonical_json_hash("vc-state/1", {"config": "ab", "benchmark": "c"}) != (
++        canonical_json_hash("vc-state/1", {"config": "a", "benchmark": "bc"})
++    )
++    assert canonical_json_hash("vc-config/1", {"value": {}}) != canonical_json_hash("vc-benchmark/1", {"value": {}})
++    for before, after in ((False, 0), (1, 1.0), ({}, {"text_instructions": []})):
++        left = adapter.observe({"instructions": {}, "future": before})
++        right = adapter.observe({"instructions": {}, "future": after})
++        assert left.state_digest != right.state_digest
++        assert adapter.semantic_diff(left, right)
++    absent = adapter.observe({"instructions": {}})
++    empty = adapter.observe({"instructions": {"text_instructions": []}})
++    assert absent.state_digest != empty.state_digest
++    assert adapter.semantic_diff(absent, empty)
++
++
+ def test_unwrap_bare_serialized_space() -> None:
+     assert unwrap_serialized_space(_space()) == _space()
+ 
+diff --git a/backend/tests/test_vc_semantic_diff.py b/backend/tests/test_vc_semantic_diff.py
+new file mode 100644
+index 0000000..5059d4d
+--- /dev/null
++++ b/backend/tests/test_vc_semantic_diff.py
+@@ -0,0 +1,92 @@
++from copy import deepcopy
++from dataclasses import replace
++
++import pytest
++
++from backend.services.config_fingerprint import Canonicalizer
++from backend.services.version_control.contracts import Comparison, DiffCategory, DiffChange
++
++
++def test_semantic_diff_categorizes_by_id_and_flags_sql_review() -> None:
++    adapter = Canonicalizer()
++    space = {
++        "data_sources": {"tables": [{
++            "identifier": "cat.sch.sales",
++            "column_configs": [{"column_name": "amount", "description": "Old"}],
++        }]},
++        "instructions": {
++            "text_instructions": [{"id": "text/1", "content": ["Old"]}],
++            "join_specs": [{"id": "join1", "sql": ["sales.id = users.id"]}],
++            "sql_snippets": {
++                "filters": [{"id": "filter1", "sql": ["amount > 0"]}],
++                "expressions": [{"id": "expr1", "sql": ["SUM(amount)"]}],
++            },
++            "example_question_sqls": [{"id": "sql1", "sql": ["SELECT 1"]}],
++        },
++        "config": {
++            "parameters": [{"id": "param1", "default_value": {"values": ["old"]}}],
++            "sample_questions": [{"id": "question1", "question": ["Old?"]}],
++            "warehouse_id": "warehouse-old",
++        },
++        "benchmarks": {"questions": [{
++            "id": "bench1", "question": ["Total?"],
++            "answer": [{"format": "SQL", "content": ["SELECT 1"]}],
++        }]},
++    }
++    changed = deepcopy(space)
++    changed["data_sources"]["tables"][0]["column_configs"][0]["description"] = "New"
++    changed["data_sources"]["tables"].insert(0, {"identifier": "cat.sch.new"})
++    changed["instructions"]["text_instructions"][0]["content"] = ["New"]
++    changed["instructions"]["join_specs"][0]["sql"] = ["sales.user_id = users.id"]
++    changed["instructions"]["sql_snippets"]["filters"][0]["sql"] = ["amount > 10"]
++    changed["instructions"]["sql_snippets"]["expressions"][0]["sql"] = ["AVG(amount)"]
++    changed["instructions"]["example_question_sqls"] = []
++    changed["config"]["parameters"][0]["default_value"]["values"] = ["new"]
++    changed["config"]["sample_questions"][0]["question"] = ["New?"]
++    changed["config"]["warehouse_id"] = "warehouse-new"
++    changed["benchmarks"]["questions"][0]["answer"][0]["content"] = ["SELECT 2"]
++    left = adapter.observe({"serialized_space": space, "description": "Old"})
++    right = adapter.observe({"serialized_space": changed, "description": "New"})
++    items = adapter.semantic_diff(left, right)
++    assert {item.category for item in items} == set(DiffCategory)
++    assert items == sorted(items, key=lambda item: (item.category.value, item.path, item.change.value))
++    by_path = {item.path: item for item in items}
++    assert by_path["/config/data_sources/sources/cat.sch.new"].change is DiffChange.ADDED
++    assert by_path["/config/instructions/example_question_sqls/sql1"].change is DiffChange.REMOVED
++    assert by_path["/config/instructions/text_instructions/text~11/content"].before == "Old"
++    assert by_path["/config/instructions/text_instructions/text~11/content"].after == "New"
++    assert by_path["/config/data_sources/sources/cat.sch.sales/column_configs/amount/description"].category is DiffCategory.COLUMNS
++    for item in items:
++        assert item.review_required is (item.category in {
++            DiffCategory.SQL, DiffCategory.JOINS, DiffCategory.FILTERS, DiffCategory.BENCHMARKS,
++        })
++    reversed_space = deepcopy(space)
++    reversed_space["data_sources"]["tables"].reverse()
++    assert adapter.semantic_diff(left, adapter.observe({"serialized_space": reversed_space, "description": "Old"})) == []
++    assert adapter.compare(left, right) is Comparison.DIFFERENT
++    assert all(item.change in {DiffChange.ADDED, DiffChange.REMOVED, DiffChange.MODIFIED} for item in items)
++    incompatible = replace(left, fingerprints=replace(left.fingerprints, canonicalizer_version="vc-c14n/99"))
++    with pytest.raises(ValueError, match="canonicalizer"):
++        adapter.semantic_diff(left, incompatible)
++    assert Canonicalizer(dual_compute_version="vc-c14n/1").semantic_diff(left, incompatible) == []
++
++
++def test_semantic_diff_retains_unaddressed_order_and_unknown_fields() -> None:
++    adapter = Canonicalizer()
++    before = {"instructions": {"future": [{"id": "b"}, {"id": "a"}]}}
++    after = {"instructions": {"future": [{"id": "a"}, {"id": "b"}]}}
++    items = adapter.semantic_diff(adapter.observe(before), adapter.observe(after))
++    assert len(items) == 1
++    assert items[0].path == "/config/instructions/future"
++    assert items[0].review_required
++
++
++def test_semantic_diff_distinguishes_missing_from_null_and_sql_additions() -> None:
++    adapter = Canonicalizer()
++    left = adapter.observe({"serialized_space": {"instructions": {}}})
++    right = adapter.observe({"serialized_space": {"instructions": {
++        "example_question_sqls": [{"id": "new", "sql": ["SELECT 1"]}],
++    }}, "description": None})
++    items = adapter.semantic_diff(left, right)
++    assert next(item for item in items if item.category is DiffCategory.METADATA).change is DiffChange.ADDED
++    assert next(item for item in items if item.category is DiffCategory.SQL).review_required

@@ -1,0 +1,848 @@
+diff --git a/backend/services/version_control/platform/__init__.py b/backend/services/version_control/platform/__init__.py
+index f84e5bc..a27b9b5 100644
+--- a/backend/services/version_control/platform/__init__.py
++++ b/backend/services/version_control/platform/__init__.py
+@@ -1,27 +1,43 @@
+-"""Fail-closed VC/1.0 platform adapters; no ambient credentials."""
+-
+-from .bundles import bundle_detection_evidence, deployment_inventory, guard_bundle, preflight_deployment
+-from .provisioning import provision, repeatable_sandbox_provision
+-from .permissions import verify_artifact_permissions, verify_coordination_permissions, verify_fact_permissions
+-from .capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS, capabilities_ready, storage_write_ready, topology_read_ready
+-from .identity import PlatformIdentityProvider, TrustedSnapshotReader, verify_configured_job_run_as, verify_job_run_as
+-from .jobs import GovernedJobRuntime, LocalJobDispatcher
+-from .termination import PlatformTerminationEvidenceProvider
++"""Lazy, explicitly injected VC/1.0 adapters; no ambient credentials or clients."""
+ 
+ from collections.abc import Callable
++from importlib import import_module
+ from threading import RLock
+ from typing import TypeVar, cast
+ 
+ from .feature_flags import FeatureFlags, WRITE_SWITCHES
+-from .. import contracts
+ 
+ 
+ Service = TypeVar("Service")
+-REQUIRED_WRITE_PORTS = frozenset({
+-    contracts.Coordination, contracts.OperationFacts, contracts.MutationGate,
+-    contracts.IdentityProvider, contracts.Registry, contracts.VersionLedger,
+-    contracts.GenieTransport, contracts.ApprovalService, contracts.TerminationEvidenceProvider,
+-})
++_EXPORTS = {
++    name: module
++    for module, names in {
++        "bundles": ("bundle_detection_evidence", "deployment_inventory", "guard_bundle", "preflight_deployment"),
++        "provisioning": ("provision", "repeatable_sandbox_provision"),
++        "permissions": ("verify_artifact_permissions", "verify_coordination_permissions", "verify_fact_permissions"),
++        "capabilities": ("FIRST_WRITE_CAPABILITIES", "REQUIRED_WRITER_PATHS", "capabilities_ready", "storage_write_ready", "topology_read_ready"),
++        "identity": ("PlatformIdentityProvider", "TrustedSnapshotReader", "verify_configured_job_run_as", "verify_job_run_as"),
++        "jobs": ("GovernedJobRuntime", "LocalJobDispatcher"),
++        "termination": ("PlatformTerminationEvidenceProvider",),
++    }.items()
++    for name in names
++}
++
++
++def __getattr__(name):
++    if name in {"contracts", "REQUIRED_WRITE_PORTS"}:
++        contracts = import_module("..contracts", __name__)
++        value = contracts if name == "contracts" else frozenset({
++            contracts.Coordination, contracts.OperationFacts, contracts.MutationGate,
++            contracts.IdentityProvider, contracts.Registry, contracts.VersionLedger,
++            contracts.GenieTransport, contracts.ApprovalService, contracts.TerminationEvidenceProvider,
++        })
++    elif name in _EXPORTS:
++        value = getattr(import_module(f".{_EXPORTS[name]}", __name__), name)
++    else:
++        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
++    globals()[name] = value
++    return value
+ 
+ 
+ class Composition:
+@@ -42,6 +58,9 @@ class Composition:
+             return False
+         if name not in WRITE_SWITCHES:
+             return True
++        from . import REQUIRED_WRITE_PORTS
++        from .capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS, capabilities_ready
++
+         with self._lock:
+             integrated = (REQUIRED_WRITE_PORTS <= self._factories.keys()
+                           and REQUIRED_WRITER_PATHS <= self._routed_writers)
+diff --git a/backend/services/version_control/platform/identity.py b/backend/services/version_control/platform/identity.py
+index 844bb6c..863766f 100644
+--- a/backend/services/version_control/platform/identity.py
++++ b/backend/services/version_control/platform/identity.py
+@@ -1,9 +1,12 @@
+ """Server-side identity verification without authority repair or credential fallback."""
+ 
++import logging
+ from urllib.parse import urlsplit
+ 
+ from ..contracts import ActorContext, ExecutorContext
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ def canonical_host(host: str) -> str:
+     parsed = urlsplit(host)
+@@ -144,10 +147,20 @@ def verify_job_run_as(client, execution_ref: str, expected_principal_id: str) ->
+ 
+ def verify_configured_job_run_as(environment, client_factory) -> None:
+     execution_ref = environment.get("GSO_JOB_ID", "")
+-    if not execution_ref:
++    # "Not configured" and "configured but wrong" are different states; only the
++    # second is an authority violation. An empty value, the unsubstituted deploy
++    # placeholder "__GSO_JOB_ID__", or any non-digit / non-positive value all mean
++    # the optimizer integration is NOT configured. Log and return — never raise —
++    # so a half-configured deploy degrades the optimizer instead of failing the
++    # whole app boot and taking history reads down with it (FM-OUTAGE). This is not
++    # startup authority repair: nothing is written; we simply do not verify what was
++    # never configured. Only a CONFIGURED (all-digit, positive) Job whose run_as is
++    # wrong or unreadable refuses.
++    if not execution_ref or not execution_ref.isdigit() or int(execution_ref) <= 0:
++        logger.warning(
++            "Optimizer integration not configured (GSO_JOB_ID=%r); skipping Job "
++            "run_as verification", execution_ref)
+         return
+-    if not execution_ref.isdigit() or int(execution_ref) <= 0:
+-        raise ValueError("Invalid configured GSO Job ID")
+     client = client_factory()
+     principal = client.config.client_id or environment.get("DATABRICKS_CLIENT_ID", "")
+     verify_job_run_as(client, execution_ref, principal)
+diff --git a/backend/tests/integration/__init__.py b/backend/tests/integration/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/backend/tests/integration/test_vc_permissions.py b/backend/tests/integration/test_vc_permissions.py
+new file mode 100644
+index 0000000..9a24bdf
+--- /dev/null
++++ b/backend/tests/integration/test_vc_permissions.py
+@@ -0,0 +1,69 @@
++"""Real-platform permission / grant / topology probes (plan tasks 5, 6, 14 + topology).
++
++These are DEPLOYMENT BLOCKERS, not passing tests: the `live_platform` fixture
++(backend/tests/integration/conftest.py) FAILS with an explicit blocker reason when
++VC_INTEGRATION_CONFIG is unset, so an unconfigured environment can never be scored as
++green. They are deselected by default (addopts = -m 'not integration') and only run
++under the sanctioned gate:
++
++    python -m pytest backend/tests/integration -m integration -q
++"""
++
++import pytest
++
++from backend.services.version_control import platform
++
++
++@pytest.mark.integration
++def test_runtime_principal_cannot_update_delete_or_alter_fact_tables(live_platform):
++    for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
++        table = live_platform.table(name)
++        assert table["properties"]["delta.appendOnly"] == "true"
++        assert table["owner"] != live_platform.principal("runtime")
++        live_platform.assert_sql_succeeds("runtime", f"{name}.insert")
++        for action in ("update", "delete", "alter", "drop", "replace"):
++            live_platform.assert_sql_denied("runtime", f"{name}.{action}")
++
++
++@pytest.mark.integration
++def test_executor_cannot_insert_coordination_and_enrollment_is_serialized(live_platform):
++    live_platform.assert_sql_denied("executor", "genie_ops_coordination.insert")
++    live_platform.assert_sql_succeeds("executor", "genie_ops_coordination.update")
++    live_platform.assert_sql_succeeds("enrollment", "genie_ops_coordination.enroll")
++    table = live_platform.table("genie_ops_coordination")
++    assert table["properties"]["delta.isolationLevel"] == "Serializable"
++    assert len({table["owner"], live_platform.principal("executor"),
++                live_platform.principal("enrollment")}) == 3
++    job = live_platform.api("provisioner", "get",
++                            f"/api/2.2/jobs/get?job_id={live_platform.config['enrollment_job_id']}")
++    assert job["settings"]["max_concurrent_runs"] == 1
++    assert job["settings"]["queue"]["enabled"] is True
++    assert job["settings"]["run_as"]["service_principal_name"] == live_platform.principal("enrollment")
++
++
++@pytest.mark.integration
++def test_package_approval_receipt_securables_have_separate_writers(live_platform):
++    expected = {"vc_snapshots": "observer", "vc_approval_evidence": "approval",
++                "vc_outbound_packages": "source", "vc_target_receipts": "executor"}
++    for volume, writer in expected.items():
++        live_platform.assert_sql_succeeds(writer, f"{volume}.write")
++        for other in set(expected.values()) - {writer}:
++            live_platform.assert_sql_denied(other, f"{volume}.write")
++    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
++    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
++    for action in ("insert", "update", "delete", "alter"):
++        live_platform.assert_sql_denied("source", f"genie_space_operations.{action}")
++    live_platform.assert_sql_denied("source", "genie_space_operations.read")
++
++
++@pytest.mark.integration
++def test_source_target_artifact_topology_is_verified_without_remote_write_credentials(live_platform):
++    source = live_platform.api("source", "get", "/api/2.1/unity-catalog/metastore_summary")
++    target = live_platform.api("executor", "get", "/api/2.1/unity-catalog/metastore_summary")
++    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
++    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
++    live_platform.assert_sql_denied("source", "vc_target_receipts.write")
++    live_platform.assert_sql_denied("source", "genie_space_operations.insert")
++    assert source["metastore_id"] == live_platform.config["topology"]["source_metastore"]
++    assert target["metastore_id"] == live_platform.config["topology"]["target_metastore"]
++    assert platform.topology_read_ready(live_platform.config["topology"])
+diff --git a/backend/tests/integration/test_vc_provisioning_live.py b/backend/tests/integration/test_vc_provisioning_live.py
+new file mode 100644
+index 0000000..e5ae1d5
+--- /dev/null
++++ b/backend/tests/integration/test_vc_provisioning_live.py
+@@ -0,0 +1,26 @@
++"""Real-platform DAB validate + repeatable sandbox provisioning probe (plan task 16).
++
++Kept distinct from the permission probes so the DAB-CLI probe is separable. This is a
++DEPLOYMENT BLOCKER, not a passing test: the `live_platform` fixture FAILS with an
++explicit blocker reason when VC_INTEGRATION_CONFIG is unset. Deselected by default;
++runs only under:
++
++    python -m pytest backend/tests/integration -m integration -q
++
++Plan task 16 nominally colocated this in test_vc_provisioning.py (integration marker);
++per m08 fixspec B5 it lives here under backend/tests/integration/ so a single sanctioned
++command remains authoritative for the whole integration layer.
++"""
++
++from pathlib import Path
++
++import pytest
++
++from backend.services.version_control import platform
++
++ROOT = Path(__file__).resolve().parents[3]
++
++
++@pytest.mark.integration
++def test_dab_validate_and_sandbox_provision_are_repeatable(live_platform):
++    platform.repeatable_sandbox_provision(ROOT, live_platform.config["bundle"], live_platform)
+diff --git a/backend/tests/test_vc_identity.py b/backend/tests/test_vc_identity.py
+index 13ea7b6..56bc28c 100644
+--- a/backend/tests/test_vc_identity.py
++++ b/backend/tests/test_vc_identity.py
+@@ -27,8 +27,6 @@ def test_wrong_run_as_fails_startup_without_self_healing():
+     client.jobs.get.side_effect = TimeoutError("identity unavailable")
+     with pytest.raises(TimeoutError):
+         verify({"GSO_JOB_ID": "42"}, factory)
+-    with pytest.raises(ValueError):
+-        verify({"GSO_JOB_ID": "not-a-job"}, factory)
+     factory.reset_mock()
+     verify({}, factory)
+     factory.assert_not_called()
+@@ -40,6 +38,50 @@ def test_wrong_run_as_fails_startup_without_self_healing():
+     assert startup.body[0].value.func.id == "_verify_gso_job_run_as"
+ 
+ 
++def test_unconfigured_job_id_placeholder_does_not_block_startup():
++    verify = getattr(platform, "verify_configured_job_run_as", None)
++    assert callable(verify), "Startup must verify Job identity, never repair it"
++
++    # An unsubstituted deploy placeholder (or any non-digit / non-positive value)
++    # means the optimizer integration is NOT configured. Treat it exactly like the
++    # empty case: log + return, never raise, never touch the client factory. A hard
++    # boot failure here would take down history reads and every unrelated surface,
++    # violating FM-OUTAGE ("available history reads continue").
++    for value in ("__GSO_JOB_ID__", "", "none", "0", "-1"):
++        factory = Mock()
++        assert verify({"GSO_JOB_ID": value}, factory) is None, (
++            f"Unconfigured GSO_JOB_ID {value!r} must not block startup")
++        factory.assert_not_called()
++
++    # A CONFIGURED job (positive, all-digit id) whose run_as is wrong is still an
++    # authority violation and must still refuse — without any self-healing writes.
++    client = Mock()
++    client.config.client_id = "app-sp"
++    client.jobs.get.return_value = SimpleNamespace(settings=SimpleNamespace(
++        run_as=SimpleNamespace(service_principal_name="wrong-sp", user_name=None)))
++    factory = Mock(return_value=client)
++    with pytest.raises(PermissionError, match="run_as"):
++        verify({"GSO_JOB_ID": "42"}, factory)
++    client.jobs.update.assert_not_called()
++    client.jobs.reset.assert_not_called()
++
++    # A configured job whose identity cannot be read still fails closed (propagates).
++    client.jobs.get.side_effect = TimeoutError("identity unavailable")
++    with pytest.raises(TimeoutError):
++        verify({"GSO_JOB_ID": "42"}, factory)
++
++
++def test_deploy_script_exits_nonzero_on_unresolved_placeholders():
++    deploy = (Path(__file__).resolve().parents[2] / "scripts" / "deploy.sh").read_text()
++    lines = deploy.splitlines()
++    unresolved_index = next(i for i, line in enumerate(lines) if "UNRESOLVED" in line)
++    # Within the unresolved-placeholder handling block, the script must EXIT
++    # non-zero rather than only warn: a half-configured app.yaml must never be
++    # imported to the workspace.
++    block = "\n".join(lines[unresolved_index:unresolved_index + 12])
++    assert "exit 1" in block, "Unresolved placeholders must abort the deploy (exit 1), not only warn"
++
++
+ def test_explicit_profile_host_workspace_mismatch_is_rejected():
+     provider_type = getattr(platform, "PlatformIdentityProvider", None)
+     assert callable(provider_type), "VC identity requires explicit credential selection"
+diff --git a/backend/tests/test_vc_provisioning.py b/backend/tests/test_vc_provisioning.py
+index 19969d5..301bc48 100644
+--- a/backend/tests/test_vc_provisioning.py
++++ b/backend/tests/test_vc_provisioning.py
+@@ -1,15 +1,158 @@
+ from pathlib import Path
++import os
++import re
++import shlex
++import shutil
++import subprocess
++import sys
++import tomllib
+ from unittest.mock import Mock
+ 
+ import pytest
+ 
+ from backend.services.version_control import platform
+-from backend.tests.integration.conftest import live_platform
+ 
+ 
+ ROOT = Path(__file__).resolve().parents[2]
+ 
+ 
++@pytest.mark.parametrize("scenario", ["clear", "dual_authority", "unknown", "missing_yaml"])
++def test_bundle_guard_runs_on_destroy_and_separates_tooling_failure_from_dual_authority(tmp_path, scenario):
++    bundle = tmp_path / "databricks.yml"
++    contents = {
++        "clear": "resources: {jobs: {}}\n",
++        "dual_authority": "resources: {genie_spaces: {managed: {}}}\n",
++        "unknown": "include: [missing.yml]\n",
++        "missing_yaml": "resources: {jobs: {}}\n",
++    }
++    bundle.write_text(contents[scenario])
++    environment = dict(os.environ, PYTHONPATH=str(ROOT))
++    if scenario == "missing_yaml":
++        (tmp_path / "yaml.py").write_text("raise ImportError('simulated missing PyYAML')\n")
++        environment["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(ROOT)))
++    expected = {"clear": 0, "dual_authority": 1, "unknown": 2, "missing_yaml": 2}[scenario]
++    command = [sys.executable, str(ROOT / "scripts/version_control/bundle_guard.py"), str(bundle)]
++    result = subprocess.run(command, env=environment, capture_output=True, text=True)
++    assert result.returncode == expected, result.stdout + result.stderr
++    if scenario != "missing_yaml":
++        assert scenario in result.stdout
++    else:
++        assert "tooling" in result.stderr.lower()
++        assert "dual_authority" not in result.stdout
++
++    project = tmp_path / "project"
++    scripts = project / "scripts"
++    (scripts / "version_control").mkdir(parents=True)
++    for relative in ("deploy.sh", "deploy-config.sh", "preflight.sh", "version_control/bundle_guard.py"):
++        shutil.copyfile(ROOT / "scripts" / relative, scripts / relative)
++    shutil.copyfile(bundle, project / "databricks.yml")
++    optimizer = project / "packages/genie-space-optimizer"
++    optimizer.mkdir(parents=True)
++    (optimizer / "databricks.yml").write_text("resources: {jobs: {}}\n")
++    binaries = tmp_path / "bin"
++    binaries.mkdir()
++    platform_calls = tmp_path / "platform-calls"
++    (binaries / "databricks").write_text(f"#!/bin/sh\necho called >> {shlex.quote(str(platform_calls))}\nexit 99\n")
++    (binaries / "databricks").chmod(0o755)
++    (binaries / "python3").write_text("#!/bin/sh\necho 'bare python3 invoked' >&2\nexit 99\n")
++    (binaries / "python3").chmod(0o755)
++    interpreter = project / ".venv/bin/python"
++    interpreter.parent.mkdir(parents=True)
++    interpreter.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
++    interpreter.chmod(0o755)
++    environment.update(PATH=f"{binaries}:/usr/bin:/bin", GENIE_WAREHOUSE_ID="offline",
++                       GENIE_CATALOG="offline", GENIE_DEPLOY_PROFILE="explicit-test-profile")
++    shell = ["bash", "-c", 'set -euo pipefail; PROJECT_DIR="$1"; source "$1/scripts/preflight.sh"; _preflight_check_vc_bundle_content', "guard", str(project)]
++    result = subprocess.run(shell, env=environment, capture_output=True, text=True)
++    assert result.returncode == expected, result.stdout + result.stderr
++    if expected:
++        assert ("dual_authority" if expected == 1 else "tooling") in result.stderr.lower()
++        for flags in ([], ["--update"], ["--destroy", "--auto-approve"]):
++            result = subprocess.run(["bash", str(scripts / "deploy.sh"), *flags],
++                                    env=environment, capture_output=True, text=True)
++            assert result.returncode == expected, result.stdout + result.stderr
++            assert not platform_calls.exists(), "Guard refusal must precede every platform call"
++    deploy = (scripts / "deploy.sh").read_text()
++    destroy = deploy.split('if [ "$DESTROY_MODE" = "true" ]; then', 1)[1]
++    assert destroy.index("_preflight_check_vc_bundle_content") < destroy.index("databricks bundle destroy")
++
++    interpreter.unlink()
++    fallback = binaries / "uv"
++    fallback.write_text(f'#!/bin/sh\n[ "$1" = run ] && [ "$2" = --project ] && [ "$3" = {shlex.quote(str(project))} ] && [ "$4" = python ] || exit 99\nshift 4\nexec {shlex.quote(sys.executable)} "$@"\n')
++    fallback.chmod(0o755)
++    result = subprocess.run(shell, env=environment, capture_output=True, text=True)
++    assert result.returncode == expected, result.stdout + result.stderr
++    fallback.unlink()
++    result = subprocess.run(shell, env=environment, capture_output=True, text=True)
++    assert result.returncode == 2, result.stdout + result.stderr
++    assert "tooling" in result.stderr.lower()
++
++
++def test_platform_package_import_requires_only_declared_root_dependencies():
++    dependencies = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
++    assert "pyyaml==6.0.3" in dependencies
++    script = """
++import importlib.metadata
++import re
++import sys
++import tomllib
++from pathlib import Path
++dependencies = tomllib.loads(Path('pyproject.toml').read_text())['project']['dependencies']
++declared = {re.split(r'[=<>!~\\[]', name)[0].lower().replace('_', '-') for name in dependencies}
++distributions = importlib.metadata.packages_distributions()
++before = set(sys.modules)
++import backend.services.version_control.platform as platform
++for module in set(sys.modules) - before:
++    root = module.split('.')[0]
++    if root == 'backend' or root in sys.stdlib_module_names:
++        continue
++    owners = {name.lower().replace('_', '-') for name in distributions.get(root, [])}
++    assert owners & declared, (module, owners)
++for name in ('bundles', 'provisioning', 'permissions', 'capabilities', 'identity', 'jobs', 'termination'):
++    assert f'{platform.__name__}.{name}' not in sys.modules, name
++assert 'backend.services.version_control.contracts' not in sys.modules
++provider = platform.PlatformIdentityProvider
++assert f'{platform.__name__}.identity' in sys.modules
++assert platform.__dict__['PlatformIdentityProvider'] is provider
++assert platform.PlatformIdentityProvider is provider
++assert f'{platform.__name__}.jobs' not in sys.modules
++try:
++    platform.nonexistent_adapter
++except AttributeError:
++    pass
++else:
++    raise AssertionError('Unknown exports must raise AttributeError')
++"""
++    result = subprocess.run([sys.executable, "-c", script], cwd=ROOT,
++                            capture_output=True, text=True)
++    assert result.returncode == 0, result.stdout + result.stderr
++    installer = (ROOT / "scripts/deploy_lib/install.py").read_text()
++    assert "from backend.services.version_control.platform.bundles import preflight_deployment" in installer
++    assert "from backend.services.version_control.platform import preflight_deployment" not in installer
++
++
++def test_bundle_guard_precedes_every_databricks_invocation_on_every_branch():
++    preflight = (ROOT / "scripts/preflight.sh").read_text()
++    deploy = (ROOT / "scripts/deploy.sh").read_text()
++    lines = deploy.splitlines()
++    invocations = [
++        number for number, line in enumerate(lines)
++        if not line.lstrip().startswith(("#", "echo ", "echo -"))
++        and re.search(r"(^|[^#\w])databricks ", line)
++    ]
++    guard = lines.index("_preflight_check_vc_bundle_content")
++    violations = []
++    if preflight.index("_error()") > preflight.index("_preflight_check_vc_bundle_content()"):
++        violations.append("guard helper must follow status helpers")
++    assert invocations, "Must enumerate every platform invocation"
++    for number in invocations:
++        if number <= guard:
++            violations.append(f"unguarded platform invocation at line {number + 1}: {lines[number]}")
++    if guard >= lines.index('if [ "$DESTROY_MODE" = "true" ]; then'):
++        violations.append("guard must run unconditionally before the destroy/deploy branch")
++    assert not violations, "\n".join(violations)
++
++
+ def test_deployment_contains_no_governed_genie_content_resource(tmp_path):
+     guard = getattr(platform, "guard_bundle", None)
+     assert callable(guard), "Provisioning must reject nested governed content before deploy"
+@@ -93,17 +236,6 @@ def test_fact_permissions_require_append_only_nonowner_and_no_modify():
+     assert verify({}) is False
+ 
+ 
+-@pytest.mark.integration
+-def test_runtime_principal_cannot_update_delete_or_alter_fact_tables(live_platform):
+-    for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
+-        table = live_platform.table(name)
+-        assert table["properties"]["delta.appendOnly"] == "true"
+-        assert table["owner"] != live_platform.principal("runtime")
+-        live_platform.assert_sql_succeeds("runtime", f"{name}.insert")
+-        for action in ("update", "delete", "alter", "drop", "replace"):
+-            live_platform.assert_sql_denied("runtime", f"{name}.{action}")
+-
+-
+ def test_coordination_grants_require_separate_serialized_enrollment():
+     verify = getattr(platform, "verify_coordination_permissions", None)
+     assert callable(verify), "Enrollment must be separate from UPDATE-only executors"
+@@ -122,22 +254,6 @@ def test_coordination_grants_require_separate_serialized_enrollment():
+     assert verify({}) is False
+ 
+ 
+-@pytest.mark.integration
+-def test_executor_cannot_insert_coordination_and_enrollment_is_serialized(live_platform):
+-    live_platform.assert_sql_denied("executor", "genie_ops_coordination.insert")
+-    live_platform.assert_sql_succeeds("executor", "genie_ops_coordination.update")
+-    live_platform.assert_sql_succeeds("enrollment", "genie_ops_coordination.enroll")
+-    table = live_platform.table("genie_ops_coordination")
+-    assert table["properties"]["delta.isolationLevel"] == "Serializable"
+-    assert len({table["owner"], live_platform.principal("executor"),
+-                live_platform.principal("enrollment")}) == 3
+-    job = live_platform.api("provisioner", "get",
+-                            f"/api/2.2/jobs/get?job_id={live_platform.config['enrollment_job_id']}")
+-    assert job["settings"]["max_concurrent_runs"] == 1
+-    assert job["settings"]["queue"]["enabled"] is True
+-    assert job["settings"]["run_as"]["service_principal_name"] == live_platform.principal("enrollment")
+-
+-
+ def test_missing_fine_grained_dml_or_serializable_disables_writes():
+     check = getattr(platform, "storage_write_ready", None)
+     assert callable(check), "Unknown or unsupported capabilities must deny every write"
+@@ -207,21 +323,6 @@ def test_artifact_grants_require_distinct_volume_securables_and_writers():
+     assert verify(volumes, writers, {"target"}, {"source", "provisioner"}) is False
+ 
+ 
+-@pytest.mark.integration
+-def test_package_approval_receipt_securables_have_separate_writers(live_platform):
+-    expected = {"vc_snapshots": "observer", "vc_approval_evidence": "approval",
+-                "vc_outbound_packages": "source", "vc_target_receipts": "executor"}
+-    for volume, writer in expected.items():
+-        live_platform.assert_sql_succeeds(writer, f"{volume}.write")
+-        for other in set(expected.values()) - {writer}:
+-            live_platform.assert_sql_denied(other, f"{volume}.write")
+-    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
+-    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
+-    for action in ("insert", "update", "delete", "alter"):
+-        live_platform.assert_sql_denied("source", f"genie_space_operations.{action}")
+-    live_platform.assert_sql_denied("source", "genie_space_operations.read")
+-
+-
+ def test_repeatable_provision_requires_explicit_nonproduction_selection():
+     run = getattr(platform, "repeatable_sandbox_provision", None)
+     assert callable(run), "Real provisioning must require explicit sandbox selection"
+@@ -251,11 +352,6 @@ def test_repeatable_provision_requires_explicit_nonproduction_selection():
+         run(ROOT, selection, runner)
+ 
+ 
+-@pytest.mark.integration
+-def test_dab_validate_and_sandbox_provision_are_repeatable(live_platform):
+-    platform.repeatable_sandbox_provision(ROOT, live_platform.config["bundle"], live_platform)
+-
+-
+ def test_unverified_cross_metastore_artifact_transport_disables_topology():
+     verify = getattr(platform, "topology_read_ready", None)
+     assert callable(verify), "Unsupported Delta Sharing topology must remain disabled"
+@@ -276,14 +372,49 @@ def test_unverified_cross_metastore_artifact_transport_disables_topology():
+     assert verify(proof) is False
+ 
+ 
+-@pytest.mark.integration
+-def test_source_target_artifact_topology_is_verified_without_remote_write_credentials(live_platform):
+-    source = live_platform.api("source", "get", "/api/2.1/unity-catalog/metastore_summary")
+-    target = live_platform.api("executor", "get", "/api/2.1/unity-catalog/metastore_summary")
+-    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
+-    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
+-    live_platform.assert_sql_denied("source", "vc_target_receipts.write")
+-    live_platform.assert_sql_denied("source", "genie_space_operations.insert")
+-    assert source["metastore_id"] == live_platform.config["topology"]["source_metastore"]
+-    assert target["metastore_id"] == live_platform.config["topology"]["target_metastore"]
+-    assert platform.topology_read_ready(live_platform.config["topology"])
++def test_integration_gate_command_collects_every_integration_test():
++    # The sanctioned release-gate command from testing-strategy.md must actually
++    # traverse the honest deployment blockers. If the integration tests live in
++    # unit-test files, this command collects zero and exits 5 (EXIT_NOTESTSCOLLECTED),
++    # which reads as "not failing" -- the exact silent-skip failure mode M08 exists
++    # to make impossible.
++    result = subprocess.run(
++        [sys.executable, "-m", "pytest", "backend/tests/integration",
++         "-m", "integration", "--collect-only", "-q"],
++        cwd=str(ROOT), capture_output=True, text=True,
++        env=dict(os.environ, PYTHONPATH=str(ROOT)))
++    assert result.returncode != 5, (
++        f"Integration gate collected no tests (exit 5):\n{result.stdout}\n{result.stderr}")
++    assert result.returncode == 0, (
++        f"Integration collection errored:\n{result.stdout}\n{result.stderr}")
++    collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
++    assert len(collected) == 5, (
++        f"Expected exactly 5 integration tests collected, saw {len(collected)}:\n{result.stdout}")
++
++    # Pin the layout: no integration-marked test may drift back out of the gated
++    # directory. Match the decorator only where it is actually applied (a line whose
++    # first token is the marker), so this test's own string references to the marker
++    # name in assertion messages do not trip the scan.
++    marker_decorator = re.compile(r"^\s*@pytest\.mark\.integration\b", re.MULTILINE)
++    tests_dir = ROOT / "backend" / "tests"
++    for path in tests_dir.glob("*.py"):
++        assert not marker_decorator.search(path.read_text()), (
++            f"{path} carries an integration test outside backend/tests/integration/")
++
++    assert (tests_dir / "integration" / "__init__.py").exists(), (
++        "backend/tests/integration/__init__.py required for consistent package layout")
++
++    # No module outside the integration directory may import live_platform from the
++    # integration conftest (the cross-directory fixture import is brittle). Match an
++    # actual import statement so this test's own string reference does not self-trip.
++    conftest_import = re.compile(
++        r"^\s*from\s+backend\.tests\.integration\.conftest\s+import\b", re.MULTILINE)
++    for path in tests_dir.glob("*.py"):
++        assert not conftest_import.search(path.read_text()), (
++            f"{path} performs a cross-directory live_platform fixture import")
++
++    # Regression-pin honest-blocker semantics: the fixture FAILS (never skips) when
++    # VC_INTEGRATION_CONFIG is unset.
++    conftest = (tests_dir / "integration" / "conftest.py").read_text()
++    assert "pytest.fail" in conftest, "live_platform must fail (not skip) when unconfigured"
++    assert "pytest.skip" not in conftest, "live_platform must not silently skip deployment blockers"
+diff --git a/pyproject.toml b/pyproject.toml
+index e0d1868..8f63ba8 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -6,6 +6,7 @@ requires-python = ">=3.11"
+ dependencies = [
+     "databricks-sdk==0.117.0",
+     "pydantic==2.12.5",
++    "pyyaml==6.0.3",
+     "python-dotenv==1.2.2",
+     "mlflow==3.11.1",
+     "fastapi==0.135.2",
+diff --git a/requirements.txt b/requirements.txt
+index 07982ec..a2a8c08 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -103,7 +103,6 @@ docker==7.1.0
+     # via mlflow
+ fastapi==0.135.2
+     # via
+-    #   genie-space-optimizer
+     #   genie-workbench
+     #   mlflow-skinny
+ fastuuid==0.14.0
+@@ -347,12 +346,6 @@ protobuf==6.33.6
+     #   mlflow-tracing
+     #   opentelemetry-proto
+     #   proto-plus
+-psycopg==3.3.3
+-    # via genie-space-optimizer
+-psycopg-binary==3.3.3 ; implementation_name != 'pypy'
+-    # via psycopg
+-psycopg-pool==3.3.0
+-    # via psycopg
+ pyarrow==23.0.1
+     # via mlflow
+ pyasn1==0.6.3
+@@ -373,12 +366,8 @@ pydantic==2.12.5
+     #   mlflow-skinny
+     #   mlflow-tracing
+     #   openai
+-    #   pydantic-settings
+-    #   sqlmodel
+ pydantic-core==2.41.5
+     # via pydantic
+-pydantic-settings==2.13.1
+-    # via genie-space-optimizer
+ pygments==2.19.2
+     # via rich
+ pyparsing==3.3.2
+@@ -394,7 +383,6 @@ python-dotenv==1.2.2
+     #   genie-workbench
+     #   litellm
+     #   mlflow-skinny
+-    #   pydantic-settings
+     #   uvicorn
+ pytz==2026.1.post1
+     # via pandas
+@@ -403,6 +391,7 @@ pywin32==311 ; sys_platform == 'win32'
+ pyyaml==6.0.3
+     # via
+     #   genie-space-optimizer
++    #   genie-workbench
+     #   huggingface-hub
+     #   langchain-core
+     #   mlflow-skinny
+@@ -458,11 +447,8 @@ sqlalchemy==2.0.48
+     # via
+     #   alembic
+     #   mlflow
+-    #   sqlmodel
+ sqlglot==30.0.3
+     # via genie-space-optimizer
+-sqlmodel==0.0.37
+-    # via genie-space-optimizer
+ sqlparse==0.5.5
+     # via mlflow-skinny
+ starlette==1.0.0
+@@ -504,8 +490,6 @@ typing-extensions==4.15.0
+     #   opentelemetry-api
+     #   opentelemetry-sdk
+     #   opentelemetry-semantic-conventions
+-    #   psycopg
+-    #   psycopg-pool
+     #   pydantic
+     #   pydantic-core
+     #   referencing
+@@ -519,11 +503,9 @@ typing-inspection==0.4.2
+     # via
+     #   fastapi
+     #   pydantic
+-    #   pydantic-settings
+ tzdata==2025.3
+     # via
+     #   pandas
+-    #   psycopg
+     #   whenever
+ urllib3==2.6.3
+     # via
+@@ -538,7 +520,6 @@ uuid-utils==0.14.1
+     #   langsmith
+ uvicorn==0.42.0
+     # via
+-    #   genie-space-optimizer
+     #   genie-workbench
+     #   mlflow-skinny
+ uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'
+diff --git a/scripts/deploy.sh b/scripts/deploy.sh
+index 5a07622..4e6023c 100755
+--- a/scripts/deploy.sh
++++ b/scripts/deploy.sh
+@@ -66,6 +66,8 @@ source "$SCRIPT_DIR/deploy-config.sh"
+ # shellcheck source=preflight.sh
+ source "$SCRIPT_DIR/preflight.sh"
+ 
++_preflight_check_vc_bundle_content
++
+ # ═══════════════════════════════════════════════════════════════════════════
+ # DESTROY MODE
+ # ═══════════════════════════════════════════════════════════════════════════
+@@ -122,6 +124,7 @@ for j in (jobs if isinstance(jobs, list) else jobs.get('jobs', [])):
+     # ── Step 2: Destroy bundle-managed optimization job ───────────────
+     echo ""
+     echo "▸ Step 2/3: Destroying bundle-managed optimization job..."
++    _preflight_check_vc_bundle_content
+     if (cd "$PROJECT_DIR" && databricks bundle destroy -t app \
+         --var="catalog=${CATALOG}" \
+         --var="warehouse_id=${WAREHOUSE_ID:-placeholder}" \
+@@ -176,7 +179,6 @@ echo "▸ Step 1/$TOTAL_STEPS: Pre-flight checks..."
+ _preflight_check_tools
+ _preflight_check_python_dependency_sources
+ _preflight_check_venv
+-_preflight_check_vc_bundle_content
+ _preflight_check_npm_lockfiles
+ _preflight_check_npm_registry
+ _preflight_check_profile "$PROFILE"
+@@ -479,11 +481,17 @@ fi
+ 
+ rm -f "${PATCHED_APP_YAML}.bak"
+ 
+-# Validate all placeholders were resolved
++# Validate all placeholders were resolved. A half-configured app.yaml (e.g. an
++# unresolved __GSO_JOB_ID__) must NEVER be imported to the workspace — abort the
++# deploy non-zero instead of only warning. This is the root cause of the total
++# app-boot failure the identity guard defends in depth against.
+ UNRESOLVED=$(grep -c '__[A-Z_]*__' "$PATCHED_APP_YAML" || true)
+ if [ "$UNRESOLVED" -gt 0 ]; then
+-    echo "  ⚠ app.yaml has $UNRESOLVED unresolved placeholder(s):"
++    echo "  ✗ app.yaml has $UNRESOLVED unresolved placeholder(s):"
+     grep '__[A-Z_]*__' "$PATCHED_APP_YAML" | sed 's/^/      /'
++    echo "  ✗ Refusing to import a half-configured app.yaml; deploy aborted."
++    rm -f "$PATCHED_APP_YAML"
++    exit 1
+ fi
+ 
+ databricks workspace import "$WS_PATH/app.yaml" \
+diff --git a/scripts/deploy_lib/install.py b/scripts/deploy_lib/install.py
+index 17c403d..30b0e95 100644
+--- a/scripts/deploy_lib/install.py
++++ b/scripts/deploy_lib/install.py
+@@ -20,7 +20,7 @@ from .lakebase import ensure_lakebase
+ from .uc import ensure_uc_objects_and_grants
+ from .verify import verify_app_deployment
+ from .workspace_source import prepare_workspace_source
+-from backend.services.version_control.platform import preflight_deployment
++from backend.services.version_control.platform.bundles import preflight_deployment
+ 
+ 
+ def _default_status(message: str) -> None:
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 5b71898..d8bb08a 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -10,15 +10,6 @@
+ 
+ MIN_DB_CLI_VERSION="0.297.2"
+ 
+-_preflight_check_vc_bundle_content() {
+-    local root="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+-    python3 "$root/scripts/version_control/bundle_guard.py" \
+-        "$root/databricks.yml" "$root/packages/genie-space-optimizer/databricks.yml" || {
+-        _error "VC bundle content guard failed; refusing deployment."
+-        exit 1
+-    }
+-}
+-
+ # ── Shared color + status helpers ───────────────────────────────────────────
+ RED='\033[0;31m'
+ GREEN='\033[0;32m'
+@@ -34,6 +25,33 @@ _warn()   { echo -e "${YELLOW}⚠${NC} $*"; }
+ _error()  { echo -e "${RED}✗${NC} $*" >&2; }
+ _header() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}\n"; }
+ 
++_preflight_check_vc_bundle_content() {
++    local root="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
++    local status=0
++    local -a guard_python
++    if [ -x "$root/.venv/bin/python" ]; then
++        guard_python=("$root/.venv/bin/python")
++    elif command -v uv &>/dev/null; then
++        guard_python=(uv run --project "$root" python)
++    else
++        _error "VC bundle guard tooling failure: project Python and uv unavailable; refusing deployment or destroy."
++        exit 2
++    fi
++    "${guard_python[@]}" "$root/scripts/version_control/bundle_guard.py" \
++        "$root/databricks.yml" "$root/packages/genie-space-optimizer/databricks.yml" || status=$?
++    case "$status" in
++        0) return 0 ;;
++        1)
++            _error "VC dual_authority finding; refusing deployment or destroy."
++            exit 1
++            ;;
++        *)
++            _error "VC bundle guard tooling/unresolvable-input failure; refusing deployment or destroy."
++            exit 2
++            ;;
++    esac
++}
++
+ # ── Pre-flight checks ───────────────────────────────────────────────────────
+ 
+ # Collect-all tool and version check. Reports every problem in one pass so
+diff --git a/scripts/version_control/bundle_guard.py b/scripts/version_control/bundle_guard.py
+index e339069..2fe96ac 100644
+--- a/scripts/version_control/bundle_guard.py
++++ b/scripts/version_control/bundle_guard.py
+@@ -1,4 +1,4 @@
+-"""Sanctioned deploy guard; emit read-only evidence, never upload Genie content."""
++"""Read-only deploy guard: 0 clear, 1 dual_authority, 2 tooling/unresolvable input."""
+ 
+ import argparse
+ from dataclasses import asdict
+@@ -8,16 +8,21 @@ import sys
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+ 
+-from backend.services.version_control.platform import bundle_detection_evidence
+-
+-
+ def main(argv=None):
+     parser = argparse.ArgumentParser()
+     parser.add_argument("bundles", nargs="+", type=Path)
+     args = parser.parse_args(argv)
+-    evidence = [bundle_detection_evidence(path) for path in args.bundles]
++    try:
++        from backend.services.version_control.platform.bundles import bundle_detection_evidence
++
++        evidence = [bundle_detection_evidence(path) for path in args.bundles]
++    except Exception as error:
++        print(f"VC bundle guard tooling failure: {error}", file=sys.stderr)
++        return 2
+     print(json.dumps([asdict(item) for item in evidence], sort_keys=True))
+-    return 0 if all(item.status == "clear" for item in evidence) else 1
++    if any(item.status not in {"clear", "dual_authority"} for item in evidence):
++        return 2
++    return 1 if any(item.status == "dual_authority" for item in evidence) else 0
+ 
+ 
+ if __name__ == "__main__":

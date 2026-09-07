@@ -1,0 +1,2197 @@
+diff --git a/backend/services/version_control/optimizer_adapter.py b/backend/services/version_control/optimizer_adapter.py
+new file mode 100644
+index 0000000..64c05e6
+--- /dev/null
++++ b/backend/services/version_control/optimizer_adapter.py
+@@ -0,0 +1,125 @@
++"""Target-local M10 seam. Composition supplies durable VC/1.0 implementations."""
++
++from dataclasses import dataclass
++from datetime import datetime, timezone
++from typing import Protocol
++from uuid import NAMESPACE_URL, uuid5
++
++from backend.services.version_control import contracts as vc
++
++
++def source_digest(serialized_space, description):
++    return vc.canonical_json_hash("vc-optimizer-source/1", {
++        "serialized_space": serialized_space, "description": description,
++    })
++
++
++@dataclass(frozen=True)
++class ChampionArtifact(vc.WireValue):
++    run_id: str
++    champion_id: str
++    binding: vc.BindingRef
++    expected_base: vc.Digest
++    source_version_id: vc.UUIDString
++    serialized_space: vc.JsonObject
++    description: str | None
++    payload_digest: vc.Digest
++    requester_id: str
++    approval_id: vc.UUIDString | None
++
++
++@dataclass(frozen=True)
++class ChampionMutationRequest(vc.MutationRequest):
++    origin: vc.Origin
++    optimizer_run_id: str
++    champion_id: str
++    source_payload_digest: vc.Digest
++
++
++class ChampionSources(Protocol):
++    def load(self, run_id: str, champion_id: str) -> ChampionArtifact:
++        """Read immutable, finalized source; never authorize via telemetry fallback."""
++        ...
++
++
++class ChampionRequests(Protocol):
++    def prepare(self, request: ChampionMutationRequest, requester_id: str) -> ChampionMutationRequest:
++        """Atomically put-if-absent by run/binding-revision key, never overwrite.
++
++        Return the original request on exact retry; reject different digests.
++        Retain the key after coordination reuse and process/Job termination.
++        Ambiguous persistence must raise, never return optimistic success.
++        """
++        ...
++
++
++class WriteFlags(Protocol):
++    def enabled(self, name: str) -> bool: ...
++
++
++class OptimizerChampionAdapter:
++    def __init__(self, *, sources: ChampionSources, gate: vc.MutationGate,
++                 requests: ChampionRequests, flags: WriteFlags | None = None,
++                 facts: vc.OperationFacts | None = None,
++                 identity: vc.IdentityProvider | None = None,
++                 approvals: vc.ApprovalService | None = None):
++        self.sources = sources
++        self.gate = gate
++        self.requests = requests
++        self.flags = flags
++        self.facts = facts
++        self.identity = identity
++        self.approvals = approvals
++
++    def apply(self, run_id, champion_id, binding, expected_base, executor):
++        if self.flags is None or any(self.flags.enabled(name) is not True for name in (
++            "vc_writes_enabled", "vc_optimizer_apply_enabled", "vc_optimizer_contract_ready",
++        )):
++            raise PermissionError("Optimizer champion writes are disabled")
++        if (executor.workspace_id != binding.workspace_id or executor.actor_kind != "service"
++                or not executor.execution_ref.startswith("job/")):
++            raise PermissionError("Champion apply requires a target-local Job executor")
++        source = self.sources.load(run_id, champion_id)
++        if (source.run_id != run_id or source.champion_id != champion_id
++                or source.binding != binding or source.expected_base != expected_base):
++            raise PermissionError("Champion source identity/base does not match request")
++        if source.payload_digest != source_digest(source.serialized_space, source.description):
++            raise ValueError("Champion source payload digest mismatch")
++        if self.identity is None or self.approvals is None:
++            raise PermissionError("Requester identity and M06 authorization ports are required")
++        self.identity.verify_run_as(executor.execution_ref, executor.principal_id)
++        if not source.requester_id:
++            raise PermissionError("Requester must be durably bound to the source")
++        if source.approval_id is None:
++            if (binding.environment != "dev"
++                    or self.identity.can_edit(source.requester_id, binding) is not True):
++                raise PermissionError("Requester edit right or approved release policy is required")
++        digest = vc.canonical_json_hash("vc-optimizer-request/1", vc.to_wire(source))
++        key = vc.canonical_json_hash("vc-optimizer-run/1", {
++            "run_id": run_id, "binding_id": binding.binding_id,
++            "binding_revision": binding.binding_revision, "workspace_id": binding.workspace_id,
++        })
++        request = ChampionMutationRequest(
++            vc.RequestIdentity(str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key)), key, digest),
++            binding, "optimizer_apply",
++            source.source_version_id, expected_base, source.serialized_space, source.description,
++            source.approval_id, vc.Origin.OPTIMIZER, run_id, champion_id, source.payload_digest,
++        )
++        persisted = self.requests.prepare(request, source.requester_id)
++        if persisted != request:
++            raise ValueError("Run already has a different champion/digest")
++        if self.facts is None:
++            raise PermissionError("Authoritative operation facts are required")
++        if self.facts.get_request(request.identity.operation_id).request != request:
++            raise PermissionError("Champion request is not durably published")
++        grant = self.approvals.authorize(request, executor)
++        if (not isinstance(grant, vc.AuthorizationGrant) or grant.binding != binding
++                or grant.request != request.identity or not grant.authorization_reference
++                or grant.expires_at <= datetime.now(timezone.utc)
++                or grant.expected_base_fingerprints.state_digest != expected_base
++                or grant.rendered_target_digest != vc.canonical_json_hash("vc-rendered-target/1", {
++                    "serialized_space": request.serialized_space, "description": request.description,
++                })
++                or grant.approval_id != source.approval_id):
++            raise PermissionError("M06 grant is stale or not bound to champion request")
++        return self.gate.execute(request, executor)
+diff --git a/backend/tests/test_vc_optimizer_adapter.py b/backend/tests/test_vc_optimizer_adapter.py
+new file mode 100644
+index 0000000..6826372
+--- /dev/null
++++ b/backend/tests/test_vc_optimizer_adapter.py
+@@ -0,0 +1,152 @@
++"""M10 VC/1.0 seam tests: backend services are Protocol fakes only."""
++
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++from unittest.mock import Mock
++from uuid import uuid4
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.services.version_control.optimizer_adapter import (
++    ChampionArtifact, OptimizerChampionAdapter, source_digest,
++)
++from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
++
++
++@pytest.fixture
++def rig():
++    binding = binding_fixture()
++    executor = executor_fixture()
++    payload = {"version": 2, "instructions": {}}
++    fingerprints = vc.Fingerprints("a" * 64, "b" * 64, "c" * 64, "vc-c14n/1")
++    source = ChampionArtifact("run", "champion", binding, fingerprints.state_digest,
++                              str(uuid4()), payload, "description",
++                              source_digest(payload, "description"), "requester", None)
++    sources = Mock()
++    sources.load.return_value = source
++    gate = Mock(spec=vc.MutationGate)
++    gate.execute.return_value = vc.OperationResult(str(uuid4()), vc.OperationStatus.CONFIRMED,
++                                                   None, None, False, ())
++    requests = Mock()
++    requests.prepare.side_effect = lambda request, requester: request
++    facts = Mock(spec=vc.OperationFacts)
++    facts.get_request.side_effect = lambda operation_id: vc.ApprovedOperation(
++        requests.prepare.call_args.args[0], None)
++    flags = Mock()
++    flags.enabled.return_value = True
++    identity = Mock(spec=vc.IdentityProvider)
++    identity.can_edit.return_value = True
++    approvals = Mock(spec=vc.ApprovalService)
++    approvals.authorize.side_effect = lambda request, job: vc.AuthorizationGrant(
++        request.binding, request.identity, "requester-rights", fingerprints,
++        vc.canonical_json_hash("vc-rendered-target/1", {
++            "serialized_space": request.serialized_space, "description": request.description,
++        }), datetime.now(timezone.utc) + timedelta(minutes=5), request.approval_id, None)
++    adapter = OptimizerChampionAdapter(sources=sources, gate=gate, requests=requests, flags=flags,
++                                       facts=facts, identity=identity, approvals=approvals)
++    return adapter, source, executor, gate, requests, flags
++
++
++def test_final_champion_applies_once_through_shared_gate(rig):
++    adapter, source, executor, gate, requests, _ = rig
++    receipt = adapter.apply(source.run_id, source.champion_id, source.binding,
++                            source.expected_base, executor)
++    assert receipt is gate.execute.return_value
++    request, job = gate.execute.call_args.args
++    assert job is executor
++    assert request.operation_type == "optimizer_apply"
++    assert request.origin == vc.Origin.OPTIMIZER
++    assert (request.optimizer_run_id, request.champion_id) == ("run", "champion")
++    assert request.serialized_space == source.serialized_space
++    requests.prepare.assert_called_once_with(request, "requester")
++    gate.execute.assert_called_once()
++
++
++def test_champion_apply_rejects_app_executor_or_tampered_source(rig):
++    adapter, source, executor, gate, _, _ = rig
++    with pytest.raises(PermissionError):
++        adapter.apply("run", "champion", source.binding, source.expected_base,
++                      replace(executor, execution_ref="app/worker"))
++    adapter.sources.load.return_value = replace(source, payload_digest="b" * 64)
++    with pytest.raises(ValueError, match="digest"):
++        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    gate.execute.assert_not_called()
++
++
++def test_optimizer_write_switches_default_off(rig):
++    adapter, source, executor, gate, _, flags = rig
++    adapter.flags = None
++    with pytest.raises(PermissionError):
++        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    gate.execute.assert_not_called()
++
++
++def test_retry_or_second_champion_in_same_run_cannot_append_second_optimizer_version(rig):
++    adapter, source, executor, gate, requests, _ = rig
++    durable_requests = {}
++    versions = {}
++
++    def prepare(request, requester):
++        existing = durable_requests.setdefault(request.identity.idempotency_key, request)
++        if existing.identity.request_digest != request.identity.request_digest:
++            raise ValueError("Run already has a different champion/digest")
++        return existing
++
++    def execute(request, job):
++        return versions.setdefault(request.identity.operation_id, gate.execute.return_value)
++
++    requests.prepare.side_effect = prepare
++    gate.execute.side_effect = execute
++    first = adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    restarted = OptimizerChampionAdapter(sources=adapter.sources, gate=gate,
++                                         requests=requests, flags=adapter.flags, facts=adapter.facts,
++                                         identity=adapter.identity, approvals=adapter.approvals)
++    assert restarted.apply("run", "champion", source.binding, source.expected_base,
++                            replace(executor, execution_ref="job/new-attempt")) is first
++    for changed in (replace(source, champion_id="other"),
++                    replace(source, description="changed",
++                            payload_digest=source_digest(source.serialized_space, "changed"))):
++        adapter.sources.load.return_value = changed
++        with pytest.raises(ValueError, match="different champion/digest"):
++            adapter.apply("run", changed.champion_id, source.binding, source.expected_base, executor)
++    assert len(durable_requests) == len(versions) == 1
++    assert gate.execute.call_count == 2
++
++
++def test_telemetry_memory_fallback_never_authorizes_champion_apply(rig):
++    adapter, source, executor, gate, requests, _ = rig
++    adapter.facts = Mock(spec=vc.OperationFacts)
++    adapter.facts.get_request.side_effect = ConnectionError("authoritative store unavailable")
++    adapter.sources.telemetry_fallback = {"champion": source}
++    with pytest.raises(ConnectionError, match="authoritative store"):
++        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    gate.execute.assert_not_called()
++    requests.prepare.assert_called_once()
++
++
++def test_job_executor_verifies_requester_edit_or_release_policy(rig):
++    adapter, source, executor, gate, _, _ = rig
++    adapter.identity = Mock(spec=vc.IdentityProvider)
++    adapter.identity.can_edit.side_effect = lambda subject, binding: subject == executor.principal_id
++    adapter.approvals = Mock(spec=vc.ApprovalService)
++    with pytest.raises(PermissionError, match="Requester"):
++        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    adapter.identity.can_edit.assert_called_once_with("requester", source.binding)
++    gate.execute.assert_not_called()
++
++
++def test_release_policy_denial_and_wrong_job_run_as_fail_closed(rig):
++    adapter, source, executor, gate, _, _ = rig
++    source = replace(source, approval_id=str(uuid4()), binding=replace(source.binding, environment="prod"))
++    adapter.sources.load.return_value = source
++    adapter.identity = Mock(spec=vc.IdentityProvider)
++    adapter.identity.can_edit.return_value = False
++    adapter.approvals = Mock(spec=vc.ApprovalService)
++    adapter.approvals.authorize.side_effect = PermissionError("release policy revoked")
++    with pytest.raises(PermissionError, match="release policy"):
++        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    adapter.identity.verify_run_as.side_effect = PermissionError("wrong run_as")
++    with pytest.raises(PermissionError, match="run_as"):
++        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    gate.execute.assert_not_called()
+diff --git a/packages/genie-space-optimizer/M10_IMPLEMENTATION.md b/packages/genie-space-optimizer/M10_IMPLEMENTATION.md
+new file mode 100644
+index 0000000..780971d
+--- /dev/null
++++ b/packages/genie-space-optimizer/M10_IMPLEMENTATION.md
+@@ -0,0 +1,71 @@
++# M10 task 13: installed optimizer ports
++
++## Installation and offline verification
++
++The package declares `genie_space_optimizer.vc` / `ports` in `pyproject.toml`.
++The build backend writes this declaration into distribution entry-point metadata;
++no discovery shim or backend startup import is needed. M08 target-local
++composition loads `OptimizerRuntime` (`contract_version == "VC/1.0"`) and injects
++the champion adapter, restore-job port, and isolation registry. `champion_run`
++uses that injected adapter, not an independently constructed mutation gate.
++
++From this package directory, prepare the workspace environment before using
++`--no-sync`:
++
++```bash
++uv sync --frozen
++uv run --no-sync pytest tests/test_vc_champion_apply.py::test_package_install_exposes_shared_gate_without_importing_backend_app -q
++uv run --no-sync pytest --ignore=tests/integration -q
++```
++
++`--no-sync` intentionally does not refresh an already installed distribution.
++If editable metadata predates the entry-point declaration, rerun
++`uv sync --frozen --reinstall-package genie-space-optimizer` before testing.
++Do not fabricate metadata in pytest setup. The discovery test uses an isolated
++Python subprocess, blocks backend/FastAPI imports, and invokes the injected
++champion adapter through the installed entry point.
++
++From the repository root, also run:
++
++```bash
++python -m pytest backend/tests/test_vc_optimizer_adapter.py -q
++```
++
++Verified September 7, 2026: **893 package offline tests passed**, **7 backend
++adapter tests passed**. A freshly built wheel installed without dependencies
++into a separate temporary environment passed the same isolated entry-point
++discovery and champion-adapter invocation probe. Offline collection contained
++893 tests and no platform probes; explicit integration collection selected all
++six platform probes, while default selection deselected all six.
++
++## Real-platform deployment BLOCKER
++
++`tests/integration/test_vc_optimizer_platform.py` is **not platform-validated**.
++Its six Jobs/Genie/Delta probes remain a deployment blocker until M04/M06/M08
++target-local composition and disposable fixtures are deployed and exercised.
++Offline success and collection-only checks do not satisfy this blocker.
++
++The module carries `pytest.mark.integration`; package defaults deselect it.
++The offline command above excludes the entire integration directory from
++collection. Explicit integration selection is required:
++
++```bash
++uv run --no-sync pytest -m integration tests/integration/test_vc_optimizer_platform.py --collect-only -q
++VC_M10_INTEGRATION_CONFIG=/absolute/path/to/disposable-fixtures.json \
++  uv run --no-sync pytest -m integration tests/integration/test_vc_optimizer_platform.py -q
++```
++
++The JSON manifest must supply `disposable_nonproduction: true`, an explicitly
++chosen non-`DEFAULT` `profile`, `host`, `workspace_id`, `catalog`, `control_schema`,
++`warehouse_id`, and `executor_principal`. No profile is automatically selected.
++Its `cases` map must contain `candidate_abandon`, `champion`, `external_preimage`,
++`noop`, `ambiguous`, and `restore`, each with a fresh `run_id`, `operation_id`,
++`managed_space_id`, deployed `job_id`, and `parameters` carrying that `run_id`.
++Candidate abandonment also needs `candidate_space_id`; champion verification
++needs `champion_id`; champion and ambiguous retries need `retry_parameters`
++carrying the same `run_id`; restore needs `historical_version_id`.
++Jobs must be tagged `vc_test_environment=disposable`, `vc_module=m10`, and run as
++the manifest's service principal. Fixture preparation must establish the
++scenario-specific initial state, approvals, and ambiguous-outcome injection.
++Missing configuration fails explicitly; it is never converted into a skip or
++claimed as a platform pass.
+diff --git a/packages/genie-space-optimizer/pyproject.toml b/packages/genie-space-optimizer/pyproject.toml
+index b61b1ae..b06eaee 100644
+--- a/packages/genie-space-optimizer/pyproject.toml
++++ b/packages/genie-space-optimizer/pyproject.toml
+@@ -23,6 +23,9 @@ spark = [
+     "databricks-connect==18.0.3; python_version >= '3.12'",
+ ]
+ 
++[project.entry-points."genie_space_optimizer.vc"]
++ports = "genie_space_optimizer.integration.version_control:OptimizerRuntime"
++
+ [dependency-groups]
+ dev = [
+     "ty==0.0.25",
+@@ -33,6 +36,8 @@ dev = [
+ [tool.pytest.ini_options]
+ pythonpath = ["src"]
+ testpaths = ["tests"]
++addopts = "-m 'not integration'"
++markers = ["integration: requires explicit real nonproduction Databricks platform"]
+ 
+ [tool.ty.src]
+ include = ["src/**"]
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/common/genie_client.py b/packages/genie-space-optimizer/src/genie_space_optimizer/common/genie_client.py
+index 5adacb4..c774b3c 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/common/genie_client.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/common/genie_client.py
+@@ -946,6 +946,9 @@ def patch_space_config(
+     """
+     from .genie_schema import normalize_array_fields, validate_serialized_space
+ 
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++    assert_candidate_write(w, space_id)
++
+     clean = strip_non_exportable_fields(_serialized_space_for_patch(config))
+     clean = sort_genie_config(clean)
+     # Coerce every array-typed leaf field (description / synonyms / content /
+@@ -1018,6 +1021,8 @@ def update_space_description(
+     ``{"description": "..."}`` to avoid coupling with config updates.
+     """
+     payload = {"description": description}
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++    assert_candidate_write(w, space_id)
+     logger.info(
+         "PATCHing Genie Agent %s description (%d chars)", space_id, len(description),
+     )
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/apply.py b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/apply.py
+index baa41b8..09e1423 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/apply.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/apply.py
+@@ -32,73 +32,8 @@ def apply_optimization(
+     ws: WorkspaceClient,
+     config: IntegrationConfig,
+ ) -> ActionResult:
+-    """Apply an optimization run.  OBO client only (no SP needed).
+-
+-    Uses SQL Warehouse for Delta state reads/writes.
+-
+-    Args:
+-        run_id: The optimization run ID to apply.
+-        ws: OBO-authenticated ``WorkspaceClient`` for the requesting user.
+-        config: Integration configuration.
+-
+-    Returns:
+-        :class:`ActionResult` with status ``"applied"``.
+-
+-    Raises:
+-        ValueError: If the run is not found or not in a terminal status.
+-        RuntimeError: If deferred UC writes fail.
+-    """
+-    run_data = wh_load_run(ws, config.warehouse_id, run_id, config.catalog, config.schema_name)
+-    if not run_data:
+-        raise ValueError(f"Run not found: {run_id}")
+-
+-    status = str(run_data.get("status") or "")
+-    if status not in _TERMINAL_APPLY_STATUSES:
+-        raise ValueError(
+-            f"Cannot apply run in status {status}. "
+-            f"Must be one of: {sorted(_TERMINAL_APPLY_STATUSES)}"
+-        )
+-
+-    requested_mode = str(run_data.get("apply_mode") or "genie_config").lower()
+-
+-    if requested_mode in _DEFERRED_UC_MODES:
+-        iters_df = sql_warehouse_query(
+-            ws,
+-            config.warehouse_id,
+-            f"SELECT run_id, iteration, eval_scope, overall_accuracy "
+-            f"FROM {config.catalog}.{config.schema_name}.genie_opt_iterations "
+-            f"WHERE run_id = '{run_id}' AND eval_scope = 'full' "
+-            f"ORDER BY iteration ASC",
+-        )
+-        iters_rows = iters_df.to_dict("records") if not iters_df.empty else []
+-        baseline_score, best_score = _get_baseline_and_best(iters_rows)
+-
+-        if baseline_score is None or best_score is None:
+-            raise RuntimeError(
+-                "Deferred UC writes require completed full-evaluation results "
+-                "(baseline and optimized scores)."
+-            )
+-        if best_score <= baseline_score:
+-            raise RuntimeError(
+-                "Deferred UC writes require a proven improvement in evaluation "
+-                f"(baseline={baseline_score:.1f}%, optimized={best_score:.1f}%)."
+-            )
+-
+-    message = "Optimization applied successfully."
+-    if requested_mode in _DEFERRED_UC_MODES:
+-        message = (
+-            "Optimization applied. Note: deferred UC writes via the integration "
+-            "API are not yet supported; use the standalone app for UC write-back."
+-        )
+-
+-    sql_warehouse_execute(
+-        ws,
+-        config.warehouse_id,
+-        f"UPDATE {config.catalog}.{config.schema_name}.genie_opt_runs "
+-        f"SET status = 'APPLIED', updated_at = current_timestamp() "
+-        f"WHERE run_id = '{run_id}'",
+-    )
+-    return ActionResult(status="applied", run_id=run_id, message=message)
++    """Legacy apply is disabled; compose the VC/1.0 champion adapter explicitly."""
++    raise PermissionError("Use the guarded champion adapter under a target-local Job")
+ 
+ 
+ def _get_baseline_and_best(
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/discard.py b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/discard.py
+index 84f8275..400fd5b 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/discard.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/discard.py
+@@ -85,30 +85,6 @@ def discard_optimization(
+         action="discard",
+     )
+ 
+-    original_snapshot = run_data.get("config_snapshot")
+-    if isinstance(original_snapshot, str):
+-        try:
+-            original_snapshot = json.loads(original_snapshot)
+-        except (json.JSONDecodeError, TypeError):
+-            original_snapshot = {}
+-
+-    if not original_snapshot or not isinstance(original_snapshot, dict):
+-        raise ValueError(
+-            "This run has no pre-optimization snapshot; it cannot be safely discarded."
+-        )
+-
+-    from genie_space_optimizer.optimization.applier import rollback
+-
+-    apply_log = {"pre_snapshot": original_snapshot}
+-    client = _pick_genie_client(ws, sp_ws)
+-    rollback_result = rollback(apply_log, client, space_id)
+-    if str(rollback_result.get("status") or "").upper() != "SUCCESS":
+-        errors = rollback_result.get("errors") or ["unknown rollback failure"]
+-        raise RuntimeError(
+-            "Optimization was not discarded because rollback failed: "
+-            + "; ".join(str(error) for error in errors)
+-        )
+-
+     sql_warehouse_execute(
+         sp_ws,
+         config.warehouse_id,
+@@ -121,7 +97,7 @@ def discard_optimization(
+     return ActionResult(
+         status="discarded",
+         run_id=run_id,
+-        message="Optimization discarded and patches rolled back.",
++        message="Optimization discarded; managed state unchanged. Use a governed restore Job for historical state.",
+     )
+ 
+ 
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py
+index 2310a7d..f5c5083 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py
+@@ -40,6 +40,7 @@ from genie_space_optimizer.common.warehouse import (
+ 
+ from .config import IntegrationConfig
+ from .types import ActionResult
++from .version_control import RestoreJobs, RestoreSelection
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -60,162 +61,20 @@ def revert_optimization(
+     *,
+     target: RevertTarget = "champion",
+     benchmark_target: BenchmarkRevertTarget = "current",
+-) -> ActionResult:
+-    """Revert the live Genie Agent to a past run's captured configuration.
+-
+-    Args:
+-        run_id: The optimization run whose configuration to revert to.
+-        ws: OBO-authenticated ``WorkspaceClient`` for the requesting user.
+-        sp_ws: Service-principal ``WorkspaceClient`` (fallback for Genie API).
+-        config: Integration configuration.
+-        target: Which configuration to revert to — ``"champion"`` (the winning
+-            iteration's full effective config) or ``"baseline"`` (the run's
+-            pre-run ``config_snapshot``).
+-        benchmark_target: ``"current"`` preserves the live benchmark block;
+-            ``"champion"`` restores the winning iteration's benchmark block;
+-            ``"baseline"`` restores the pre-run benchmark block independently
+-            of the selected agent configuration target.
+-
+-    Returns:
+-        :class:`ActionResult` with status ``"reverted"``.
+-
+-    Raises:
+-        ValueError: If the run is not found, still running, or has no captured
+-            configuration for the requested target.
+-        RuntimeError: If the Genie API rollback PATCH fails (incl. config
+-            validation failure).
+-    """
+-    # Internal optimizer state is owned by the app service principal.  The OBO
+-    # caller is authorized against the target Space below; their UC grants must
+-    # not decide whether the app can read its own run history.
+-    run_data = wh_load_run(
+-        sp_ws, config.warehouse_id, run_id, config.catalog, config.schema_name,
+-    )
+-    if not run_data:
+-        raise ValueError(f"Run not found: {run_id}")
+-    if target not in {"champion", "baseline"}:
+-        raise ValueError("target must be 'champion' or 'baseline'.")
+-
+-    status = str(run_data.get("status") or "")
+-    if status.upper() in _ACTIVE_RUN_STATUSES:
+-        raise ValueError(
+-            f"Cannot revert to a run that is still in progress (status={status}). "
+-            f"Wait for the run to finish first."
+-        )
+-
+-    space_id = str(run_data.get("space_id") or "")
+-    if not space_id:
+-        raise ValueError("Run has no space_id; cannot target a Genie Agent to revert.")
+-
+-    from genie_space_optimizer.common.genie_client import user_can_edit_space
+-
+-    if not user_can_edit_space(ws, space_id, acl_client=sp_ws):
+-        raise PermissionError(
+-            "You need CAN_EDIT or CAN_MANAGE permission on this Genie Agent "
+-            "to revert its configuration."
+-        )
+-
+-    _assert_no_active_space_runs(
+-        space_id=space_id,
+-        sp_ws=sp_ws,
+-        config=config,
+-    )
+-
+-    if benchmark_target not in {"current", "champion", "baseline"}:
+-        raise ValueError(
+-            "benchmark_target must be 'current', 'champion', or 'baseline'."
+-        )
+-
+-    baseline_snapshot = _load_baseline_config(run_data)
+-    baseline_config = _as_serialized_space_config(baseline_snapshot)
+-    champion_config = None
+-    if target == "champion" or benchmark_target == "champion":
+-        champion_config = _as_serialized_space_config(
+-            _load_champion_config(
+-                sp_ws,
+-                config.warehouse_id,
+-                config.catalog,
+-                config.schema_name,
+-                run_id,
+-            )
+-        )
+-
+-    if target == "baseline":
+-        target_config = baseline_config
+-        target_description = _description_from_snapshot(baseline_snapshot)
+-        source = "run baseline (genie_opt_runs.config_snapshot)"
+-        missing_hint = (
+-            "This run has no baseline configuration snapshot to revert to."
+-        )
+-    else:
+-        target_config = champion_config
+-        target_description = _load_champion_description(
+-            sp_ws, config.warehouse_id, config.catalog, config.schema_name, run_id,
+-        )
+-        source = "champion iteration (genie_opt_iterations observed/config JSON)"
+-        missing_hint = (
+-            "This run's champion configuration is not available "
+-            "(the iteration config was not captured). "
+-            "Try reverting to the baseline instead."
+-        )
+-
+-    if not target_config or not isinstance(target_config, dict):
+-        raise ValueError(missing_hint)
+-
+-    preferred_client = _pick_genie_client(ws, sp_ws)
+-    live_snapshot, client = _fetch_live_space_snapshot(
+-        space_id=space_id,
+-        clients=(preferred_client, ws, sp_ws),
+-    )
+-    live_config = _as_serialized_space_config(live_snapshot)
+-    if not live_config:
+-        raise RuntimeError(
+-            "Cannot safely revert without capturing the live Genie Agent state."
+-        )
+-    live_description = _description_from_snapshot(live_snapshot)
+-    if benchmark_target == "baseline" and not baseline_config:
+-        raise ValueError(
+-            "This run has no pre-run benchmark snapshot to restore."
+-        )
+-    if benchmark_target == "champion" and not champion_config:
+-        raise ValueError(
+-            "This run has no champion benchmark snapshot to restore."
+-        )
+-    target_config = _compose_revert_benchmarks(
+-        target_config,
+-        space_id=space_id,
+-        live_config=live_config,
+-        champion_config=champion_config,
+-        baseline_config=baseline_config,
+-        benchmark_target=benchmark_target,
+-    )
+-    _apply_revert_state(
+-        client=client,
+-        space_id=space_id,
+-        target=target,
+-        run_id=run_id,
+-        target_config=target_config,
+-        target_description=target_description,
+-        live_config=live_config,
+-        live_description=live_description,
+-    )
+-
+-    logger.info(
+-        "Reverted live Genie Agent %s to run %s's %s config with %s benchmarks "
+-        "(source=%s).",
+-        space_id, run_id, target, benchmark_target, source,
+-    )
+-    benchmark_message = {
+-        "current": "current benchmarks preserved.",
+-        "champion": "benchmarks restored to the champion iteration.",
+-        "baseline": "benchmarks restored to the pre-run baseline.",
+-    }[benchmark_target]
+-    return ActionResult(
+-        status="reverted",
+-        run_id=run_id,
+-        message=f"Genie Agent reverted to this run's {target} configuration; "
+-        f"{benchmark_message}",
+-    )
++    selection: RestoreSelection | None = None,
++    restore_jobs: RestoreJobs | None = None,
++    requester: object = None,
++    writes_enabled: bool = False,
++) -> object:
++    """Retired managed-state mutation; callers must submit a governed restore Job."""
++    if writes_enabled is not True or restore_jobs is None or selection is None or requester is None:
++        raise PermissionError("Use the governed restore Job; in-process revert is retired")
++    if (selection.run_id != run_id or not selection.historical_version_id
++            or not selection.expected_base or not selection.approval_id):
++        raise PermissionError("Restore requires selected immutable version/base/approval")
++    if target not in {"champion", "baseline"} or benchmark_target != "current":
++        raise PermissionError("Mixed historical state requires a separately approved restore request")
++    return restore_jobs.submit(selection, requester)
+ 
+ 
+ def _assert_no_active_space_runs(
+@@ -547,63 +406,8 @@ def _apply_revert_state(
+     live_config: dict,
+     live_description: str | object,
+ ) -> None:
+-    """Apply serialized state + description with best-effort compensation."""
+-    from genie_space_optimizer.common.genie_client import (
+-        patch_space_config,
+-        update_space_description,
+-    )
+-
+-    try:
+-        patch_space_config(client, space_id, target_config)
+-    except ValueError as exc:
+-        logger.warning(
+-            "%s config for run %s failed validation before PATCH: %s",
+-            target, run_id, str(exc)[:200],
+-        )
+-        raise RuntimeError(f"The {target} configuration is invalid: {exc}") from exc
+-    except Exception as exc:
+-        raise RuntimeError(
+-            f"Failed to apply the {target} serialized configuration: {exc}"
+-        ) from exc
+-
+-    if target_description is _MISSING_DESCRIPTION:
+-        return
+-
+-    try:
+-        update_space_description(
+-            client, space_id, str(target_description),
+-        )
+-    except Exception as exc:
+-        compensation_errors: list[str] = []
+-        try:
+-            patch_space_config(client, space_id, live_config)
+-        except Exception as compensation_exc:
+-            compensation_errors.append(
+-                f"serialized_space: {type(compensation_exc).__name__}: "
+-                f"{str(compensation_exc)[:160]}"
+-            )
+-        try:
+-            # A missing live description is equivalent to the API's empty
+-            # description for compensation purposes.
+-            restore_description = (
+-                "" if live_description is _MISSING_DESCRIPTION
+-                else str(live_description)
+-            )
+-            update_space_description(client, space_id, restore_description)
+-        except Exception as compensation_exc:
+-            compensation_errors.append(
+-                f"description: {type(compensation_exc).__name__}: "
+-                f"{str(compensation_exc)[:160]}"
+-            )
+-        suffix = (
+-            " Compensation also failed: " + "; ".join(compensation_errors)
+-            if compensation_errors
+-            else " The original live state was restored."
+-        )
+-        raise RuntimeError(
+-            f"Failed to restore the {target} description; the revert was not "
+-            f"completed.{suffix}"
+-        ) from exc
++    """Retired managed-state mutation; callers must submit a governed restore Job."""
++    raise PermissionError("Use the governed restore Job; in-process revert is retired")
+ 
+ 
+ def _load_baseline_config(run_data: dict) -> dict | None:
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/version_control.py b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/version_control.py
+new file mode 100644
+index 0000000..e419315
+--- /dev/null
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/version_control.py
+@@ -0,0 +1,163 @@
++"""Optimizer orchestration over injected VC/1.0 ports, never a version ledger.
++
++No backend application imports: the target-local composition owns adapters.
++"""
++from typing import Protocol, Any
++from dataclasses import dataclass
++
++
++class IsolationRegistry(Protocol):
++    def resolve_physical(self, workspace_id: str, space_id: str) -> Any: ...
++    def optimizer_owner(self, workspace_id: str, space_id: str) -> str | None: ...
++    def workspace_id_for(self, client: Any) -> str: ...
++
++
++@dataclass(frozen=True)
++class EvaluationBinding:
++    workspace_id: str
++    space_id: str
++    run_id: str
++
++    def validate(self, registry: IsolationRegistry) -> "EvaluationBinding":
++        if not all((self.workspace_id, self.space_id, self.run_id)):
++            raise PermissionError("Evaluation resource identity is required")
++        if registry.resolve_physical(self.workspace_id, self.space_id) is not None:
++            raise PermissionError("Candidate evaluation cannot target a managed binding")
++        if registry.optimizer_owner(self.workspace_id, self.space_id) != self.run_id:
++            raise PermissionError("Positive optimizer resource ownership is required")
++        return self
++
++
++class CandidateSession:
++    def __init__(self, resource: EvaluationBinding, registry: IsolationRegistry,
++                 client: Any, *, writes_enabled: bool = False):
++        if writes_enabled is not True:
++            raise PermissionError("Optimizer candidate writes are disabled")
++        self.resource = resource.validate(registry)
++        if registry.workspace_id_for(client) != resource.workspace_id:
++            raise PermissionError("Candidate client workspace does not match resource")
++        self.registry = registry
++        self.client = _EvaluationClient(client, self)
++
++    def validate(self, run_id: str):
++        if run_id != self.resource.run_id:
++            raise PermissionError("Candidate belongs to another optimizer run")
++        return self.resource.validate(self.registry)
++
++
++class _EvaluationClient:
++    def __init__(self, client: Any, session: CandidateSession):
++        self._client = client
++        self._session = session
++        self.api_client = self
++
++    def __getattr__(self, name):
++        if name == "genie":
++            from databricks.sdk.service.dashboards import GenieAPI
++            return GenieAPI(self)
++        if name == "config":
++            return self._client.config
++        raise PermissionError(f"Candidate client does not expose {name}")
++
++    def do(self, method, path, **kwargs):
++        resource = self._session.validate(self._session.resource.run_id)
++        prefix = f"/api/2.0/genie/spaces/{resource.space_id}"
++        if path != prefix and not path.startswith(prefix + "/"):
++            raise PermissionError("Candidate API call escaped isolated resource")
++        if any(part in path for part in ("..", "%", "?", "#")):
++            raise PermissionError("Noncanonical candidate API path")
++        return self._client.api_client.do(method, path, **kwargs)
++
++
++def assert_candidate_write(client: Any, space_id: str) -> None:
++    if not isinstance(client, _EvaluationClient):
++        raise PermissionError("Managed writes require the champion gate; candidate proof is missing")
++    resource = client._session.validate(client._session.resource.run_id)
++    if resource.space_id != space_id:
++        raise PermissionError("Mutation does not target the isolated candidate resource")
++
++
++class ChampionAdapter(Protocol):
++    def apply(self, run_id: str, champion_id: str, binding: Any,
++              expected_base: str, executor: Any) -> Any: ...
++
++
++@dataclass(frozen=True)
++class RecoveryHandle:
++    operation_id: str
++    job_kind: str = "recovery"
++
++
++@dataclass(frozen=True)
++class RestoreSelection:
++    run_id: str
++    historical_version_id: str
++    binding: Any
++    expected_base: str
++    approval_id: str
++
++
++class RestoreJobs(Protocol):
++    def submit(self, selection: RestoreSelection, requester: Any) -> Any:
++        """Resolve immutable approved restore inputs and submit through M04."""
++        ...
++
++
++@dataclass(frozen=True)
++class OptimizerRuntime:
++    """Entry point for explicit M08 target-local composition, not backend startup."""
++
++    contract_version = "VC/1.0"
++    champion_adapter: ChampionAdapter
++    restore_jobs: RestoreJobs
++    isolation_registry: IsolationRegistry
++
++    def champion_run(self, run_id: str) -> "ChampionRun":
++        return ChampionRun(run_id, self.champion_adapter)
++
++
++class ChampionRun:
++    def __init__(self, run_id: str, adapter: ChampionAdapter):
++        self.run_id = run_id
++        self.adapter = adapter
++        self.iterations = []
++        self.abandoned = False
++        self.receipt = None
++        self.post_version = None
++        self.pre_version = None
++        self.evidence_references = ()
++        self.recovery_handle = None
++        self._apply_identity = None
++
++    def record_iteration(self, champion_id: str, payload: dict, score: float):
++        from copy import deepcopy
++        self.iterations.append((champion_id, deepcopy(payload), score))
++
++    def abandon(self):
++        self.abandoned = True
++
++    def apply(self, champion_id, binding, expected_base, executor):
++        if self.abandoned:
++            raise PermissionError("An abandoned run cannot apply a champion")
++        identity = (champion_id, binding, expected_base)
++        if self._apply_identity is not None:
++            if identity != self._apply_identity:
++                raise ValueError("Run already selected a different champion/base")
++            if self.receipt is None:
++                raise RuntimeError("Unknown apply outcome requires governed Job recovery")
++            return self.receipt
++        self._apply_identity = identity
++        receipt = self.adapter.apply(self.run_id, champion_id, binding, expected_base, executor)
++        self.receipt = receipt
++        self.pre_version = receipt.preimage
++        self.evidence_references = receipt.evidence_references
++        if receipt.unresolved or receipt.status in {"applied_partial", "applied_unverified", "quarantined"}:
++            self.recovery_handle = RecoveryHandle(receipt.operation_id)
++            return receipt
++        if receipt.status == "noop" and not receipt.unresolved:
++            self.post_version = None
++            return receipt
++        if receipt.status != "confirmed" or receipt.unresolved or receipt.postimage is None:
++            raise RuntimeError("Champion has no verified final post-version")
++        self.post_version = receipt.postimage
++        return receipt
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py
+index e41f3aa..cbe2139 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py
+@@ -4051,6 +4051,11 @@ def apply_patch_set(
+ 
+     Returns an ``apply_log`` dict with pre/post snapshots and rollback info.
+     """
++    if w is not None:
++        from genie_space_optimizer.integration.version_control import assert_candidate_write
++        assert_candidate_write(w, space_id)
++        if apply_mode != "genie_config":
++            raise PermissionError("Candidate evaluation cannot mutate shared UC artifacts")
+     pre_snapshot = copy.deepcopy(metadata_snapshot)
+     config = copy.deepcopy(metadata_snapshot)
+ 
+@@ -4558,6 +4563,9 @@ def rollback(
+     Primary mechanism: replace current config with ``apply_log["pre_snapshot"]``.
+     Fallback: execute rollback_commands in reverse order (HIGH -> MEDIUM -> LOW).
+     """
++    if w is not None:
++        from genie_space_optimizer.integration.version_control import assert_candidate_write
++        assert_candidate_write(w, space_id)
+     pre_snapshot = apply_log.get("pre_snapshot")
+     if pre_snapshot is None:
+         return {
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py
+index 3a8b750..b7c2c6e 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py
+@@ -2586,8 +2586,16 @@ def run_unified_optimization_loop(
+     wide_schema_parent_artifact_id: str | None = None,
+     wide_schema_profile_budget: dict[str, Any] | None = None,
+     diagnostic_callback: Callable[..., None] | None = None,
++    candidate_session: Any = None,
+ ) -> dict[str, Any]:
+     """Run baseline eval plus bounded LLM patch attempts."""
++    if candidate_session is None:
++        raise PermissionError("An optimizer-owned CandidateSession is required")
++    resource = candidate_session.validate(run_id)
++    if apply_mode != "genie_config":
++        raise PermissionError("Candidate exploration cannot mutate shared UC artifacts")
++    space_id = resource.space_id
++    w = candidate_session.client
+     target_accuracy = target_accuracy_percent(float(target_accuracy))
+     allowed_levers = [int(l) for l in levers if int(l) in {1, 2, 3, 4, 5, 6}]
+     if not allowed_levers:
+diff --git a/packages/genie-space-optimizer/tests/integration/test_vc_optimizer_platform.py b/packages/genie-space-optimizer/tests/integration/test_vc_optimizer_platform.py
+new file mode 100644
+index 0000000..bf019d0
+--- /dev/null
++++ b/packages/genie-space-optimizer/tests/integration/test_vc_optimizer_platform.py
+@@ -0,0 +1,165 @@
++"""Real Jobs/Genie/Delta probes. Missing deployment is a failure, never a skip.
++
++Run explicitly with VC_M10_INTEGRATION_CONFIG pointing at the disposable fixture
++manifest described in M10_IMPLEMENTATION.md. No platform mutations run offline.
++"""
++
++from datetime import timedelta
++import json
++import os
++from pathlib import Path
++import re
++
++import pytest
++
++pytestmark = pytest.mark.integration
++
++
++def _identifier(value):
++    assert isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
++    return f"`{value}`"
++
++
++def _literal(value):
++    assert isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value)
++    return f"'{value}'"
++
++
++class LiveOptimizer:
++    def __init__(self, config):
++        from databricks.sdk import WorkspaceClient
++
++        assert config["disposable_nonproduction"] is True
++        assert config["profile"].upper() != "DEFAULT"
++        self.config = config
++        self.client = WorkspaceClient(profile=config["profile"])
++        assert self.client.config.host.rstrip("/") == config["host"].rstrip("/")
++        identity = self.client.api_client.do("GET", "/api/2.0/preview/scim/v2/Me",
++                                             response_headers=["X-Databricks-Org-Id"])
++        assert str(identity["X-Databricks-Org-Id"]) == str(config["workspace_id"])
++        self.control = ".".join(_identifier(config[key]) for key in ("catalog", "control_schema"))
++
++    def rows(self, table, predicate):
++        from databricks.sdk.service.sql import StatementState
++
++        result = self.client.statement_execution.execute_statement(
++            warehouse_id=self.config["warehouse_id"],
++            statement=f"SELECT * FROM {self.control}.{_identifier(table)} WHERE {predicate}",
++            wait_timeout="50s", on_wait_timeout="CANCEL",
++        )
++        assert result.status.state == StatementState.SUCCEEDED, "Authoritative Delta read failed"
++        assert not result.manifest.truncated, "Probe must not silently truncate evidence"
++        assert not result.result.next_chunk_index, "Probe requires complete evidence in one chunk"
++        columns = [column.name for column in result.manifest.schema.columns]
++        return [dict(zip(columns, row)) for row in (result.result.data_array or [])]
++
++    def state(self, space_id):
++        _literal(space_id)
++        envelope = self.client.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}",
++                                              query={"include_serialized_space": "true"})
++        serialized = envelope["serialized_space"]
++        return {"serialized_space": json.loads(serialized) if isinstance(serialized, str) else serialized,
++                "description": envelope.get("description")}
++
++    def run(self, case, *, retry=False):
++        settings = self.client.jobs.get(case["job_id"]).settings
++        assert settings.tags.get("vc_test_environment") == "disposable"
++        assert settings.tags.get("vc_module") == "m10"
++        assert settings.run_as.service_principal_name == self.config["executor_principal"]
++        parameters = dict(case["retry_parameters"] if retry else case["parameters"])
++        assert parameters["run_id"] == case["run_id"]
++        return self.client.jobs.run_now_and_wait(job_id=case["job_id"], job_parameters=parameters,
++                                                 timeout=timedelta(minutes=30))
++
++    def versions(self, case):
++        return self.rows("genie_space_versions", "optimizer_run_id = " + _literal(case["run_id"]))
++
++    def operations(self, case):
++        return self.rows("genie_space_operations", "operation_id = " + _literal(case["operation_id"]))
++
++
++@pytest.fixture
++def live_optimizer():
++    location = os.environ.get("VC_M10_INTEGRATION_CONFIG")
++    if not location:
++        pytest.fail("DEPLOYMENT BLOCKER: VC_M10_INTEGRATION_CONFIG and M04/M06/M08 composition required")
++    config = json.loads(Path(location).read_text())
++    return LiveOptimizer(config)
++
++
++def test_live_candidates_and_abandon_do_not_mutate_managed_binding(live_optimizer):
++    live = live_optimizer
++    case = live.config["cases"]["candidate_abandon"]
++    assert case["candidate_space_id"] != case["managed_space_id"]
++    assert not live.rows("genie_space_registry", "space_id = " + _literal(case["candidate_space_id"]))
++    before = live.state(case["managed_space_id"])
++    candidate_before = live.state(case["candidate_space_id"])
++    assert not live.versions(case), "Use a fresh, unapplied run fixture"
++    live.run(case)
++    assert live.state(case["managed_space_id"]) == before
++    assert live.state(case["candidate_space_id"]) != candidate_before
++    assert not live.versions(case)
++    assert not live.operations(case)
++
++
++def test_live_champion_retry_preserves_one_authoritative_optimizer_version(live_optimizer):
++    live = live_optimizer
++    case = live.config["cases"]["champion"]
++    live.run(case)
++    first = live.versions(case)
++    assert len(first) == 1 and first[0]["origin"] == "optimizer"
++    assert first[0]["champion_id"] == case["champion_id"]
++    assert first[0]["operation_id"] == case["operation_id"]
++    observed = live.state(case["managed_space_id"])
++    assert json.loads(first[0]["serialized_space_json"]) == observed["serialized_space"]
++    assert json.loads(first[0]["restorable_metadata_json"]).get("description") == observed["description"]
++    live.run(case, retry=True)
++    assert live.versions(case) == first
++    assert any(row["status"] == "confirmed" for row in live.operations(case))
++
++
++def test_live_external_preimage_is_preserved_separately(live_optimizer):
++    live = live_optimizer
++    case = live.config["cases"]["external_preimage"]
++    before = live.state(case["managed_space_id"])
++    live.run(case)
++    evidence = live.rows("genie_space_versions", "operation_id = " + _literal(case["operation_id"]))
++    external = [row for row in evidence if row["origin"] == "external"]
++    assert external and json.loads(external[0]["serialized_space_json"]) == before["serialized_space"]
++    assert len([row for row in evidence if row["origin"] == "optimizer"]) <= 1
++    assert all(row["optimizer_run_id"] is None for row in external)
++
++
++def test_live_noop_champion_has_durable_receipt_without_version(live_optimizer):
++    live = live_optimizer
++    case = live.config["cases"]["noop"]
++    before = live.state(case["managed_space_id"])
++    live.run(case)
++    assert live.state(case["managed_space_id"]) == before
++    assert not live.versions(case)
++    assert any(row["status"] == "noop" for row in live.operations(case))
++
++
++def test_live_ambiguous_apply_cannot_replay_or_compensate(live_optimizer):
++    live = live_optimizer
++    case = live.config["cases"]["ambiguous"]
++    live.run(case)
++    facts = live.operations(case)
++    assert any(row["status"] in {"applied_unverified", "applied_partial", "quarantined"} for row in facts)
++    attempts = {row["attempt_id"] for row in facts if row["attempt_id"]}
++    live.run(case, retry=True)
++    retried = live.operations(case)
++    assert {row["attempt_id"] for row in retried if row["attempt_id"]} == attempts
++    assert not any(row["status"] in {"compensation_attempted", "compensated"} for row in retried)
++    assert not live.versions(case)
++
++
++def test_live_historical_restore_uses_job_and_restored_from_link(live_optimizer):
++    live = live_optimizer
++    case = live.config["cases"]["restore"]
++    completed = live.run(case)
++    assert completed.run_id is not None
++    versions = live.rows("genie_space_versions", "operation_id = " + _literal(case["operation_id"]))
++    restored = [row for row in versions if row["restored_from_version_id"] == case["historical_version_id"]]
++    assert len(restored) == 1 and restored[0]["origin"] == "restore"
++    assert json.loads(restored[0]["serialized_space_json"]) == live.state(case["managed_space_id"])["serialized_space"]
+diff --git a/packages/genie-space-optimizer/tests/test_vc_candidate_isolation.py b/packages/genie-space-optimizer/tests/test_vc_candidate_isolation.py
+new file mode 100644
+index 0000000..798d1ca
+--- /dev/null
++++ b/packages/genie-space-optimizer/tests/test_vc_candidate_isolation.py
+@@ -0,0 +1,87 @@
++from dataclasses import dataclass
++from unittest.mock import Mock
++
++import pytest
++
++from genie_space_optimizer.integration.version_control import EvaluationBinding
++
++
++@dataclass
++class IsolationRegistry:
++    managed: bool = False
++    owner: str | None = "run"
++
++    def resolve_physical(self, workspace_id, space_id):
++        return object() if self.managed else None
++
++    def optimizer_owner(self, workspace_id, space_id):
++        return self.owner
++
++    def workspace_id_for(self, client):
++        return "workspace"
++
++
++@pytest.mark.parametrize("managed,owner", [(True, "run"), (False, None), (False, "other")])
++def test_candidate_evaluation_cannot_target_managed_binding(managed, owner):
++    resource = EvaluationBinding("workspace", "candidate", "run")
++    with pytest.raises(PermissionError):
++        resource.validate(IsolationRegistry(managed, owner))
++
++
++def test_positive_optimizer_ownership_is_required():
++    resource = EvaluationBinding("workspace", "candidate", "run")
++    assert resource.validate(IsolationRegistry()) == resource
++
++
++def test_every_candidate_mutation_uses_optimizer_owned_evaluation_resource():
++    from genie_space_optimizer.integration.version_control import CandidateSession
++
++    registry = IsolationRegistry()
++    client = Mock()
++    session = CandidateSession(EvaluationBinding("workspace", "candidate", "run"), registry,
++                               client, writes_enabled=True)
++    for method in ("PATCH", "POST", "DELETE"):
++        session.client.api_client.do(method, "/api/2.0/genie/spaces/candidate")
++    assert client.api_client.do.call_count == 3
++    with pytest.raises(PermissionError):
++        session.client.api_client.do("PATCH", "/api/2.0/genie/spaces/live")
++    with pytest.raises(PermissionError):
++        session.client.statement_execution.execute_statement(statement="ALTER TABLE live")
++    registry.managed = True
++    with pytest.raises(PermissionError):
++        session.client.api_client.do("PATCH", "/api/2.0/genie/spaces/candidate")
++    assert client.api_client.do.call_count == 3
++
++
++def test_candidate_writes_default_off():
++    from genie_space_optimizer.integration.version_control import CandidateSession
++
++    with pytest.raises(PermissionError):
++        CandidateSession(EvaluationBinding("workspace", "candidate", "run"), IsolationRegistry(), Mock())
++
++
++def test_legacy_loop_refuses_unproven_target_before_work():
++    from genie_space_optimizer.optimization.unified_loop import run_unified_optimization_loop
++
++    with pytest.raises(PermissionError):
++        run_unified_optimization_loop(Mock(), Mock(), run_id="run", space_id="live",
++                                      benchmarks=[], catalog="cat", schema="sch", levers=[],
++                                      max_attempts=1, target_accuracy=90)
++
++
++@pytest.mark.parametrize("entry", ["config", "description", "patch_set", "rollback"])
++def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry):
++    from genie_space_optimizer.common.genie_client import patch_space_config, update_space_description
++    from genie_space_optimizer.optimization.applier import apply_patch_set, rollback
++
++    client = Mock()
++    with pytest.raises(PermissionError):
++        if entry == "config":
++            patch_space_config(client, "live", {})
++        elif entry == "description":
++            update_space_description(client, "live", "changed")
++        elif entry == "patch_set":
++            apply_patch_set(client, "live", [], {}, apply_mode="both")
++        else:
++            rollback({"pre_snapshot": {}}, client, "live")
++    assert client.mock_calls == []
+diff --git a/packages/genie-space-optimizer/tests/test_vc_champion_apply.py b/packages/genie-space-optimizer/tests/test_vc_champion_apply.py
+new file mode 100644
+index 0000000..83b621c
+--- /dev/null
++++ b/packages/genie-space-optimizer/tests/test_vc_champion_apply.py
+@@ -0,0 +1,107 @@
++from unittest.mock import Mock
++from types import SimpleNamespace
++import subprocess
++import sys
++
++from genie_space_optimizer.integration.version_control import ChampionRun
++
++
++def test_unapplied_and_abandoned_runs_create_no_version():
++    adapter = Mock()
++    run = ChampionRun("run", adapter)
++    for i in range(3):
++        run.record_iteration(str(i), {"candidate": i}, float(i))
++    assert len(run.iterations) == 3
++    adapter.apply.assert_not_called()
++    run.abandon()
++    assert run.abandoned
++    assert run.receipt is None
++    adapter.apply.assert_not_called()
++
++
++def test_champion_version_uses_authoritative_readback_not_candidate_payload():
++    adapter = Mock()
++    observed = SimpleNamespace(version_id="observed", binding_id="binding", binding_revision=1)
++    adapter.apply.return_value = SimpleNamespace(status="confirmed", postimage=observed,
++                                                preimage=None, unresolved=False,
++                                                evidence_references=(), operation_id="operation")
++    run = ChampionRun("run", adapter)
++    candidate = {"instructions": ["unnormalized"]}
++    run.record_iteration("champion", candidate, 90)
++    receipt = run.apply("champion", "binding", "base", "job")
++    assert receipt is adapter.apply.return_value
++    assert run.post_version is observed
++    assert run.post_version is not candidate
++    assert run.iterations[0][1] == candidate
++    adapter.apply.assert_called_once_with("run", "champion", "binding", "base", "job")
++
++
++def test_external_preimage_at_champion_apply_is_preserved_without_iteration_version():
++    external = SimpleNamespace(version_id="external", origin="external")
++    champion = SimpleNamespace(version_id="final", origin="optimizer")
++    adapter = Mock()
++    adapter.apply.return_value = SimpleNamespace(status="confirmed", preimage=external,
++                                                postimage=champion, unresolved=False,
++                                                evidence_references=("external", "checkpoint", "final"))
++    run = ChampionRun("run", adapter)
++    for iteration in range(5):
++        run.record_iteration(str(iteration), {"iteration": iteration}, iteration)
++    run.apply("4", "binding", "base", "job")
++    assert run.pre_version is external
++    assert run.evidence_references == ("external", "checkpoint", "final")
++    assert [version.origin for version in (run.pre_version, run.post_version)].count("optimizer") == 1
++    assert len(run.iterations) == 5
++    adapter.apply.assert_called_once()
++
++
++def test_noop_champion_has_receipt_but_no_new_optimizer_version():
++    adapter = Mock()
++    existing = SimpleNamespace(version_id="existing")
++    adapter.apply.return_value = SimpleNamespace(status="noop", preimage=existing,
++                                                postimage=existing, unresolved=False,
++                                                evidence_references=("existing",), operation_id="noop-operation")
++    run = ChampionRun("run", adapter)
++    receipt = run.apply("champion", "binding", "base", "job")
++    assert receipt.operation_id == "noop-operation"
++    assert run.receipt is receipt
++    assert run.pre_version is existing
++    assert run.post_version is None
++
++
++def test_package_install_exposes_shared_gate_without_importing_backend_app():
++    script = '''
++import importlib.abc
++import importlib.metadata
++import sys
++class NoBackend(importlib.abc.MetaPathFinder):
++    def find_spec(self, fullname, path=None, target=None):
++        if fullname == "backend" or fullname.startswith(("backend.", "fastapi")):
++            raise AssertionError("package imported backend application: " + fullname)
++sys.meta_path.insert(0, NoBackend())
++entries = importlib.metadata.entry_points(group="genie_space_optimizer.vc")
++assert len(entries) == 1, "installed VC/1.0 port entry point missing; run uv sync --frozen"
++entry = next(iter(entries))
++assert entry.name == "ports"
++assert entry.value == "genie_space_optimizer.integration.version_control:OptimizerRuntime"
++runtime_type = entry.load()
++assert runtime_type.contract_version == "VC/1.0"
++assert "backend.main" not in sys.modules
++from types import SimpleNamespace
++from unittest.mock import Mock
++adapter = Mock()
++adapter.apply.return_value = SimpleNamespace(
++    status="noop", preimage=None, postimage=None, unresolved=False,
++    evidence_references=(), operation_id="operation",
++)
++restore_jobs = Mock()
++isolation_registry = Mock()
++runtime = runtime_type(adapter, restore_jobs, isolation_registry)
++assert runtime.restore_jobs is restore_jobs
++assert runtime.isolation_registry is isolation_registry
++run = runtime.champion_run("run")
++assert run.apply("champion", "binding", "base", "job") is adapter.apply.return_value
++adapter.apply.assert_called_once_with("run", "champion", "binding", "base", "job")
++assert "backend.main" not in sys.modules
++'''
++    completed = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True)
++    assert completed.returncode == 0, completed.stderr
+diff --git a/packages/genie-space-optimizer/tests/test_vc_revert_guard.py b/packages/genie-space-optimizer/tests/test_vc_revert_guard.py
+new file mode 100644
+index 0000000..35483b8
+--- /dev/null
++++ b/packages/genie-space-optimizer/tests/test_vc_revert_guard.py
+@@ -0,0 +1,97 @@
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++
++from genie_space_optimizer.integration.version_control import ChampionRun
++from genie_space_optimizer.integration import revert
++
++
++@pytest.mark.parametrize("status", ["applied_partial", "applied_unverified", "quarantined"])
++def test_partial_or_ambiguous_apply_never_retries_or_reverts_in_process(status):
++    adapter = Mock()
++    adapter.apply.return_value = SimpleNamespace(status=status, unresolved=True,
++                                                preimage=None, postimage=None,
++                                                evidence_references=("checkpoint",), operation_id="operation")
++    run = ChampionRun("run", adapter)
++    receipt = run.apply("champion", "binding", "base", "job")
++    assert receipt.unresolved
++    assert run.recovery_handle.operation_id == "operation"
++    assert run.recovery_handle.job_kind == "recovery"
++    assert run.apply("champion", "binding", "base", "job") is receipt
++    assert run.post_version is None
++    adapter.apply.assert_called_once()
++    adapter.revert.assert_not_called()
++
++
++def test_unknown_adapter_exception_latches_against_in_process_retry():
++    adapter = Mock()
++    adapter.apply.side_effect = TimeoutError("response lost")
++    run = ChampionRun("run", adapter)
++    with pytest.raises(TimeoutError):
++        run.apply("champion", "binding", "base", "job")
++    with pytest.raises(RuntimeError, match="recovery"):
++        run.apply("champion", "binding", "base", "job")
++    adapter.apply.assert_called_once()
++
++
++@pytest.mark.parametrize("target", ["champion", "baseline"])
++def test_legacy_revert_is_disabled_before_any_platform_access(target):
++    client = Mock()
++    with pytest.raises(PermissionError, match="governed restore Job"):
++        revert.revert_optimization("run", client, client, Mock(), target=target)
++    assert client.mock_calls == []
++
++
++def test_retired_revert_helper_cannot_patch_or_compensate():
++    client = Mock()
++    with pytest.raises(PermissionError, match="governed restore Job"):
++        revert._apply_revert_state(client=client, space_id="live", target="baseline",
++                                   run_id="run", target_config={}, target_description="new",
++                                   live_config={}, live_description="old")
++    assert client.mock_calls == []
++
++
++def test_historical_revert_dispatches_governed_restore_job():
++    from genie_space_optimizer.integration.version_control import RestoreSelection
++
++    selection = RestoreSelection("run", "historical-version", "binding", "base", "approval")
++    jobs = Mock()
++    jobs.submit.return_value = SimpleNamespace(operation_id="restore-operation", job_run_id="job/restore")
++    client = Mock()
++    result = revert.revert_optimization("run", client, client, Mock(), selection=selection,
++                                        restore_jobs=jobs, requester="human", writes_enabled=True)
++    assert result is jobs.submit.return_value
++    jobs.submit.assert_called_once_with(selection, "human")
++    assert client.mock_calls == []
++    with pytest.raises(PermissionError):
++        revert.revert_optimization("run", client, client, Mock(), selection=selection,
++                                   restore_jobs=jobs, requester="human")
++    jobs.submit.assert_called_once()
++
++
++def test_discard_only_updates_telemetry_and_never_rolls_back_managed_state(monkeypatch):
++    from genie_space_optimizer.integration import discard
++
++    monkeypatch.setattr(discard, "wh_load_run", lambda *args: {
++        "status": "CONVERGED", "space_id": "live", "config_snapshot": {"version": 2},
++    })
++    monkeypatch.setattr("genie_space_optimizer.common.genie_client.user_can_edit_space", lambda *args, **kwargs: True)
++    monkeypatch.setattr(discard, "_assert_no_active_space_runs", lambda **kwargs: None)
++    write = Mock()
++    monkeypatch.setattr(discard, "sql_warehouse_execute", write)
++    rollback = Mock(return_value={"status": "SUCCESS"})
++    monkeypatch.setattr("genie_space_optimizer.optimization.applier.rollback", rollback)
++    result = discard.discard_optimization("run", Mock(), Mock(), Mock())
++    assert result.status == "discarded"
++    rollback.assert_not_called()
++    write.assert_called_once()
++
++
++def test_legacy_apply_cannot_claim_applied_without_gate():
++    from genie_space_optimizer.integration.apply import apply_optimization
++
++    client = Mock()
++    with pytest.raises(PermissionError, match="champion"):
++        apply_optimization("run", client, Mock())
++    assert client.mock_calls == []
+diff --git a/packages/genie-space-optimizer/tests/unit/test_applier_update_space_description.py b/packages/genie-space-optimizer/tests/unit/test_applier_update_space_description.py
+index 15b2114..3c951fc 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_applier_update_space_description.py
++++ b/packages/genie-space-optimizer/tests/unit/test_applier_update_space_description.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ from unittest.mock import MagicMock
+ 
+ from genie_space_optimizer.optimization import applier
++from genie_space_optimizer.integration.version_control import CandidateSession, EvaluationBinding
+ 
+ 
+ def test_update_space_description_uses_metadata_patch_not_serialized_space(monkeypatch) -> None:
+@@ -26,8 +27,14 @@ def test_update_space_description_uses_metadata_patch_not_serialized_space(monke
+         "instructions": {"text_instructions": []},
+     }
+ 
++    registry = MagicMock()
++    registry.resolve_physical.return_value = None
++    registry.optimizer_owner.return_value = "run"
++    registry.workspace_id_for.return_value = "workspace"
++    session = CandidateSession(EvaluationBinding("workspace", "space", "run"), registry,
++                               MagicMock(), writes_enabled=True)
+     out = applier.apply_patch_set(
+-        MagicMock(),
++        session.client,
+         "space",
+         [
+             {
+diff --git a/packages/genie-space-optimizer/tests/unit/test_patch_space_config_array_coercion.py b/packages/genie-space-optimizer/tests/unit/test_patch_space_config_array_coercion.py
+index e863c6a..5eed0ea 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_patch_space_config_array_coercion.py
++++ b/packages/genie-space-optimizer/tests/unit/test_patch_space_config_array_coercion.py
+@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
+ import pytest
+ 
+ from genie_space_optimizer.common.genie_client import patch_space_config
++from genie_space_optimizer.integration.version_control import CandidateSession, EvaluationBinding
+ from genie_space_optimizer.common.genie_schema import (
+     normalize_array_fields,
+     validate_serialized_space,
+@@ -47,7 +48,13 @@ def _send(config: dict) -> dict:
+         return {}
+ 
+     w.api_client.do.side_effect = _do
+-    patch_space_config(w, _SPACE_ID, config)
++    registry = MagicMock()
++    registry.resolve_physical.return_value = None
++    registry.optimizer_owner.return_value = "run"
++    registry.workspace_id_for.return_value = "workspace"
++    session = CandidateSession(EvaluationBinding("workspace", _SPACE_ID, "run"), registry,
++                               w, writes_enabled=True)
++    patch_space_config(session.client, _SPACE_ID, config)
+     return captured["sent"]
+ 
+ 
+diff --git a/packages/genie-space-optimizer/tests/unit/test_revert_champion_config.py b/packages/genie-space-optimizer/tests/unit/test_revert_champion_config.py
+index 804875a..5b78bc9 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_revert_champion_config.py
++++ b/packages/genie-space-optimizer/tests/unit/test_revert_champion_config.py
+@@ -113,33 +113,6 @@ def _live_benchmark(qid: str, question: str, sql: str) -> dict:
+ # ── target="champion" ───────────────────────────────────────────────────
+ 
+ 
+-def test_revert_champion_uses_champion_iteration_config(monkeypatch) -> None:
+-    """Champion target PATCHes the is_champion row's config_json live."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r1", "space_id": "space-1", "status": "CONVERGED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+-    champion_df = pd.DataFrame([{"config_json": json.dumps(_champion_config())}])
+-
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(revert, "sql_warehouse_query", lambda *a, **k: champion_df)
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+-
+-    result = revert.revert_optimization("r1", ws, sp_ws, cfg, target="champion")
+-
+-    assert result.status == "reverted"
+-    assert "champion" in result.message
+-    # The champion config (not the baseline) must be what's PATCHed live.
+-    patched_config = patch_mock.call_args.args[2]
+-    assert patched_config["version"] == 2
+-    assert "serialized_space" not in patched_config
+-    assert "title" not in patched_config
+-    assert patched_config["instructions"]["text_instructions"][0]["content"] == "champion-only hint"
+-    # OBO client preferred (the user ws).
+-    assert patch_mock.call_args.args[0] is ws
+-    assert patch_mock.call_args.args[1] == "space-1"
+ 
+ 
+ def test_champion_lookup_disambiguates_duplicate_iteration_zero_rows(monkeypatch) -> None:
+@@ -185,235 +158,12 @@ def test_champion_lookup_prefers_api_observed_config(monkeypatch) -> None:
+     assert result == observed
+ 
+ 
+-def test_revert_champion_backfills_version_for_legacy_projected_config(monkeypatch) -> None:
+-    """Legacy config_json rows projected a parsed serialized_space but dropped
+-    the required top-level version. Revert repairs that shape before PATCH."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r1-legacy", "space_id": "space-legacy", "status": "CONVERGED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+-    legacy_champion = {
+-        "data_sources": {"tables": []},
+-        "instructions": {"text_instructions": [{"content": "legacy champion"}]},
+-    }
+-    champion_df = pd.DataFrame([{"config_json": json.dumps(legacy_champion)}])
+ 
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(revert, "sql_warehouse_query", lambda *a, **k: champion_df)
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+-
+-    revert.revert_optimization("r1-legacy", ws, sp_ws, cfg, target="champion")
+-
+-    patched_config = patch_mock.call_args.args[2]
+-    assert patched_config["version"] == 2
+-    assert patched_config["instructions"]["text_instructions"][0]["content"] == "legacy champion"
+-
+-
+-def test_revert_preserves_live_benchmarks_instead_of_historical_champion(monkeypatch) -> None:
+-    """Reverting config must not roll benchmark ground truth backward."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r-bench",
+-        "space_id": "space-bench",
+-        "status": "CONVERGED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+-    champion = {
+-        "version": 2,
+-        "data_sources": {"tables": []},
+-        "benchmarks": {
+-            "questions": [
+-                _live_benchmark(
+-                    "old",
+-                    "complaint rate",
+-                    "SELECT COUNT_IF(category = Complaint) FROM cat.sch.t",
+-                ),
+-            ],
+-        },
+-    }
+-    live = {
+-        "_parsed_space": {
+-            "version": 2,
+-            "data_sources": {"tables": []},
+-            "benchmarks": {
+-                "questions": [
+-                    _live_benchmark(
+-                        "live",
+-                        "complaint rate",
+-                        "SELECT COUNT_IF(category = 'Complaint') FROM cat.sch.t",
+-                    ),
+-                ],
+-            },
+-        },
+-    }
+-
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(
+-        revert,
+-        "sql_warehouse_query",
+-        lambda *a, **k: pd.DataFrame([
+-            {"config_json": json.dumps(champion)},
+-        ]),
+-    )
+-    patch_mock = _patch_patch_space_config(monkeypatch, live_config=live)
+-
+-    revert.revert_optimization("r-bench", ws, sp_ws, cfg, target="champion")
+-
+-    patched_config = patch_mock.call_args.args[2]
+-    patched_questions = patched_config["benchmarks"]["questions"]
+-    assert len(patched_questions) == 1
+-    assert patched_questions[0]["id"] == "live"
+-    assert "'Complaint'" in patched_questions[0]["answer"][0]["content"][0]
+-    assert "category = Complaint" not in patched_questions[0]["answer"][0]["content"][0]
+-
+-
+-def test_revert_preserves_live_benchmarks_byte_for_byte(monkeypatch) -> None:
+-    """Revert skips benchmark edits by carrying live benchmarks forward."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r-prune",
+-        "space_id": "space-prune",
+-        "status": "CONVERGED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+-    champion = {
+-        "version": 2,
+-        "data_sources": {"tables": []},
+-        "benchmarks": {"questions": []},
+-    }
+-    live = {
+-        "_parsed_space": {
+-            "version": 2,
+-            "data_sources": {"tables": []},
+-            "benchmarks": {
+-                "questions": [
+-                    _live_benchmark(
+-                        "bad",
+-                        "deposit volume",
+-                        "SELECT * FROM t WHERE transaction_type = Deposit",
+-                    ),
+-                    _live_benchmark(
+-                        "good",
+-                        "deposit volume quoted",
+-                        "SELECT * FROM t WHERE transaction_type = 'Deposit'",
+-                    ),
+-                ],
+-            },
+-        },
+-    }
+ 
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(
+-        revert,
+-        "sql_warehouse_query",
+-        lambda *a, **k: pd.DataFrame([
+-            {"config_json": json.dumps(champion)},
+-        ]),
+-    )
+-    patch_mock = _patch_patch_space_config(monkeypatch, live_config=live)
+-
+-    revert.revert_optimization("r-prune", ws, sp_ws, cfg, target="champion")
+-
+-    patched_questions = patch_mock.call_args.args[2]["benchmarks"]["questions"]
+-    assert patched_questions == live["_parsed_space"]["benchmarks"]["questions"]
+-
+-
+-@pytest.mark.parametrize(
+-    ("config_target", "benchmark_target", "expected_instruction", "expected_qid"),
+-    [
+-        ("champion", "champion", "champion config", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+-        ("champion", "current", "champion config", "cccccccccccccccccccccccccccccccc"),
+-        ("champion", "baseline", "champion config", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+-        ("baseline", "champion", "baseline config", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+-        ("baseline", "current", "baseline config", "cccccccccccccccccccccccccccccccc"),
+-        ("baseline", "baseline", "baseline config", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+-    ],
+-)
+-def test_revert_composes_config_and_benchmark_targets_independently(
+-    monkeypatch,
+-    config_target: str,
+-    benchmark_target: str,
+-    expected_instruction: str,
+-    expected_qid: str,
+-) -> None:
+-    """The modal's two selectors form six deterministic revert operations."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    baseline = {
+-        "version": 2,
+-        "data_sources": {"tables": []},
+-        "instructions": {"text_instructions": [{"content": "baseline config"}]},
+-        "benchmarks": {"questions": [
+-            _live_benchmark(
+-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+-                "baseline benchmark",
+-                "SELECT 'baseline'",
+-            ),
+-        ]},
+-    }
+-    champion = {
+-        "version": 2,
+-        "data_sources": {"tables": []},
+-        "instructions": {"text_instructions": [{"content": "champion config"}]},
+-        "benchmarks": {"questions": [
+-            _live_benchmark(
+-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+-                "champion-time benchmark",
+-                "SELECT 'champion-time'",
+-            ),
+-        ]},
+-    }
+-    live = {
+-        "_parsed_space": {
+-            "version": 2,
+-            "data_sources": {"tables": []},
+-            "benchmarks": {"questions": [
+-                _live_benchmark(
+-                    "cccccccccccccccccccccccccccccccc",
+-                    "current benchmark",
+-                    "SELECT 'current'",
+-                ),
+-            ]},
+-        },
+-    }
+-    run = {
+-        "run_id": "r-options",
+-        "space_id": "space-options",
+-        "status": "CONVERGED",
+-        "config_snapshot": json.dumps({"serialized_space": baseline}),
+-    }
+ 
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+ 
+-    def _query(_ws, _warehouse_id, sql):
+-        if "genie_opt_iterations" in sql:
+-            return pd.DataFrame([{"config_json": json.dumps(champion)}])
+-        if "genie_opt_artifacts" in sql:
+-            return pd.DataFrame()
+-        raise AssertionError(sql)
+ 
+-    monkeypatch.setattr(revert, "sql_warehouse_query", _query)
+-    patch_mock = _patch_patch_space_config(monkeypatch, live_config=live)
+-
+-    result = revert.revert_optimization(
+-        "r-options",
+-        ws,
+-        sp_ws,
+-        cfg,
+-        target=config_target,
+-        benchmark_target=benchmark_target,
+-    )
+ 
+-    patched = patch_mock.call_args.args[2]
+-    assert patched["instructions"]["text_instructions"][0]["content"] == expected_instruction
+-    assert patched["benchmarks"]["questions"][0]["id"] == expected_qid
+-    assert benchmark_target in result.message or (
+-        benchmark_target == "current" and "preserved" in result.message
+-    )
+ 
+ 
+ def test_preview_revert_options_reports_availability_and_benchmark_diff(
+@@ -497,218 +247,28 @@ def test_preview_revert_options_reports_availability_and_benchmark_diff(
+     }
+ 
+ 
+-def test_revert_champion_errors_when_no_champion_row(monkeypatch) -> None:
+-    """No is_champion row → ValueError (NOT a silent baseline fallback).
+-
+-    With two explicit buttons, the champion button must not silently revert to
+-    baseline; the user gets a clear error and can click the baseline button.
+-    """
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r2", "space_id": "space-2", "status": "CONVERGED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+ 
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(revert, "sql_warehouse_query", lambda *a, **k: pd.DataFrame())
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+ 
+-    with pytest.raises(ValueError, match="champion configuration is not available"):
+-        revert.revert_optimization("r2", ws, sp_ws, cfg, target="champion")
+-    patch_mock.assert_not_called()
+-
+-
+-def test_revert_champion_errors_on_legacy_schema(monkeypatch) -> None:
+-    """A pre-Phase-4 iterations table (UNRESOLVED_COLUMN) → ValueError, not a
+-    silent baseline fallback."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r3", "space_id": "space-3", "status": "APPLIED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+-
+-    def _legacy_err(*a, **k):
+-        raise RuntimeError("UNRESOLVED_COLUMN: is_champion not found")
+-
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(revert, "sql_warehouse_query", _legacy_err)
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+-
+-    with pytest.raises(ValueError, match="champion configuration is not available"):
+-        revert.revert_optimization("r3", ws, sp_ws, cfg, target="champion")
+-    patch_mock.assert_not_called()
+ 
+ 
+ # ── target="baseline" ───────────────────────────────────────────────────
+ 
+ 
+-def test_revert_baseline_uses_config_snapshot(monkeypatch) -> None:
+-    """Baseline target PATCHes the run's pre-run config_snapshot."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r4", "space_id": "space-4", "status": "CONVERGED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+ 
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    # sql_warehouse_query must NOT be called for the baseline target.
+-    query_mock = MagicMock(name="sql_warehouse_query")
+-    monkeypatch.setattr(revert, "sql_warehouse_query", query_mock)
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+ 
+-    result = revert.revert_optimization("r4", ws, sp_ws, cfg, target="baseline")
+ 
+-    assert result.status == "reverted"
+-    assert "baseline" in result.message
+-    patched_config = patch_mock.call_args.args[2]
+-    assert patched_config["version"] == 2
+-    assert "serialized_space" not in patched_config
+-    assert "title" not in patched_config
+-    assert patched_config["instructions"]["text_instructions"] == []
+-    query_mock.assert_not_called()
+ 
+ 
+-def test_revert_baseline_errors_when_no_snapshot(monkeypatch) -> None:
+-    """No config_snapshot → ValueError (nothing to revert to)."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {"run_id": "r5", "space_id": "space-5", "status": "FAILED"}
+-
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(revert, "sql_warehouse_query", lambda *a, **k: pd.DataFrame())
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+-
+-    with pytest.raises(ValueError, match="no baseline configuration snapshot"):
+-        revert.revert_optimization("r5", ws, sp_ws, cfg, target="baseline")
+-    patch_mock.assert_not_called()
+-
+-
+-def test_revert_baseline_recovers_legacy_sql_unescaped_snapshot(monkeypatch) -> None:
+-    """Historical SQL writers consumed the outer escapes around serialized_space.
+-
+-    The row remains non-empty (so history advertises a baseline) but the outer
+-    JSON cannot be decoded. Revert recovers the still-valid nested config.
+-    """
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    serialized = json.dumps(_baseline_config()["serialized_space"])
+-    corrupted = (
+-        '{"title": "Revenue Space", "serialized_space": "'
+-        + serialized
+-        + '", "_parsed_space": '
+-        + serialized
+-        + "}"
+-    )
+-    run = {
+-        "run_id": "r-legacy-sql",
+-        "space_id": "space-legacy-sql",
+-        "status": "APPLIED",
+-        "config_snapshot": corrupted,
+-    }
+-
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    query_mock = MagicMock(name="sql_warehouse_query")
+-    monkeypatch.setattr(revert, "sql_warehouse_query", query_mock)
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+-
+-    result = revert.revert_optimization(
+-        "r-legacy-sql", ws, sp_ws, cfg, target="baseline",
+-    )
+-
+-    assert result.status == "reverted"
+-    assert patch_mock.call_args.args[2]["version"] == 2
+-    assert patch_mock.call_args.args[2]["data_sources"] == {"tables": []}
+-    query_mock.assert_not_called()
+-
+ 
+ # ── Guard rails ─────────────────────────────────────────────────────────
+ 
+ 
+-def test_revert_refuses_non_terminal_run(monkeypatch) -> None:
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {"run_id": "r6", "space_id": "space-6", "status": "IN_PROGRESS"}
+-
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(revert, "sql_warehouse_query", lambda *a, **k: pd.DataFrame())
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+-
+-    with pytest.raises(ValueError, match="still in progress"):
+-        revert.revert_optimization("r6", ws, sp_ws, cfg, target="champion")
+-    patch_mock.assert_not_called()
+-
+-
+-def test_revert_raises_when_run_not_found(monkeypatch) -> None:
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+ 
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: None)
+-    monkeypatch.setattr(revert, "sql_warehouse_query", lambda *a, **k: pd.DataFrame())
+-    patch_mock = _patch_patch_space_config(monkeypatch)
+ 
+-    with pytest.raises(ValueError, match="Run not found"):
+-        revert.revert_optimization("r7", ws, sp_ws, cfg, target="baseline")
+-    patch_mock.assert_not_called()
+ 
+ 
+-def test_revert_promotes_validation_failure_to_runtime_error(monkeypatch) -> None:
+-    """A config that fails serialized_space validation → RuntimeError
+-    (router → 422, not 409), for either target."""
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {
+-        "run_id": "r8", "space_id": "space-8", "status": "CONVERGED",
+-        "config_snapshot": json.dumps(_baseline_config()),
+-    }
+ 
+-    def _patch_fail(*a, **k):
+-        raise ValueError("serialized_space missing data_sources")
+ 
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    monkeypatch.setattr(
+-        revert,
+-        "sql_warehouse_query",
+-        lambda *a, **k: pd.DataFrame([
+-            {"config_json": json.dumps(_champion_config())},
+-        ]),
+-    )
+-    monkeypatch.setattr(
+-        "genie_space_optimizer.common.genie_client.patch_space_config",
+-        _patch_fail,
+-    )
+-    monkeypatch.setattr(
+-        "genie_space_optimizer.common.genie_client.fetch_space_config",
+-        lambda *a, **k: {
+-            "_parsed_space": {
+-                "version": 2,
+-                "data_sources": {"tables": []},
+-            },
+-        },
+-    )
+-
+-    with pytest.raises(RuntimeError, match="invalid"):
+-        revert.revert_optimization("r8", ws, sp_ws, cfg, target="champion")
+-
+-
+-def test_revert_reads_state_with_sp_and_requires_obo_edit_permission(monkeypatch) -> None:
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {"run_id": "r-auth", "space_id": "space-auth", "status": "CONVERGED"}
+-    load_run = MagicMock(return_value=run)
+-    can_edit = MagicMock(return_value=False)
+-    monkeypatch.setattr(revert, "wh_load_run", load_run)
+-    monkeypatch.setattr(
+-        "genie_space_optimizer.common.genie_client.user_can_edit_space", can_edit,
+-    )
+-
+-    with pytest.raises(PermissionError, match="CAN_EDIT"):
+-        revert.revert_optimization("r-auth", ws, sp_ws, cfg, target="baseline")
+-
+-    assert load_run.call_args.args[0] is sp_ws
+-    can_edit.assert_called_once_with(ws, "space-auth", acl_client=sp_ws)
+ 
+ 
+ def test_revert_refuses_when_a_different_run_for_space_is_active(monkeypatch) -> None:
+@@ -751,108 +311,3 @@ def test_revert_fails_closed_when_active_run_state_cannot_be_reconciled(monkeypa
+         _REAL_ASSERT_NO_ACTIVE_SPACE_RUNS(
+             space_id="space-1", sp_ws=sp_ws, config=cfg,
+         )
+-
+-
+-def test_revert_baseline_restores_empty_top_level_description(monkeypatch) -> None:
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    baseline = _baseline_config()
+-    baseline["description"] = ""
+-    run = {
+-        "run_id": "r-desc", "space_id": "space-desc", "status": "CONVERGED",
+-        "config_snapshot": json.dumps(baseline),
+-    }
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    patch_mock = _patch_patch_space_config(
+-        monkeypatch,
+-        live_config={
+-            "description": "Current generated description",
+-            "_parsed_space": {"version": 2, "data_sources": {"tables": []}},
+-        },
+-    )
+-    update_description = MagicMock()
+-    monkeypatch.setattr(
+-        "genie_space_optimizer.common.genie_client.update_space_description",
+-        update_description,
+-    )
+-
+-    revert.revert_optimization("r-desc", ws, sp_ws, cfg, target="baseline")
+-
+-    patch_mock.assert_called_once()
+-    update_description.assert_called_once_with(ws, "space-desc", "")
+-
+-
+-def test_revert_champion_restores_description_artifact(monkeypatch) -> None:
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    run = {"run_id": "r-champ-desc", "space_id": "space-desc", "status": "CONVERGED"}
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-
+-    def query(_ws, _warehouse_id, sql):
+-        if "genie_opt_iterations" in sql:
+-            return pd.DataFrame([{"config_json": json.dumps(_champion_config())}])
+-        if "genie_opt_artifacts" in sql:
+-            return pd.DataFrame([{
+-                "artifact_json": json.dumps({
+-                    "description_present": True,
+-                    "description": "Post-enrichment description",
+-                }),
+-            }])
+-        raise AssertionError(sql)
+-
+-    monkeypatch.setattr(revert, "sql_warehouse_query", query)
+-    _patch_patch_space_config(
+-        monkeypatch,
+-        live_config={
+-            "description": "Current description",
+-            "_parsed_space": {"version": 2, "data_sources": {"tables": []}},
+-        },
+-    )
+-    update_description = MagicMock()
+-    monkeypatch.setattr(
+-        "genie_space_optimizer.common.genie_client.update_space_description",
+-        update_description,
+-    )
+-
+-    revert.revert_optimization("r-champ-desc", ws, sp_ws, cfg, target="champion")
+-
+-    update_description.assert_called_once_with(
+-        ws, "space-desc", "Post-enrichment description",
+-    )
+-
+-
+-def test_revert_compensates_when_description_patch_fails(monkeypatch) -> None:
+-    cfg = _config()
+-    ws, sp_ws = _ws(), MagicMock(name="sp_ws")
+-    baseline = _baseline_config()
+-    baseline["description"] = "Baseline description"
+-    run = {
+-        "run_id": "r-comp", "space_id": "space-comp", "status": "CONVERGED",
+-        "config_snapshot": json.dumps(baseline),
+-    }
+-    live = {
+-        "description": "Live description",
+-        "_parsed_space": {
+-            "version": 2,
+-            "data_sources": {"tables": []},
+-            "instructions": {"text_instructions": [{"content": "live"}]},
+-        },
+-    }
+-    monkeypatch.setattr(revert, "wh_load_run", lambda *a, **k: run)
+-    patch_mock = _patch_patch_space_config(monkeypatch, live_config=live)
+-    update_description = MagicMock(
+-        side_effect=[RuntimeError("description PATCH failed"), None],
+-    )
+-    monkeypatch.setattr(
+-        "genie_space_optimizer.common.genie_client.update_space_description",
+-        update_description,
+-    )
+-
+-    with pytest.raises(RuntimeError, match="revert was not completed"):
+-        revert.revert_optimization("r-comp", ws, sp_ws, cfg, target="baseline")
+-
+-    assert patch_mock.call_count == 2
+-    assert patch_mock.call_args_list[1].args[2] == live["_parsed_space"]
+-    assert [call.args[2] for call in update_description.call_args_list] == [
+-        "Baseline description", "Live description",
+-    ]
+diff --git a/packages/genie-space-optimizer/tests/unit/test_unified_loop_observed_config.py b/packages/genie-space-optimizer/tests/unit/test_unified_loop_observed_config.py
+index 874e18d..85f1322 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_unified_loop_observed_config.py
++++ b/packages/genie-space-optimizer/tests/unit/test_unified_loop_observed_config.py
+@@ -6,6 +6,16 @@ from unittest.mock import MagicMock
+ 
+ import pytest
+ from genie_space_optimizer.optimization import unified_loop
++from genie_space_optimizer.integration.version_control import CandidateSession, EvaluationBinding
++
++
++def _candidate(run_id):
++    registry = MagicMock()
++    registry.resolve_physical.return_value = None
++    registry.optimizer_owner.return_value = run_id
++    registry.workspace_id_for.return_value = "workspace"
++    return CandidateSession(EvaluationBinding("workspace", "space-1", run_id),
++                            registry, MagicMock(), writes_enabled=True)
+ 
+ 
+ def _config(content: list[str]) -> dict:
+@@ -99,6 +109,7 @@ def test_baseline_observation_is_captured_after_native_evaluation(monkeypatch) -
+     result = unified_loop.run_unified_optimization_loop(
+         MagicMock(),
+         MagicMock(),
++        candidate_session=_candidate("run-1"),
+         run_id="run-1",
+         space_id="space-1",
+         benchmarks=[],
+@@ -191,6 +202,7 @@ def test_failed_baseline_read_error_preserves_prior_champion_metadata(
+         unified_loop.run_unified_optimization_loop(
+             MagicMock(),
+             MagicMock(),
++            candidate_session=_candidate("run-restarted"),
+             run_id="run-restarted",
+             space_id="space-1",
+             benchmarks=[],
+@@ -289,6 +301,7 @@ def test_accepted_attempt_emits_bounded_decision_diagnostics(monkeypatch) -> Non
+     result = unified_loop.run_unified_optimization_loop(
+         MagicMock(),
+         MagicMock(),
++        candidate_session=_candidate("run-1"),
+         run_id="run-1",
+         space_id="space-1",
+         benchmarks=[],
+@@ -403,6 +416,7 @@ def test_aggregate_improvement_is_rolled_back_without_paired_evidence(
+     result = unified_loop.run_unified_optimization_loop(
+         MagicMock(),
+         MagicMock(),
++        candidate_session=_candidate("run-1"),
+         run_id="run-1",
+         space_id="space-1",
+         benchmarks=[],

@@ -1,0 +1,2339 @@
+diff --git a/backend/genie_creator.py b/backend/genie_creator.py
+index 4f0ef69..8ee0636 100644
+--- a/backend/genie_creator.py
++++ b/backend/genie_creator.py
+@@ -534,146 +534,5 @@ def create_genie_space(
+     description: str = "",
+     parent_path: str | None = None,
+ ) -> dict:
+-    """Create a new Genie Agent with the given configuration.
+-
+-    Attempts creation with a fallback chain of parent paths.  If the
+-    primary path returns a permission error, the next candidate is
+-    tried automatically (configured directory -> /Shared/).
+-
+-    Args:
+-        display_name: The display name for the new Genie Agent
+-        merged_config: The merged configuration dict (from optimization)
+-        parent_path: Optional workspace path for the parent directory.
+-                    If not provided, uses GENIE_TARGET_DIRECTORY or /Shared/.
+-
+-    Returns:
+-        dict with genie_space_id, display_name, space_url, parent_path
+-
+-    Raises:
+-        ValueError: If configuration is invalid
+-        PermissionError: If none of the candidate paths are writable
+-        TimeoutError: If the request timed out
+-    """
+-    import time as _time
+-
+-    if not display_name or not display_name.strip():
+-        raise ValueError("Display name is required")
+-    display_name = display_name.strip()
+-
+-    warehouse_id = get_sql_warehouse_id()
+-    if not warehouse_id:
+-        raise ValueError(
+-            "No SQL warehouse available. Ensure you have access to at least "
+-            "one running Pro or Serverless SQL warehouse."
+-        )
+-
+-    t0 = _time.monotonic()
+-    constrained_config = _enforce_constraints(merged_config)
+-    cleaned_config = _clean_config(constrained_config)
+-    serialized_space = json.dumps(cleaned_config)
+-    t_prep = _time.monotonic() - t0
+-    logger.info("Config prep took %.2fs (serialized %d bytes)", t_prep, len(serialized_space))
+-
+-    client = get_workspace_client()
+-    host = get_databricks_host()
+-
+-    # The create POST is non-idempotent — use a client that does NOT auto-retry,
+-    # so a read timeout can't silently re-fire the POST and create duplicates.
+-    create_client = _non_retrying_client(client)
+-
+-    candidates = _build_path_candidates(parent_path)
+-    last_error: Exception | None = None
+-
+-    # Wall-clock instant just before the first POST. Used to scope timeout
+-    # reconciliation to spaces created by THIS attempt (the API's create_time
+-    # is wall-clock ISO-8601 Z). A small safety margin absorbs minor client/
+-    # server clock skew so we don't exclude the space we just created.
+-    from datetime import datetime, timedelta, timezone
+-    request_start = (
+-        (datetime.now(timezone.utc) - timedelta(seconds=5))
+-        .strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+-    )
+-
+-    for target_path in candidates:
+-        logger.info(f"Attempting to create Genie Agent '{display_name}' in {target_path}")
+-
+-        try:
+-            t_api = _time.monotonic()
+-            response = create_client.api_client.do(
+-                method="POST",
+-                path="/api/2.0/genie/spaces",
+-                body={
+-                    "title": display_name,
+-                    "description": description or "Genie Agent created by Genie Workbench",
+-                    "parent_path": target_path,
+-                    "warehouse_id": warehouse_id,
+-                    "serialized_space": serialized_space,
+-                },
+-            )
+-            t_api_done = _time.monotonic() - t_api
+-
+-            genie_space_id = response.get("space_id")
+-            if not genie_space_id:
+-                logger.error(f"No space_id in response: {response}")
+-                raise ValueError(f"API did not return a space_id. Response: {response}")
+-
+-            space_url = f"{host}/genie/rooms/{genie_space_id}"
+-            logger.info("Created Genie Agent %s in %s (API call %.2fs)", genie_space_id, target_path, t_api_done)
+-
+-            return {
+-                "genie_space_id": genie_space_id,
+-                "display_name": display_name,
+-                "space_url": space_url,
+-                "parent_path": target_path,
+-            }
+-
+-        except Exception as e:
+-            last_error = e
+-            if _is_permission_error(e) and target_path != candidates[-1]:
+-                logger.warning(
+-                    f"Permission denied for {target_path}, trying next candidate"
+-                )
+-                continue
+-
+-            error_str = str(e).lower()
+-            if "400" in error_str or "invalid" in error_str:
+-                raise ValueError(f"The configuration is invalid: {e}")
+-            if _is_timeout_error(e):
+-                # The POST may have succeeded server-side even though the
+-                # response timed out. Reconcile by looking the space up by
+-                # display name (polling to outlast list lag) so retries are
+-                # idempotent and we never leave a phantom failure.
+-                logger.warning(
+-                    "Create request for '%s' timed out — reconciling against the API",
+-                    display_name,
+-                )
+-                existing = _find_space_by_display_name(
+-                    display_name, created_after=request_start, poll=True
+-                )
+-                if existing:
+-                    genie_space_id = existing.get("space_id") or existing.get("id")
+-                    space_url = f"{host}/genie/rooms/{genie_space_id}"
+-                    logger.info(
+-                        "Reconciled timed-out create for '%s' to existing space %s",
+-                        display_name, genie_space_id,
+-                    )
+-                    return {
+-                        "genie_space_id": genie_space_id,
+-                        "display_name": display_name,
+-                        "space_url": space_url,
+-                        "parent_path": target_path,
+-                        "reconciled": True,
+-                    }
+-                raise TimeoutError(
+-                    "Request timed out and no matching agent was found. "
+-                    "Please check your Genie Agents list before retrying."
+-                )
+-            if _is_permission_error(e):
+-                break
+-            raise
+-
+-    raise PermissionError(
+-        f"Cannot create Genie Agent — no writable directory found. "
+-        f"Tried: {', '.join(candidates)}. "
+-        f"Grant the app's service principal 'Can Manage' on a workspace folder."
+-    )
++    """Legacy create is disabled until durable intent and gate integration."""
++    raise PermissionError("VC writes disabled: create requires durable intent and the mutation gate")
+diff --git a/backend/jobs/vc_restore.py b/backend/jobs/vc_restore.py
+new file mode 100644
+index 0000000..c6647e9
+--- /dev/null
++++ b/backend/jobs/vc_restore.py
+@@ -0,0 +1,22 @@
++"""Restore Job entrypoint: caller supplies only an immutable operation ID."""
++
++import argparse
++from uuid import UUID
++
++
++def run(operation_id, *, service, executor):
++    if str(UUID(operation_id)) != operation_id:
++        raise ValueError("Canonical operation_id required")
++    return service.run(operation_id, executor)
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--operation-id", required=True)
++    args = parser.parse_args(argv)
++    from backend.jobs import build_vc_runtime
++    return build_vc_runtime("restore").run("restore", args.operation_id)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/backend/routers/auto_optimize.py b/backend/routers/auto_optimize.py
+index 7de6f7e..8b938b8 100644
+--- a/backend/routers/auto_optimize.py
++++ b/backend/routers/auto_optimize.py
+@@ -1400,62 +1400,9 @@ async def check_permissions(space_id: SpaceId):
+ 
+ @router.post("/trigger")
+ async def trigger(body: TriggerRequest, request: Request):
+-    """Trigger an optimization run for a Genie Agent."""
+-    if not _is_configured():
+-        raise HTTPException(status_code=503, detail="Auto-Optimize is not configured. Set GSO_CATALOG and GSO_JOB_ID.")
+-
+-    ws = get_workspace_client()
+-    sp_ws = get_service_principal_client()
+-    selected_llm_model = (body.llm_model or "").strip() or None
+-    if selected_llm_model:
+-        try:
+-            selected_llm_model = validate_chat_model(selected_llm_model, client=sp_ws)
+-        except ModelValidationError as exc:
+-            raise HTTPException(status_code=400, detail=str(exc))
+-
+-    config = _build_gso_config(llm_model_override=selected_llm_model)
+-
+-    try:
+-        result = trigger_optimization(
+-            space_id=body.space_id,
+-            ws=ws,
+-            sp_ws=sp_ws,
+-            config=config,
+-            user_email=request.headers.get("x-forwarded-email"),
+-            user_name=request.headers.get("x-forwarded-preferred-username"),
+-            apply_mode=body.apply_mode,
+-            levers=body.levers,
+-            target_accuracy=body.target_accuracy,
+-            max_attempts=body.max_attempts,
+-            workload_warehouse_ids=body.workload_warehouse_ids,
+-            benchmark_policy=body.benchmark_policy,
+-        )
+-        # Echo the resolved knobs (request value or the job default) so the UI
+-        # can confirm what the run will use without re-reading the job config.
+-        resolved_target = body.target_accuracy if body.target_accuracy is not None else _DEFAULT_TARGET_ACCURACY
+-        resolved_max_attempts = body.max_attempts if body.max_attempts is not None else _DEFAULT_MAX_ATTEMPTS
+-        return {
+-            "runId": result.run_id,
+-            "jobRunId": result.job_run_id,
+-            "jobUrl": result.job_url,
+-            "status": result.status,
+-            "targetAccuracy": resolved_target,
+-            "maxAttempts": resolved_max_attempts,
+-            "benchmarkPolicy": body.benchmark_policy,
+-        }
+-    except PermissionError as e:
+-        raise HTTPException(status_code=403, detail=str(e))
+-    except ValueError as e:
+-        raise HTTPException(status_code=422, detail=str(e))
+-    except RuntimeError as e:
+-        msg = str(e)
+-        if "already in progress" in msg:
+-            raise HTTPException(status_code=409, detail=msg)
+-        logger.exception("Trigger optimization failed: %s", e)
+-        raise HTTPException(status_code=500, detail=msg)
+-    except Exception as e:
+-        logger.exception("Failed to trigger optimization: %s", e)
+-        raise HTTPException(status_code=500, detail="Failed to start optimization job.")
++    """Legacy managed mutation disabled pending the M10 governed adapter."""
++    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
++        "message": "Use a governed operation; optimizer mutation-gate integration required"})
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -2021,43 +1968,16 @@ async def list_levers():
+ 
+ @router.post("/runs/{run_id}/apply")
+ async def apply_run(run_id: RunId):
+-    """Apply an optimization run's results to the Genie Agent."""
+-    ws = get_workspace_client()
+-    config = _build_gso_config()
+-
+-    try:
+-        result = await _offload(apply_optimization, run_id, ws, config)
+-        await _offload(_invalidate_live_fingerprint_for_run, run_id)
+-        return {"status": result.status, "runId": result.run_id, "message": result.message}
+-    except ValueError as e:
+-        raise HTTPException(status_code=409, detail=str(e))
+-    except RuntimeError as e:
+-        raise HTTPException(status_code=422, detail=str(e))
+-    except Exception as e:
+-        logger.exception("Failed to apply optimization %s: %s", run_id, e)
+-        raise HTTPException(status_code=500, detail="Failed to apply optimization.")
++    """Legacy managed mutation disabled pending the M10 governed adapter."""
++    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
++        "message": "Use a governed operation; optimizer mutation-gate integration required"})
+ 
+ 
+ @router.post("/runs/{run_id}/discard")
+ async def discard_run(run_id: RunId):
+-    """Discard an optimization run and rollback to pre-optimization state."""
+-    ws = get_workspace_client()
+-    sp_ws = get_service_principal_client()
+-    config = _build_gso_config()
+-
+-    try:
+-        result = await _offload(discard_optimization, run_id, ws, sp_ws, config)
+-        await _offload(_invalidate_live_fingerprint_for_run, run_id)
+-        return {"status": result.status, "runId": result.run_id, "message": result.message}
+-    except PermissionError as e:
+-        raise HTTPException(status_code=403, detail=str(e))
+-    except ValueError as e:
+-        raise HTTPException(status_code=409, detail=str(e))
+-    except RuntimeError as e:
+-        raise HTTPException(status_code=422, detail=str(e))
+-    except Exception as e:
+-        logger.exception("Failed to discard optimization %s: %s", run_id, e)
+-        raise HTTPException(status_code=500, detail="Failed to discard optimization.")
++    """Legacy managed mutation disabled pending the M10 governed adapter."""
++    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
++        "message": "Use a governed operation; optimizer mutation-gate integration required"})
+ 
+ 
+ @router.post("/runs/{run_id}/revert")
+@@ -2078,53 +1998,14 @@ async def revert_run(
+     # Deprecated alias retained for existing callers and bookmarked URLs.
+     target: str | None = Query(None, include_in_schema=False),
+ ):
+-    """Revert a past run with independently selected config/benchmark scopes.
+-
+-    ``config_target=champion`` uses the champion iteration's authoritative
+-    observed config (with legacy ``config_json`` fallback), while
+-    ``config_target=baseline`` uses the run's pre-run ``config_snapshot``.
+-    ``benchmark_target=current`` composes the live benchmark block into that
+-    config; ``benchmark_target=champion`` restores the benchmark block captured
+-    with the winning iteration; and ``benchmark_target=baseline`` restores the
+-    benchmark block from the pre-run snapshot. Unlike ``/discard``, this leaves
+-    the historical run status untouched. Active same-Space runs are refused.
+-    """
++    """Legacy managed mutation disabled pending the M10 governed adapter."""
+     resolved_config_target = target or config_target
+     if resolved_config_target not in ("champion", "baseline"):
+-        raise HTTPException(
+-            status_code=422,
+-            detail="config_target must be 'champion' or 'baseline'.",
+-        )
++        raise HTTPException(status_code=422, detail="config_target must be champion or baseline")
+     if benchmark_target not in ("current", "champion", "baseline"):
+-        raise HTTPException(
+-            status_code=422,
+-            detail="benchmark_target must be 'current', 'champion', or 'baseline'.",
+-        )
+-    ws = get_workspace_client()
+-    sp_ws = get_service_principal_client()
+-    config = _build_gso_config()
+-
+-    try:
+-        result = await _offload(
+-            revert_optimization,
+-            run_id,
+-            ws,
+-            sp_ws,
+-            config,
+-            target=resolved_config_target,
+-            benchmark_target=benchmark_target,
+-        )
+-        await _offload(_invalidate_live_fingerprint_for_run, run_id)
+-        return {"status": result.status, "runId": result.run_id, "message": result.message}
+-    except PermissionError as e:
+-        raise HTTPException(status_code=403, detail=str(e))
+-    except ValueError as e:
+-        raise HTTPException(status_code=409, detail=str(e))
+-    except RuntimeError as e:
+-        raise HTTPException(status_code=422, detail=str(e))
+-    except Exception as e:
+-        logger.exception("Failed to revert to run %s: %s", run_id, e)
+-        raise HTTPException(status_code=500, detail="Failed to revert the Genie Agent.")
++        raise HTTPException(status_code=422, detail="benchmark_target must be current, champion, or baseline")
++    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
++        "message": "Use a governed operation; optimizer mutation-gate integration required"})
+ 
+ 
+ @router.get("/runs/{run_id}/revert-options")
+diff --git a/backend/routers/create.py b/backend/routers/create.py
+index 9c8ddef..1be8b28 100644
+--- a/backend/routers/create.py
++++ b/backend/routers/create.py
+@@ -142,28 +142,9 @@ async def validate_config(body: ValidateRequest):
+ 
+ @router.post("", response_model=CreateSpaceResponse)
+ async def create_space_endpoint(body: CreateSpaceRequest):
+-    try:
+-        result = create_genie_space(
+-            display_name=body.display_name,
+-            merged_config=body.serialized_space,
+-            parent_path=body.parent_path,
+-        )
+-    except ValueError as e:
+-        raise HTTPException(status_code=400, detail=str(e))
+-    except PermissionError as e:
+-        raise HTTPException(status_code=403, detail=str(e))
+-    except TimeoutError as e:
+-        raise HTTPException(status_code=504, detail=str(e))
+-    except Exception as e:
+-        logger.exception(f"create_genie_space failed: {e}")
+-        raise HTTPException(status_code=500, detail="Failed to create Genie Agent")
+-
+-    # genie_creator returns genie_space_id; our response model uses space_id
+-    return CreateSpaceResponse(
+-        space_id=result["genie_space_id"],
+-        display_name=result["display_name"],
+-        space_url=result["space_url"],
+-    )
++    """Fail closed until OBO create-intent composition is installed."""
++    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
++        "message": "Create requires durable intent and mutation-gate integration"})
+ 
+ 
+ # ── Agent chat (agentic create flow) ─────────────────────────────────────────
+diff --git a/backend/services/create_agent_tools.py b/backend/services/create_agent_tools.py
+index bb7fa3e..bb5daca 100644
+--- a/backend/services/create_agent_tools.py
++++ b/backend/services/create_agent_tools.py
+@@ -3375,72 +3375,13 @@ def _check_sorted(items: list, key_fn, key_name: str, path: str, error_fn) -> No
+ 
+ @mlflow.trace(name="create_space", span_type=SpanType.TOOL)
+ def _create_space(display_name: str, description: str = "", config: dict | None = None, parent_path: str | None = None) -> dict:
+-    """Create the Genie Agent via the API.
+-
+-    Path resolution is automatic: configured directory -> /Shared/.
+-    On permission errors the next candidate is tried transparently.
+-    """
+-    if not config:
+-        return {"success": False, "error": "No config provided — call generate_config first"}
+-    config = _reconcile_metric_view_sources(copy.deepcopy(config))
+-    try:
+-        result = create_genie_space(
+-            display_name=display_name,
+-            description=description,
+-            merged_config=config,
+-            parent_path=parent_path,
+-        )
+-        return {
+-            "success": True,
+-            "space_id": result["genie_space_id"],
+-            "display_name": result["display_name"],
+-            "space_url": result["space_url"],
+-            "parent_path": result.get("parent_path", ""),
+-        }
+-    except (ValueError, PermissionError, TimeoutError) as e:
+-        return {"success": False, "error": str(e)}
+-    except Exception as e:
+-        logger.exception("create_space failed")
+-        return {"success": False, "error": str(e)}
++    """Legacy managed writes require an immutable mutation-gate request."""
++    return {"success": False, "code": "vc_writes_disabled", "retryable": False,
++            "error": "VC writes disabled: durable mutation-gate integration required"}
+ 
+ 
+ @mlflow.trace(name="update_space", span_type=SpanType.TOOL)
+ def _update_space(space_id: str, config: dict | None = None, display_name: str | None = None) -> dict:
+-    """Update an existing Genie Agent with a new configuration and/or name."""
+-    if not config and not display_name:
+-        return {"success": False, "error": "No config or display_name provided"}
+-    try:
+-        from backend.services.auth import get_workspace_client, get_databricks_host
+-        from backend.genie_creator import _enforce_constraints, _clean_config
+-
+-        body: dict[str, Any] = {}
+-
+-        if config:
+-            config = _reconcile_metric_view_sources(copy.deepcopy(config))
+-            constrained = _enforce_constraints(config)
+-            cleaned = _clean_config(constrained)
+-            body["serialized_space"] = json.dumps(cleaned)
+-
+-        if display_name:
+-            body["display_name"] = display_name
+-
+-        warehouse_id = get_sql_warehouse_id()
+-        if warehouse_id:
+-            body["warehouse_id"] = warehouse_id
+-
+-        client = get_workspace_client()
+-        client.api_client.do(
+-            method="PATCH",
+-            path=f"/api/2.0/genie/spaces/{space_id}",
+-            body=body,
+-        )
+-        host = get_databricks_host()
+-        return {
+-            "success": True,
+-            "space_id": space_id,
+-            "url": f"{host}/genie/rooms/{space_id}",
+-            "message": "Agent updated successfully.",
+-        }
+-    except Exception as e:
+-        logger.exception("update_space failed")
+-        return {"success": False, "error": str(e)}
++    """Legacy managed writes require an immutable mutation-gate request."""
++    return {"success": False, "code": "vc_writes_disabled", "retryable": False,
++            "error": "VC writes disabled: durable mutation-gate integration required"}
+diff --git a/backend/services/genie_client.py b/backend/services/genie_client.py
+index a83a857..be81732 100644
+--- a/backend/services/genie_client.py
++++ b/backend/services/genie_client.py
+@@ -11,16 +11,105 @@ import os
+ import time
+ from copy import deepcopy
+ from typing import Any
++from urllib.parse import quote, urlsplit
++
++import requests
+ 
+ from dotenv import load_dotenv
+ 
+ from backend.services.auth import get_workspace_client, get_service_principal_client, is_running_on_databricks_apps
++from backend.services.version_control import contracts as vc
+ 
+ load_dotenv()
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
++class GenieTransport:
++    """Explicit-executor VC transport; legacy read helpers remain separate."""
++
++    def __init__(self, *, executor, authenticate, coordination, registry, flags=None,
++                 warehouse_id=None, parent_path=None):
++        self.executor = executor
++        self.authenticate = authenticate
++        self.coordination = coordination
++        self.registry = registry
++        self.flags = flags
++        self.warehouse_id = warehouse_id
++        self.parent_path = parent_path
++        parsed = urlsplit(executor.host)
++        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
++                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.port):
++            raise ValueError("Explicit HTTPS workspace origin required")
++        self.host = executor.host.rstrip("/")
++
++    def get(self, binding, executor):
++        if executor is not self.executor:
++            raise PermissionError("Transport is pinned to its verified executor")
++        self._binding(binding)
++        response = self._request("GET", self._path(binding), query={"include_serialized_space": "true"})
++        if "serialized_space" not in response:
++            raise ValueError("Full serialized state is required")
++        return response
++
++    def create_once(self, payload, claim):
++        binding = self.registry.resolve(claim.binding_id)
++        if binding.space_id is not None or not self.warehouse_id:
++            raise PermissionError("Create requires provisional identity and explicit warehouse")
++        body = {"title": payload.title, "description": payload.description,
++                "serialized_space": json.dumps(vc.to_wire(payload.serialized_space)),
++                "warehouse_id": self.warehouse_id}
++        if self.parent_path is not None:
++            body["parent_path"] = self.parent_path
++        response = self._write("POST", "/api/2.0/genie/spaces", binding, body, claim)
++        if not isinstance(response.get("space_id"), str) or not response["space_id"]:
++            raise RuntimeError("Possible create orphan: missing physical identity")
++        return vc.CreateResponse(response["space_id"], response)
++
++    def patch_config_once(self, binding, serialized_space, claim):
++        self._write("PATCH", self._path(binding), binding,
++                    {"serialized_space": json.dumps(serialized_space)}, claim)
++
++    def patch_description_once(self, binding, description, claim):
++        self._write("PATCH", self._path(binding), binding, {"description": description}, claim)
++
++    @staticmethod
++    def _path(binding):
++        if not binding.space_id:
++            raise PermissionError("Physical binding required before GET or PATCH")
++        return f"/api/2.0/genie/spaces/{quote(binding.space_id, safe='')}"
++
++    def _binding(self, binding):
++        if (binding.workspace_id != self.executor.workspace_id
++                or self.registry.resolve(binding.binding_id) != binding):
++            raise PermissionError("Binding or explicit target executor mismatch")
++
++    def _write(self, method, path, binding, body, claim):
++        if self.flags is None or self.flags.enabled("vc_writes_enabled") is not True:
++            raise PermissionError("VC transport writes disabled")
++        self._binding(binding)
++        if (not isinstance(claim, vc.AdmissionClaim) or claim.binding_id != binding.binding_id
++                or claim.binding_revision != binding.binding_revision):
++            raise PermissionError("Bound admission claim required")
++        return self._request(method, path, body=body, claim=claim)
++
++    def _request(self, method, path, *, body=None, query=None, claim=None):
++        headers = self.authenticate(self.executor)
++        if not isinstance(headers, dict) or not headers.get("Authorization"):
++            raise PermissionError("Explicit executor authentication unavailable")
++        with requests.Session() as session:
++            session.trust_env = False
++            session.mount("https://", requests.adapters.HTTPAdapter(max_retries=0))
++            if claim is not None:
++                self.coordination.assert_owner(claim)
++            response = session.request(method, self.host + path, headers=headers, json=body,
++                params=query, timeout=(10, 60), allow_redirects=False)
++            if 300 <= response.status_code < 400:
++                raise RuntimeError("Redirect refused; mutation outcome requires verification")
++            response.raise_for_status()
++            return response.json() if response.content else {}
++
++
+ def _enum_value_upper(value: Any) -> str:
+     """Normalize SDK enum-like values for stable comparisons."""
+     raw = getattr(value, "value", value)
+diff --git a/backend/services/version_control/mutation_gate.py b/backend/services/version_control/mutation_gate.py
+new file mode 100644
+index 0000000..2f6cfea
+--- /dev/null
++++ b/backend/services/version_control/mutation_gate.py
+@@ -0,0 +1,207 @@
++"""Fail-closed orchestration over VC/1.0 ports."""
++
++from datetime import datetime, timezone
++from dataclasses import replace
++from uuid import uuid4
++
++from backend.services.version_control import contracts as vc
++
++
++class MutationGate:
++    def __init__(self, *, coordination, ledger, facts, approvals, transport,
++                 canonicalizer, flags=None, registry=None):
++        self.coordination = coordination
++        self.ledger = ledger
++        self.facts = facts
++        self.approvals = approvals
++        self.transport = transport
++        self.canonicalizer = canonicalizer
++        self.flags = flags
++        self.registry = registry
++
++    def execute(self, request, executor):
++        self._enabled(request.binding, executor, request.operation_type)
++        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
++            raise RuntimeError("Ambiguous or reused request identity")
++        if history.facts:
++            return self.verify_only(request.identity.operation_id, executor)
++        reservation = self.coordination.reserve(request.binding, request.identity, executor)
++        snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
++        preimage = self._capture(request, executor, reservation.fence, snapshot, "preimage")
++        if snapshot.state_digest != request.expected_base:
++            self.coordination.quarantine(reservation.fence, "Reviewed base changed before admission")
++            return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.CONFLICTED,
++                                      preimage, None, True, (preimage.version_id,))
++        authorization = self.approvals.authorize(request, executor)
++        claim = self.coordination.admit(reservation, preimage, authorization)
++        desired = self.canonicalizer.observe({
++            **vc.to_wire(snapshot.response_envelope),
++            "serialized_space": vc.to_wire(request.serialized_space),
++            **({"description": request.description} if request.description is not None else {})})
++        if self.canonicalizer.compare(snapshot, desired) == vc.Comparison.EQUAL:
++            return self._finish(request, executor, claim, vc.OperationStatus.NOOP, preimage)
++        self._checkpoint(claim, vc.PatchStage.CONFIG_IN_FLIGHT, None)
++        self.coordination.assert_owner(claim)
++        try:
++            self.transport.patch_config_once(request.binding, vc.to_wire(request.serialized_space), claim)
++        except Exception:
++            return self._unverified(request, executor, claim, "Config send outcome unknown")
++        try:
++            checkpoint = self.canonicalizer.observe(self.transport.get(request.binding, executor))
++            middle = self._capture(request, executor, claim, checkpoint, "config_checkpoint", preimage.version_id)
++            self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, middle)
++        except Exception:
++            return self._unverified(request, executor, claim, "Config read-back evidence unavailable")
++        if (checkpoint.fingerprints.config != desired.fingerprints.config
++                or checkpoint.fingerprints.benchmark != desired.fingerprints.benchmark
++                or checkpoint.fingerprints.metadata != snapshot.fingerprints.metadata
++                or checkpoint.fingerprints.canonicalizer_version != desired.fingerprints.canonicalizer_version):
++            return self._partial(request, claim, middle, "Config or approved metadata checkpoint changed")
++        if request.description is not None and snapshot.fingerprints.metadata != desired.fingerprints.metadata:
++            self._checkpoint(claim, vc.PatchStage.DESCRIPTION_PENDING, middle)
++            self._checkpoint(claim, vc.PatchStage.DESCRIPTION_IN_FLIGHT, None)
++            self.coordination.assert_owner(claim)
++            try:
++                self.transport.patch_description_once(request.binding, request.description, claim)
++            except Exception:
++                return self._unverified(request, executor, claim, "Description send outcome unknown")
++            try:
++                final = self.canonicalizer.observe(self.transport.get(request.binding, executor))
++                postimage = self._capture(request, executor, claim, final, "postimage", preimage.version_id)
++                self._checkpoint(claim, vc.PatchStage.DESCRIPTION_OBSERVED, postimage)
++            except Exception:
++                return self._unverified(request, executor, claim, "Description read-back evidence unavailable")
++            if self.canonicalizer.compare(final, desired) != vc.Comparison.EQUAL:
++                return self._partial(request, claim, postimage, "Final state differs from desired")
++        else:
++            postimage = middle
++        try:
++            return self._finish(request, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
++        except Exception:
++            return self._unverified(request, executor, claim, "Final publication unavailable")
++
++    def create(self, request, executor):
++        self._enabled(request.binding, executor, "create")
++        if request.binding.space_id is not None or self.registry.resolve(request.binding.binding_id) != request.binding:
++            raise PermissionError("A durable provisional logical binding is required")
++        if self.facts.get_request(request.identity.operation_id).request != request:
++            raise PermissionError("Create request must be durable and immutable")
++        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
++            raise PermissionError("Create identity is ambiguous or reused")
++        if history.facts:
++            return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_UNVERIFIED,
++                                      None, None, True, ("Audited orphan resolution required; never replay create",))
++        intent = vc.CreateIntentRef(str(uuid4()), request.identity.operation_id,
++            request.binding.binding_id, request.binding.binding_revision, request.identity.request_digest)
++        actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
++        self.facts.append(vc.OperationFact(intent.event_id, vc.FactKind.CREATE_INTENT,
++            request.identity.operation_id, 0, f"{request.identity.operation_id}:create-intent",
++            request.binding, request.identity, "create", executor.principal_id, actor,
++            vc.FactStatus.REQUESTED, intent, datetime.now(timezone.utc)))
++        committed = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        if committed.ambiguous or not any(fact.evidence == intent for fact in committed.facts):
++            raise RuntimeError("Create intent was not durably committed")
++        reservation = self.coordination.reserve(request.binding, request.identity, executor)
++        empty = self.canonicalizer.observe({"serialized_space": {}})
++        mutation = vc.MutationRequest(request.identity, request.binding, "create", intent.event_id,
++            empty.state_digest, request.payload.serialized_space, request.payload.description, request.approval_id)
++        grant = self.approvals.authorize(mutation, executor)
++        claim = self.coordination.admit(reservation, intent, grant)
++        self._checkpoint(claim, vc.PatchStage.CONFIG_IN_FLIGHT, None)
++        self.coordination.assert_owner(claim)
++        try:
++            response = self.transport.create_once(request.payload, claim)
++            if not response.space_id:
++                raise RuntimeError("Create response has no physical identity")
++            evidence = vc.IdentityEvidence("VC/1.0", request.binding.workspace_id, response.space_id,
++                vc.canonical_json_hash("vc-create-response/1", response.response_envelope),
++                datetime.now(timezone.utc), actor)
++            physical = self.registry.bind_created(intent, response.space_id, evidence)
++            if (physical != replace(request.binding, space_id=response.space_id)
++                    or self.registry.resolve(physical.binding_id) != physical):
++                raise RuntimeError("Physical binding was not durably resolved")
++            mutation = replace(mutation, binding=physical)
++            snapshot = self.canonicalizer.observe(self.transport.get(physical, executor))
++            postimage = self._capture(mutation, executor, claim, snapshot, "postimage")
++            self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, postimage)
++            desired = self.canonicalizer.observe({"serialized_space": vc.to_wire(request.payload.serialized_space),
++                **({"description": request.payload.description} if request.payload.description is not None else {})})
++            if self.canonicalizer.compare(snapshot, desired) != vc.Comparison.EQUAL:
++                return self._partial(mutation, claim, postimage, "Created state differs from approved payload")
++            return self._finish(mutation, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
++        except Exception:
++            return self._unverified(mutation, executor, claim, "Possible create orphan; audited identity resolution required")
++
++    def _enabled(self, binding, executor, operation_type):
++        if self.flags is None or self.flags.enabled("vc_writes_enabled") is not True:
++            raise PermissionError("VC writes disabled")
++        switches = {"restore": "vc_restore_enabled", "promotion": "vc_promotion_enabled",
++                    "optimizer_apply": "vc_optimizer_apply_enabled", "reapply": "vc_reconcile_enabled"}
++        if operation_type not in {"edit", "create", *switches}:
++            raise PermissionError("Unknown mutation kind disabled")
++        if operation_type in switches or binding.environment == "prod":
++            if (not executor.execution_ref.startswith("job/") or executor.actor_kind != "service"
++                    or (operation_type in switches and self.flags.enabled(switches[operation_type]) is not True)):
++                raise PermissionError("Governed writes disabled outside target-local Jobs")
++        if executor.workspace_id != binding.workspace_id:
++            raise PermissionError("Cross-workspace mutation disabled")
++
++    def _partial(self, request, claim, observation, reason):
++        self.coordination.quarantine(claim, reason)
++        return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_PARTIAL,
++                                  claim.preimage, observation, True, (reason,))
++
++    def _unverified(self, request, executor, claim, reason):
++        self.coordination.quarantine(claim, reason)
++        self._record(request, executor, claim, vc.OperationStatus.APPLIED_UNVERIFIED)
++        return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_UNVERIFIED,
++                                  claim.preimage, None, True, (reason,))
++
++    def verify_only(self, operation_id, executor):
++        request = self.facts.get_request(operation_id).request
++        snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
++        return vc.OperationResult(operation_id, vc.OperationStatus.APPLIED_UNVERIFIED,
++                                  None, None, True, (snapshot.state_digest,))
++
++    def _checkpoint(self, claim, stage, observation):
++        self.coordination.checkpoint(claim, stage, vc.StageEvidence(
++            "VC/1.0", stage, datetime.now(timezone.utc),
++            observation.state_digest if observation else claim.request.request_digest, observation))
++
++    def _finish(self, request, executor, claim, status, postimage=None):
++        self._record(request, executor, claim, status, postimage)
++        result = vc.OperationResult(request.identity.operation_id, status, claim.preimage,
++                                    postimage, False, ())
++        self.coordination.finish(claim, result)
++        return result
++
++    def _record(self, request, executor, claim, status, postimage=None):
++        evidence = vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
++                                    datetime.now(timezone.utc),
++                                    postimage.state_digest if postimage else request.identity.request_digest,
++                                    postimage)
++        self.facts.append(vc.OperationFact(
++            str(uuid4()), vc.FactKind.OPERATION, request.identity.operation_id, 100,
++            f"{claim.attempt_id}:{status.value}", request.binding, request.identity,
++            request.operation_type, executor.principal_id,
++            vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
++            vc.FactStatus(status.value), evidence, datetime.now(timezone.utc),
++            attempt_id=claim.attempt_id, generation=claim.generation,
++            pre_version_id=claim.preimage.version_id if isinstance(claim.preimage, vc.ObservationRef) else None,
++            post_version_id=postimage.version_id if postimage else None))
++
++    def _capture(self, request, executor, fence, snapshot, reason, parent=None):
++        context = vc.CaptureContext(
++            request.binding, f"{fence.attempt_id}:{reason}", datetime.now(timezone.utc), reason,
++            vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
++            vc.Origin.EXTERNAL if reason == "preimage" else (
++                vc.Origin.RESTORE if request.operation_type == "restore" else vc.Origin.WORKBENCH),
++            parent_version_id=parent, operation_id=request.identity.operation_id,
++            restored_from_version_id=request.source_version_id if request.operation_type == "restore" and reason == "postimage" else None,
++            attempt_id=fence.attempt_id, generation=fence.generation)
++        observation = self.ledger.append_observation(snapshot, context)
++        if not self.ledger.verify_committed(observation):
++            raise RuntimeError("Evidence was not committed")
++        return observation
+diff --git a/backend/services/version_control/observer.py b/backend/services/version_control/observer.py
+new file mode 100644
+index 0000000..ad897db
+--- /dev/null
++++ b/backend/services/version_control/observer.py
+@@ -0,0 +1,64 @@
++"""Serialized full-state observation, independent of policy head authority."""
++
++from dataclasses import replace
++from datetime import datetime, timezone
++
++from backend.services.version_control import contracts as vc
++
++
++class Observer:
++    def __init__(self, *, coordination, ledger, canonicalizer, transport, identity,
++                 reader_selection, status_reader):
++        self.coordination = coordination
++        self.ledger = ledger
++        self.canonicalizer = canonicalizer
++        self.transport = transport
++        self.identity = identity
++        self.reader_selection = reader_selection
++        self.status_reader = status_reader
++
++    def capture_on_open(self, binding, viewer):
++        status = self.status_reader(binding, viewer)
++        executor = self.identity.executor(self.reader_selection)
++        return self._capture(binding, "open", executor, status)
++
++    def capture(self, binding, reason, executor):
++        actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
++        return self._capture(binding, reason, executor, self.status_reader(binding, actor))
++
++    def _capture(self, binding, reason, executor, status):
++        try:
++            return self._capture_committed(binding, reason, executor, status)
++        except Exception:
++            return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
++                reasons=(*status.reasons, "Observation evidence unavailable")), None, True)
++
++    def _capture_committed(self, binding, reason, executor, status):
++        try:
++            lease = self.coordination.observe_exclusively(binding, executor)
++        except Exception:
++            return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
++                reasons=(*status.reasons, "Observation busy or unavailable")), None, True)
++        actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
++        status = self.status_reader(binding, actor)
++        snapshot = self.canonicalizer.observe(self.transport.get(binding, executor))
++        if status.heads.observed is not None:
++            previous = self.ledger.get_version(binding, status.heads.observed)
++            if self.canonicalizer.compare(previous.snapshot, snapshot) == vc.Comparison.EQUAL:
++                self.coordination.advance_heads(lease.fence, vc.HeadUpdate(None, None, None, None))
++                return vc.ObservationResult(replace(status, stale=False), None, False)
++        context = vc.CaptureContext(binding, f"{lease.fence.attempt_id}:observe",
++            datetime.now(timezone.utc), reason,
++            vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
++            vc.Origin.EXTERNAL, parent_version_id=status.heads.observed,
++            attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
++        observation = self.ledger.append_observation(snapshot, context)
++        if not self.ledger.verify_committed(observation):
++            raise RuntimeError("Observation persistence unavailable")
++        heads = self.coordination.advance_heads(lease.fence, vc.HeadUpdate(observation.version_id, None, None, None))
++        summary = vc.VersionSummary(observation.version_id, binding.binding_id, context.observed_at,
++            context.origin, context.actor.subject_id, context.parent_version_id, None,
++            snapshot.fingerprints, None, None)
++        return vc.ObservationResult(replace(status, heads=heads, observed_at=context.observed_at,
++            projection_as_of=context.observed_at, drift=vc.DriftState.UNKNOWN,
++            stale=False, allowed_actions=()), summary, False)
+diff --git a/backend/services/version_control/restore.py b/backend/services/version_control/restore.py
+new file mode 100644
+index 0000000..a0dd187
+--- /dev/null
++++ b/backend/services/version_control/restore.py
+@@ -0,0 +1,66 @@
++"""Target-local historical restore orchestrated through approved immutable requests."""
++
++from backend.services.version_control import contracts as vc
++
++
++class RestoreService:
++    def __init__(self, *, facts, ledger, gate, dispatcher, identity, flags, validate):
++        self.facts = facts
++        self.ledger = ledger
++        self.gate = gate
++        self.dispatcher = dispatcher
++        self.identity = identity
++        self.flags = flags
++        self.validate = validate
++
++    def submit(self, operation_id, actor):
++        request = self._load(operation_id)
++        if (actor.workspace_id != request.binding.workspace_id
++                or self.identity.can_edit(actor.subject_id, request.binding) is not True):
++            raise PermissionError("Restore requester is not authorized for this target")
++        return self.dispatcher.submit_local(operation_id, "restore")
++
++    def run(self, operation_id, executor):
++        request = self._load(operation_id)
++        if (executor.workspace_id != request.binding.workspace_id
++                or executor.actor_kind != "service" or not executor.execution_ref.startswith("job/")):
++            raise PermissionError("Restore requires a target-local Job executor")
++        self.identity.verify_run_as(executor.execution_ref, executor.principal_id)
++        return self.gate.execute(request, executor)
++
++    def compensate(self, original_operation_id, compensation_operation_id, executor):
++        original = self.facts.get_request(original_operation_id)
++        compensation = self._load(compensation_operation_id)
++        if original.approval is None or compensation.identity.operation_id == original_operation_id:
++            raise PermissionError("Compensation requires preauthorization and a new operation")
++        policy = original.approval.request.inputs.recovery_policy
++        if (policy.get("compensation_operation_id") != compensation_operation_id
++                or policy.get("compensation_request_digest") != compensation.identity.request_digest
++                or compensation.binding != original.request.binding):
++            raise PermissionError("Compensation is not bound to preauthorized recovery policy")
++        history = self.facts.lookup_request(original.request.binding, original.request.identity.idempotency_key)
++        if history.ambiguous or not history.facts:
++            raise PermissionError("Original outcome is ambiguous")
++        terminal = max(history.facts, key=lambda fact: fact.transition_sequence)
++        if (terminal.status != vc.FactStatus.CONFIRMED or not terminal.post_version_id
++                or original.approval.request.requested_at >= terminal.recorded_at):
++            raise PermissionError("Unresolved original send cannot authorize compensation")
++        post = self.ledger.get_version(original.request.binding, terminal.post_version_id)
++        if post.snapshot.state_digest != compensation.expected_base:
++            raise PermissionError("Compensation must bind the exact original post-stage")
++        return self.run(compensation_operation_id, executor)
++
++    def _load(self, operation_id):
++        if self.flags.enabled("vc_restore_enabled") is not True:
++            raise PermissionError("VC restore writes disabled")
++        request = self.facts.get_request(operation_id).request
++        if (not isinstance(request, vc.MutationRequest) or request.operation_type != "restore"
++                or request.identity.operation_id != operation_id):
++            raise PermissionError("Expected immutable restore request")
++        version = self.ledger.get_version(request.binding, request.source_version_id)
++        if (version.context.binding != request.binding
++                or version.snapshot.serialized_space != request.serialized_space
++                or version.snapshot.restorable_metadata.get("description") != request.description
++                or self.validate(version, request) is not True):
++            raise ValueError("Historical schema, dependencies or approved payload invalid")
++        return request
+diff --git a/backend/tests/test_auto_optimize_router.py b/backend/tests/test_auto_optimize_router.py
+index 64b1b01..cfe3f75 100644
+--- a/backend/tests/test_auto_optimize_router.py
++++ b/backend/tests/test_auto_optimize_router.py
+@@ -53,6 +53,20 @@ def mock_user_ws() -> MagicMock:
+     return MagicMock()
+ 
+ 
++@pytest.mark.parametrize("endpoint", ["trigger", "runs/00000000-0000-4000-8000-000000000001/apply",
++    "runs/00000000-0000-4000-8000-000000000001/discard", "runs/00000000-0000-4000-8000-000000000001/revert"])
++def test_all_existing_mutation_entrypoints_use_gate_and_fail_closed(client, monkeypatch, endpoint):
++    writes = MagicMock()
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: MagicMock())
++    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: MagicMock())
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    writes.assert_not_called()
++
++
+ # ── /permissions — advisory UI gate ─────────────────────────────────────
+ 
+ 
+@@ -192,114 +206,46 @@ def test_permissions_requires_configured_gso(client, monkeypatch) -> None:
+ def test_trigger_proceeds_without_prompt_registry_gate(
+     client, mock_sp_ws, mock_user_ws, monkeypatch,
+ ) -> None:
+-    """Prompt Registry availability no longer blocks app-layer job launch."""
+-    monkeypatch.setattr(
+-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
+-    )
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setenv("LLM_MODEL", "custom-trigger-model")
+-
+-    fake_result = MagicMock(
+-        run_id="run-xyz",
+-        job_run_id=9999,
+-        job_url="https://example.com/jobs/12345/runs/9999",
+-        status="QUEUED",
+-    )
+-
+-    with patch.object(
+-        auto_optimize, "trigger_optimization", return_value=fake_result
+-    ) as trigger_mock:
+-        resp = client.post(
+-            "/api/auto-optimize/trigger",
+-            json={"space_id": "space-abc", "apply_mode": "genie_config"},
+-        )
+-
+-    assert resp.status_code == 200, resp.text
+-    body = resp.json()
+-    assert body == {
+-        "runId": "run-xyz",
+-        "jobRunId": 9999,
+-        "jobUrl": "https://example.com/jobs/12345/runs/9999",
+-        "status": "QUEUED",
+-        # GSO v2 loop knobs default to the job defaults when the request omits
+-        # them, and are echoed back so the UI can confirm what the run uses.
+-        "targetAccuracy": 0.90,
+-        "maxAttempts": 3,
+-        # Legacy API callers retain the historical repair behavior; the
+-        # Workbench sends review_only explicitly for its safer UI default.
+-        "benchmarkPolicy": "repair_allowed",
+-    }
+-    trigger_mock.assert_called_once()
+-    config = trigger_mock.call_args.kwargs["config"]
+-    assert config.llm_model == "custom-trigger-model"
+-    # Omitted knobs flow to trigger_optimization as None (it resolves defaults).
+-    assert trigger_mock.call_args.kwargs["target_accuracy"] is None
+-    assert trigger_mock.call_args.kwargs["max_attempts"] is None
+-    assert trigger_mock.call_args.kwargs["benchmark_policy"] == "repair_allowed"
+-    assert "deploy_target" not in trigger_mock.call_args.kwargs
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "trigger"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_trigger_uses_selected_llm_model(
+     client, mock_sp_ws, mock_user_ws, monkeypatch,
+ ) -> None:
+-    """Explicit llm_model overrides the env default after metadata validation."""
+-    monkeypatch.setattr(
+-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
+-    )
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setenv("LLM_MODEL", "env-default-model")
+-    monkeypatch.setattr(
+-        auto_optimize,
+-        "validate_chat_model",
+-        lambda model, client=None: model,
+-    )
+-
+-    fake_result = MagicMock(
+-        run_id="run-selected",
+-        job_run_id=123,
+-        job_url=None,
+-        status="QUEUED",
+-    )
+-
+-    with patch.object(
+-        auto_optimize, "trigger_optimization", return_value=fake_result
+-    ) as trigger_mock:
+-        resp = client.post(
+-            "/api/auto-optimize/trigger",
+-            json={
+-                "space_id": "space-abc",
+-                "apply_mode": "genie_config",
+-                "llm_model": "selected-chat",
+-            },
+-        )
+-
+-    assert resp.status_code == 200, resp.text
+-    config = trigger_mock.call_args.kwargs["config"]
+-    assert config.llm_model == "selected-chat"
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "trigger"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_trigger_rejects_invalid_llm_model(
+     client, mock_sp_ws, mock_user_ws, monkeypatch,
+ ) -> None:
+-    monkeypatch.setattr(
+-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
+-    )
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-
+-    def reject(model, client=None):
+-        raise auto_optimize.ModelValidationError("not a chat model")
+-
+-    monkeypatch.setattr(auto_optimize, "validate_chat_model", reject)
+-
+-    with patch.object(auto_optimize, "trigger_optimization") as trigger_mock:
+-        resp = client.post(
+-            "/api/auto-optimize/trigger",
+-            json={"space_id": "space-abc", "llm_model": "bad-model"},
+-        )
+-
+-    assert resp.status_code == 400
+-    assert resp.json()["detail"] == "not a chat model"
+-    trigger_mock.assert_not_called()
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "trigger"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_trigger_unconfigured_returns_503(client, monkeypatch) -> None:
+@@ -325,28 +271,16 @@ def test_trigger_rejects_malformed_space_id(client) -> None:
+ def test_trigger_forwards_workload_warehouse_ids(
+     client, mock_sp_ws, mock_user_ws, monkeypatch,
+ ) -> None:
+-    monkeypatch.setattr(
+-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
+-    )
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    fake_result = MagicMock(
+-        run_id="run-workloads", job_run_id=1, job_url=None, status="QUEUED",
+-    )
+-    with patch.object(
+-        auto_optimize, "trigger_optimization", return_value=fake_result,
+-    ) as trigger_mock:
+-        response = client.post(
+-            "/api/auto-optimize/trigger",
+-            json={
+-                "space_id": "space-abc",
+-                "workload_warehouse_ids": ["wh-a", "wh-b"],
+-            },
+-        )
+-
+-    assert response.status_code == 200
+-    assert trigger_mock.call_args.kwargs["workload_warehouse_ids"] == [
+-        "wh-a", "wh-b",
+-    ]
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "trigger"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ # ── Bug #2 — derived accuracy ───────────────────────────────────────────
+@@ -1694,32 +1628,16 @@ def test_remove_history_entry_fails_when_tombstone_cannot_be_persisted(
+ 
+ 
+ def test_trigger_round_trips_loop_knobs(client, mock_sp_ws, mock_user_ws, monkeypatch) -> None:
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "validate_chat_model", lambda m, client=None: m)
+-
+-    fake_result = MagicMock(run_id="run-1", job_run_id=1, job_url=None, status="QUEUED")
+-    with patch.object(auto_optimize, "trigger_optimization", return_value=fake_result) as tmock:
+-        resp = client.post(
+-            "/api/auto-optimize/trigger",
+-            json={
+-                "space_id": "space-abc",
+-                "target_accuracy": 0.85,
+-                "max_attempts": 5,
+-                "benchmark_policy": "review_only",
+-            },
+-        )
+-
+-    assert resp.status_code == 200, resp.text
+-    body = resp.json()
+-    # Echoed back exactly as requested.
+-    assert body["targetAccuracy"] == 0.85
+-    assert body["maxAttempts"] == 5
+-    assert body["benchmarkPolicy"] == "review_only"
+-    # Threaded into trigger_optimization.
+-    assert tmock.call_args.kwargs["target_accuracy"] == 0.85
+-    assert tmock.call_args.kwargs["max_attempts"] == 5
+-    assert tmock.call_args.kwargs["benchmark_policy"] == "review_only"
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "trigger"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_trigger_rejects_out_of_range_target_accuracy(client) -> None:
+@@ -2259,103 +2177,60 @@ def test_mutation_routes_offload_operations_and_fingerprint_lookup(
+     operation_name: str,
+     result_status: str,
+ ) -> None:
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(
+-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws,
+-    )
+-    operation = MagicMock(
+-        return_value=MagicMock(
+-            status=result_status,
+-            run_id=run_id,
+-            message="ok",
+-        )
+-    )
+-    invalidate = MagicMock()
+-    monkeypatch.setattr(auto_optimize, operation_name, operation)
+-    monkeypatch.setattr(
+-        auto_optimize, "_invalidate_live_fingerprint_for_run", invalidate,
+-    )
+-    offloaded: list[object] = []
+-
+-    async def record_offload(fn, *args, **kwargs):
+-        offloaded.append(fn)
+-        return fn(*args, **kwargs)
+-
+-    monkeypatch.setattr(auto_optimize, "_offload", record_offload)
+-
+-    response = client.post(f"/api/auto-optimize/runs/{run_id}/{path_suffix}")
+-
+-    assert response.status_code == 200, response.text
+-    assert response.json()["status"] == result_status
+-    assert offloaded == [operation, invalidate]
+-    operation.assert_called_once()
+-    invalidate.assert_called_once_with(run_id)
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = f"runs/12345678-1234-1234-1234-1234567890ab/{path_suffix}"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ # ── /runs/{run_id}/revert ───────────────────────────────────────────────
+ 
+ 
+ def test_revert_run_happy_path(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
+-    """A successful revert returns 200 + the integration ActionResult payload."""
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-    fake = MagicMock(status="reverted", run_id=run_id,
+-                      message="Genie Agent reverted to this run's champion configuration.")
+-    captured = {}
+-    def _stub(*a, **k):
+-        captured.update(k)
+-        return fake
+-    monkeypatch.setattr(auto_optimize, "revert_optimization", _stub)
+-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert?target=champion")
+-    assert resp.status_code == 200
+-    body = resp.json()
+-    assert body["status"] == "reverted"
+-    assert body["runId"] == run_id
+-    assert "reverted" in body["message"].lower()
+-    # The target query param is forwarded to the integration function.
+-    assert captured.get("target") == "champion"
+-    assert captured.get("benchmark_target") == "current"
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_revert_run_defaults_target_to_champion(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
+-    """Omitting ?target defaults to 'champion' (back-compat)."""
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-    captured = {}
+-    def _stub(*a, **k):
+-        captured.update(k)
+-        return MagicMock(status="reverted", run_id=run_id, message="ok")
+-    monkeypatch.setattr(auto_optimize, "revert_optimization", _stub)
+-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
+-    assert resp.status_code == 200
+-    assert captured.get("target") == "champion"
+-    assert captured.get("benchmark_target") == "current"
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_revert_run_forwards_both_selected_scopes(
+     client, monkeypatch, mock_sp_ws, mock_user_ws,
+ ) -> None:
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-    captured = {}
+-
+-    def _stub(*args, **kwargs):
+-        captured.update(kwargs)
+-        return MagicMock(status="reverted", run_id=run_id, message="ok")
+-
+-    monkeypatch.setattr(auto_optimize, "revert_optimization", _stub)
+-    resp = client.post(
+-        f"/api/auto-optimize/runs/{run_id}/revert"
+-        "?config_target=baseline&benchmark_target=champion"
+-    )
+-
+-    assert resp.status_code == 200
+-    assert captured["target"] == "baseline"
+-    assert captured["benchmark_target"] == "champion"
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_revert_run_rejects_invalid_target(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
+@@ -2390,60 +2265,57 @@ def test_revert_run_rejects_invalid_benchmark_target(
+ 
+ 
+ def test_revert_run_returns_409_for_value_error(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
+-    """Still-in-progress / missing-snapshot runs surface as a 409."""
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-    def _raise(*a, **k):
+-        raise ValueError("Cannot revert to a run that is still in progress.")
+-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
+-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
+-    assert resp.status_code == 409
+-    assert "in progress" in resp.json()["detail"].lower()
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_revert_run_returns_403_for_permission_error(
+     client, monkeypatch, mock_sp_ws, mock_user_ws,
+ ) -> None:
+-    """An OBO caller without CAN_EDIT/CAN_MANAGE cannot use the SP to mutate."""
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-
+-    def _raise(*args, **kwargs):
+-        raise PermissionError("You need CAN_EDIT or CAN_MANAGE permission.")
+-
+-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
+-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
+-
+-    assert resp.status_code == 403
+-    assert "can_edit" in resp.json()["detail"].lower()
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_revert_run_returns_422_for_runtime_error(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
+-    """A failed Genie PATCH rollback surfaces as a 422 (unprocessable)."""
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-    def _raise(*a, **k):
+-        raise RuntimeError("Failed to apply rollback via API")
+-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
+-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
+-    assert resp.status_code == 422
+-    assert "rollback" in resp.json()["detail"].lower()
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_revert_run_returns_500_for_unexpected_exception(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
+-    """Any unexpected error maps to a generic 500, never a stack trace."""
+-    run_id = "12345678-1234-1234-1234-1234567890ab"
+-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
+-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
+-    def _raise(*a, **k):
+-        raise OSError("boom")
+-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
+-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
+-    assert resp.status_code == 500
+-    assert resp.json()["detail"] == "Failed to revert the Genie Agent."
++    """Legacy behavior is superseded by fail-closed governed mutation admission."""
++    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
++    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
++        monkeypatch.setattr(auto_optimize, name, writes)
++    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
++    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["code"] == "vc_writes_disabled"
++    assert response.json()["detail"]["retryable"] is False
++    writes.assert_not_called()
+ 
+ 
+ def test_revert_options_returns_preview(
+diff --git a/backend/tests/test_create_agent.py b/backend/tests/test_create_agent.py
+index 37e7c78..8930f58 100644
+--- a/backend/tests/test_create_agent.py
++++ b/backend/tests/test_create_agent.py
+@@ -1,5 +1,24 @@
+ """Tests for CreateAgent idempotency guards (backend/services/create_agent.py)."""
+ 
++
++def test_all_existing_mutation_entrypoints_use_gate_and_fail_closed(monkeypatch):
++    from unittest.mock import Mock
++    import pytest
++    from backend import genie_creator
++    from backend.services import create_agent_tools
++    client = Mock()
++    monkeypatch.setattr(genie_creator, "get_workspace_client", lambda: client)
++    monkeypatch.setattr(genie_creator, "get_sql_warehouse_id", lambda: "warehouse")
++    monkeypatch.setattr(genie_creator, "_non_retrying_client", lambda original: original)
++    with pytest.raises(PermissionError, match="disabled"):
++        genie_creator.create_genie_space("Sales", {"version": 2})
++    for result in (create_agent_tools._create_space("Sales", config={"version": 2}),
++                   create_agent_tools._update_space("space", config={"version": 2})):
++        assert result["success"] is False
++        assert result["retryable"] is False
++        assert result["code"] == "vc_writes_disabled"
++    client.api_client.do.assert_not_called()
++
+ import asyncio
+ from types import SimpleNamespace
+ 
+diff --git a/backend/tests/test_create_timeout_dedup.py b/backend/tests/test_create_timeout_dedup.py
+index f4911bd..0b27413 100644
+--- a/backend/tests/test_create_timeout_dedup.py
++++ b/backend/tests/test_create_timeout_dedup.py
+@@ -1,20 +1,24 @@
+-"""Regression tests for create-on-timeout duplicate spaces.
+-
+-Field report: creating a Genie Space produced many duplicates while the app
+-showed "failed" and kept retrying (error: HTTPSConnectionPool ... Read timed
+-out). Root cause: the create POST is non-idempotent and the app never recorded
+-space_id on timeout, so every retry created another space. Genie appends a
+-timestamp to the title on name collision, so duplicates looked distinct.
+-
+-These tests cover the backend half of the fix:
+-  - _is_timeout_error detects "Read timed out"
+-  - _title_matches_requested matches exact + collision variants, rejects siblings
+-  - reconcile adopts the timed-out-but-created space, scoped to THIS attempt
+-    (create_time >= request start) so it never binds to a pre-existing space
+-  - a non-retrying client is used for the create POST
++"""Pin M04's fail-closed legacy create and isolated timeout/title helpers.
++
++Display-name-match create-on-timeout reconciliation is RETIRED in favor of
++durable create-intent + gated create (see test_vc_create.py). Legacy create
++must reject calls before any POST, blind replay, listing, or title adoption,
++including adoption of a pre-existing same-named space (a data-loss risk).
++
++The timeout/title helpers remain tested in isolation, not as an active create
++path. Hidden SDK retry prevention belongs to test_genie_client.py's
++test_transport_disables_hidden_sdk_retries_for_post_and_both_patches.
+ """
+ 
++from unittest.mock import Mock
++
++import pytest
++
+ import backend.genie_creator as gc
++import backend.services.genie_client as gcli
++
++
++_DISABLED_CREATE = "VC writes disabled: create requires durable intent and the mutation gate"
+ 
+ 
+ class _FakeApiClient:
+@@ -45,13 +49,23 @@ class _FakeClient:
+ 
+ 
+ def _patch(monkeypatch, api):
+-    monkeypatch.setattr(gc, "get_workspace_client", lambda: _FakeClient(api))
++    monkeypatch.setattr(api, "do", Mock(wraps=api.do))
++    monkeypatch.setattr(gc, "get_workspace_client", Mock(return_value=_FakeClient(api)))
+     monkeypatch.setattr(gc, "get_databricks_host", lambda: "https://example.cloud.databricks.com")
+     monkeypatch.setattr(gc, "get_sql_warehouse_id", lambda: "wh_123")
+-    monkeypatch.setattr(gc, "_non_retrying_client", lambda base: base)
+-    import backend.services.genie_client as gcli
++    monkeypatch.setattr(gc, "_non_retrying_client", Mock(side_effect=lambda base: base))
++    monkeypatch.setattr(gc, "_title_matches_requested", Mock(wraps=gc._title_matches_requested))
+     monkeypatch.setattr(gcli, "list_genie_spaces",
+-                        lambda: api.do("GET", "/api/2.0/genie/spaces")["spaces"])
++                        Mock(side_effect=lambda: api.do("GET", "/api/2.0/genie/spaces")["spaces"]))
++
++
++def _assert_no_legacy_activity(api):
++    api.do.assert_not_called()
++    assert api.post_calls == 0
++    gc.get_workspace_client.assert_not_called()
++    gc._non_retrying_client.assert_not_called()
++    gcli.list_genie_spaces.assert_not_called()
++    gc._title_matches_requested.assert_not_called()
+ 
+ 
+ # ── _is_timeout_error ────────────────────────────────────────────────────────
+@@ -82,23 +96,16 @@ def test_title_matcher_rejects_prefix_siblings():
+         assert not gc._title_matches_requested(t, "Sales"), t
+ 
+ 
+-# ── reconcile behavior ───────────────────────────────────────────────────────
+-
+-def test_timeout_reconciles_to_created_space(monkeypatch):
++def test_legacy_create_rejects_exact_title_adoption(monkeypatch):
+     title = "Ops_Collection_team_SQL_Agent"
+-    api = _FakeApiClient(created_title=title, created_id="sp_ok", create_time="2026-08-12T12:03:55Z")
++    api = _FakeApiClient(created_title=title, created_id="sp_ok", create_time="2999-01-01T00:00:00Z")
+     _patch(monkeypatch, api)
+-    # request_start is computed inside create_genie_space (now - 5s); the fake's
+-    # create_time is fixed in the past, so freeze "now" is unnecessary — instead
+-    # give the created space a create_time far in the future to sit in-window.
+-    api._ct = "2999-01-01T00:00:00Z"
+-    result = gc.create_genie_space(display_name=title, merged_config={"data_sources": {"tables": []}})
+-    assert result["genie_space_id"] == "sp_ok"
+-    assert result.get("reconciled") is True
+-    assert api.post_calls == 1
++    with pytest.raises(PermissionError, match=_DISABLED_CREATE):
++        gc.create_genie_space(display_name=title, merged_config={"data_sources": {"tables": []}})
++    _assert_no_legacy_activity(api)
+ 
+ 
+-def test_reconcile_matches_timestamp_renamed_variant(monkeypatch):
++def test_legacy_create_rejects_timestamp_renamed_adoption(monkeypatch):
+     requested = "Ops_Collection_team_SQL_Agent"
+ 
+     class _RenamedApi(_FakeApiClient):
+@@ -114,15 +121,15 @@ def test_reconcile_matches_timestamp_renamed_variant(monkeypatch):
+ 
+     api = _RenamedApi(created_title=requested)
+     _patch(monkeypatch, api)
+-    result = gc.create_genie_space(display_name=requested, merged_config={"data_sources": {"tables": []}})
+-    assert result["genie_space_id"] == "sp_renamed"
+-    assert result.get("reconciled") is True
++    with pytest.raises(PermissionError, match=_DISABLED_CREATE):
++        gc.create_genie_space(display_name=requested, merged_config={"data_sources": {"tables": []}})
++    _assert_no_legacy_activity(api)
+ 
+ 
+-def test_reconcile_ignores_preexisting_space_outside_window(monkeypatch):
++def test_legacy_create_never_adopts_preexisting_same_named_space(monkeypatch):
+     """CRITICAL (data-loss guard): a same-named space created BEFORE this attempt
+-    must NOT be adopted — otherwise a later update_space overwrites it. With only
+-    a pre-existing (old) match and no in-window space, reconcile must raise."""
++    must NOT be adopted — otherwise a later update_space overwrites it. Legacy
++    create must fail closed before listing spaces or invoking title matching."""
+     requested = "Sales Agent"
+ 
+     class _OldOnlyApi(_FakeApiClient):
+@@ -137,14 +144,12 @@ def test_reconcile_ignores_preexisting_space_outside_window(monkeypatch):
+ 
+     api = _OldOnlyApi(created_title=requested)
+     _patch(monkeypatch, api)
+-    monkeypatch.setattr(gc, "_RECONCILE_ATTEMPTS", 1)  # no long polling in test
+-
+-    import pytest
+-    with pytest.raises(TimeoutError):
++    with pytest.raises(PermissionError, match=_DISABLED_CREATE):
+         gc.create_genie_space(display_name=requested, merged_config={"data_sources": {"tables": []}})
++    _assert_no_legacy_activity(api)
+ 
+ 
+-def test_reconcile_prefers_earliest_in_window(monkeypatch):
++def test_legacy_create_never_selects_between_same_named_spaces(monkeypatch):
+     requested = "Sales Agent"
+ 
+     class _BothApi(_FakeApiClient):
+@@ -161,11 +166,12 @@ def test_reconcile_prefers_earliest_in_window(monkeypatch):
+ 
+     api = _BothApi(created_title=requested)
+     _patch(monkeypatch, api)
+-    result = gc.create_genie_space(display_name=requested, merged_config={"data_sources": {"tables": []}})
+-    assert result["genie_space_id"] == "sp_original"  # earliest in-window
++    with pytest.raises(PermissionError, match=_DISABLED_CREATE):
++        gc.create_genie_space(display_name=requested, merged_config={"data_sources": {"tables": []}})
++    _assert_no_legacy_activity(api)
+ 
+ 
+-def test_timeout_without_match_raises(monkeypatch):
++def test_legacy_create_without_match_rejects_blind_replay(monkeypatch):
+     class _NoMatchApi(_FakeApiClient):
+         def do(self, method, path, body=None, query=None):
+             if method == "POST":
+@@ -176,42 +182,34 @@ def test_timeout_without_match_raises(monkeypatch):
+ 
+     api = _NoMatchApi(created_title="whatever")
+     _patch(monkeypatch, api)
+-    monkeypatch.setattr(gc, "_RECONCILE_ATTEMPTS", 1)
+-    import pytest
+-    with pytest.raises(TimeoutError):
+-        gc.create_genie_space(display_name="Ops_Collection_team_SQL_Agent",
+-                              merged_config={"data_sources": {"tables": []}})
++    for attempt in range(2):
++        with pytest.raises(PermissionError, match=_DISABLED_CREATE):
++            gc.create_genie_space(display_name="Ops_Collection_team_SQL_Agent",
++                                  merged_config={"data_sources": {"tables": []}})
++        _assert_no_legacy_activity(api)
++
+ 
++def test_legacy_create_disabled_before_non_retrying_client_selection(monkeypatch):
++    """Legacy create cannot POST, even with a non-retrying client available.
+ 
+-def test_uses_non_retrying_client_for_create(monkeypatch):
+-    """The create POST must go through a NON-retrying client so the SDK cannot
+-    silently re-fire the non-idempotent POST on timeout."""
++    The gated transport's non-retry guarantee is covered by test_genie_client.py::
++    test_transport_disables_hidden_sdk_retries_for_post_and_both_patches.
++    """
+     title = "Client Selection Space"
+     used = _FakeApiClient(created_title=title, created_id="sp_ok")
+     base = _FakeApiClient(created_title="unused", created_id="sp_wrong")
+ 
+-    class _C:
+-        def __init__(self, api): self.api_client = api
+-
+-    monkeypatch.setattr(gc, "get_workspace_client", lambda: _C(base))
+-    monkeypatch.setattr(gc, "get_databricks_host", lambda: "https://example.cloud.databricks.com")
+-    monkeypatch.setattr(gc, "get_sql_warehouse_id", lambda: "wh_123")
+-
+-    calls = {"n": 0}
+-    def fake_non_retrying(b):
+-        calls["n"] += 1
+-        return _C(used)
+-    monkeypatch.setattr(gc, "_non_retrying_client", fake_non_retrying)
++    _patch(monkeypatch, base)
++    monkeypatch.setattr(gc, "_non_retrying_client", Mock(return_value=_FakeClient(used)))
+ 
+     def do(method, path, body=None, query=None):
+         if method == "POST":
+             used.post_calls += 1
+             return {"space_id": "sp_ok"}
+         raise AssertionError(method)
+-    used.do = do
++    used.do = Mock(side_effect=do)
+ 
+-    result = gc.create_genie_space(display_name=title, merged_config={"data_sources": {"tables": []}})
+-    assert calls["n"] == 1, "_non_retrying_client not used for the create POST"
+-    assert result["genie_space_id"] == "sp_ok"
+-    assert used.post_calls == 1
+-    assert base.post_calls == 0
++    with pytest.raises(PermissionError, match=_DISABLED_CREATE):
++        gc.create_genie_space(display_name=title, merged_config={"data_sources": {"tables": []}})
++    _assert_no_legacy_activity(base)
++    _assert_no_legacy_activity(used)
+diff --git a/backend/tests/test_genie_client.py b/backend/tests/test_genie_client.py
+index b8e0218..f353e43 100644
+--- a/backend/tests/test_genie_client.py
++++ b/backend/tests/test_genie_client.py
+@@ -118,3 +118,56 @@ def test_get_serialized_space_can_copy_top_level_description_for_scoring(monkeyp
+     space_data = get_serialized_space("space-1", include_top_level_description=True)
+ 
+     assert space_data["description"] == "Useful top-level description for this sales analytics space."
++import pytest
++
++
++@pytest.mark.parametrize("method", ["create", "config", "description"])
++@pytest.mark.parametrize("outcome", ["success", "timeout", "503", "redirect"])
++def test_transport_disables_hidden_sdk_retries_for_post_and_both_patches(monkeypatch, method, outcome):
++    import requests
++    from unittest.mock import Mock
++    from backend.services.genie_client import GenieTransport
++    from backend.services.version_control import contracts as vc
++    from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
++    from backend.tests.test_vc_mutation_gate import uid
++    binding, executor = binding_fixture(), executor_fixture()
++    coordination = Mock(spec=vc.Coordination)
++    registry = Mock(spec=vc.Registry)
++    registry.resolve.return_value = binding
++    flags = Mock()
++    flags.enabled.return_value = True
++    intent = vc.CreateIntentRef(uid(), uid(), binding.binding_id, 1, "a" * 64)
++    claim = vc.AdmissionClaim(binding.binding_id, 1, uid(), 1, 1,
++        vc.RequestIdentity(intent.operation_id, "send", "a" * 64), intent, None, None)
++    if method == "create":
++        from dataclasses import replace
++        binding = replace(binding, space_id=None)
++        registry.resolve.return_value = binding
++    sends = []
++    def send(adapter, request, **kwargs):
++        assert adapter.max_retries.total == 0
++        sends.append(request)
++        if outcome == "timeout":
++            raise requests.ReadTimeout("may have applied")
++        response = requests.Response()
++        response.request = request
++        response.url = request.url
++        response.status_code = {"success": 200, "503": 503, "redirect": 307}[outcome]
++        response._content = b'{"space_id":"created"}'
++        if outcome == "redirect":
++            response.headers["Location"] = "https://other.invalid/leak"
++        return response
++    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
++    transport = GenieTransport(executor=executor, authenticate=lambda context: {"Authorization": "Bearer test-only"},
++        coordination=coordination, registry=registry, flags=flags, warehouse_id="warehouse")
++    call = {"create": lambda: transport.create_once(vc.CreatePayload("Sales", {}, "new"), claim),
++            "config": lambda: transport.patch_config_once(binding, {"version": 2}, claim),
++            "description": lambda: transport.patch_description_once(binding, "new", claim)}[method]
++    if outcome == "success":
++        call()
++    else:
++        with pytest.raises((requests.RequestException, RuntimeError)):
++            call()
++    assert len(sends) == 1, "Exactly one HTTP send, with no SDK retry or redirect replay"
++    assert sends[0].method == ("POST" if method == "create" else "PATCH")
++    coordination.assert_owner.assert_called_once_with(claim)
+diff --git a/backend/tests/test_vc_create.py b/backend/tests/test_vc_create.py
+new file mode 100644
+index 0000000..d9f9c51
+--- /dev/null
++++ b/backend/tests/test_vc_create.py
+@@ -0,0 +1,86 @@
++"""M04 create intent and physical identity durability."""
++
++from dataclasses import replace
++from unittest.mock import Mock
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.tests.test_vc_mutation_gate import rig, uid
++
++
++@pytest.fixture
++def create_rig(rig):
++    provisional = replace(rig.binding, space_id=None)
++    request = vc.CreateRequest(rig.identity, provisional,
++        vc.CreatePayload("Sales", {"instructions": "new"}, "new"), None)
++    registry = Mock(spec=vc.Registry)
++    registry.resolve.return_value = provisional
++    rig.gate.registry = registry
++    rig.facts.get_request.return_value = vc.ApprovedOperation(request, None)
++    records = []
++    append = rig.facts.append.side_effect
++    def persist(fact):
++        records.append(fact)
++        return append(fact)
++    rig.facts.append.side_effect = persist
++    rig.facts.lookup_request.side_effect = lambda *args: vc.RequestHistory(tuple(records), False)
++    return rig, request, registry
++
++
++def test_create_lost_response_keeps_provisional_binding_without_replay(create_rig):
++    rig, request, registry = create_rig
++    rig.transport.create_once.side_effect = TimeoutError("possible orphan")
++    result = rig.gate.create(request, rig.executor)
++    assert result is not None, "Lost create response must have a durable unresolved result"
++    assert result.unresolved
++    assert isinstance(result.preimage, vc.CreateIntentRef)
++    intent = next(call.args[0] for call in rig.facts.append.call_args_list
++                  if call.args[0].fact_kind == vc.FactKind.CREATE_INTENT)
++    assert intent.binding.space_id is None
++    assert rig.trace.index("fact:requested") < rig.trace.index("admit")
++    assert rig.coordination.admit.call_args.args[1] == result.preimage
++    registry.bind_created.assert_not_called()
++    rig.transport.patch_config_once.assert_not_called()
++    again = rig.gate.create(request, rig.executor)
++    assert again.unresolved
++    rig.transport.create_once.assert_called_once()
++    rig.coordination.finish.assert_not_called()
++
++
++@pytest.mark.parametrize("bind_failure", [False, True])
++def test_create_persists_physical_binding_before_follow_on_edit(create_rig, bind_failure):
++    rig, request, registry = create_rig
++    rig.transport.create_once.return_value = vc.CreateResponse("new-space", {"space_id": "new-space"})
++    physical = replace(request.binding, space_id="new-space")
++    def bind(*args):
++        rig.trace.append("bind")
++        if bind_failure:
++            raise RuntimeError("binding unavailable")
++        registry.resolve.return_value = physical
++        rig.state.update({"serialized_space": {"instructions": "new"}, "description": "new"})
++        return physical
++    registry.bind_created.side_effect = bind
++    result = rig.gate.create(request, rig.executor)
++    assert result is not None, "Create needs durable identity before authoritative GET"
++    rig.transport.patch_config_once.assert_not_called()
++    rig.transport.patch_description_once.assert_not_called()
++    if bind_failure:
++        assert result.unresolved
++        rig.transport.get.assert_not_called()
++        rig.coordination.finish.assert_not_called()
++    else:
++        assert result.status == vc.OperationStatus.CONFIRMED
++        assert rig.trace.index("bind") < rig.trace.index("get")
++        version = rig.versions[result.postimage.version_id]
++        assert version.context.binding == physical
++        assert version.context.parent_version_id is None
++        assert version.context.attempt_id == rig.fence.attempt_id
++
++
++def test_create_missing_physical_id_never_uses_display_name(create_rig):
++    rig, request, registry = create_rig
++    rig.transport.create_once.return_value = vc.CreateResponse("", {"title": "Sales"})
++    result = rig.gate.create(request, rig.executor)
++    assert result.unresolved
++    registry.bind_created.assert_not_called()
+diff --git a/backend/tests/test_vc_mutation_gate.py b/backend/tests/test_vc_mutation_gate.py
+new file mode 100644
+index 0000000..c0957c5
+--- /dev/null
++++ b/backend/tests/test_vc_mutation_gate.py
+@@ -0,0 +1,284 @@
++"""M04 ordered behavioral tests; all dependencies are VC/1.0 ports."""
++
++from copy import deepcopy
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++from types import SimpleNamespace
++from unittest.mock import Mock
++from uuid import uuid4
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.services.version_control.mutation_gate import MutationGate
++from backend.tests.vc_fakes.fixtures import FakeCanonicalizer, binding_fixture, executor_fixture
++
++
++def uid():
++    return str(uuid4())
++
++
++@pytest.fixture
++def rig():
++    trace = []
++    canonicalizer = FakeCanonicalizer()
++    binding = binding_fixture()
++    executor = executor_fixture()
++    state = {"serialized_space": {"instructions": "old"}, "description": "old"}
++    before = canonicalizer.observe(state)
++    identity = vc.RequestIdentity(uid(), "edit-key", "a" * 64)
++    request = vc.MutationRequest(identity, binding, "edit", uid(), before.state_digest,
++                                 {"instructions": "new"}, "new", None)
++    fence = vc.FenceToken(binding.binding_id, 1, uid(), 1, 1)
++    coordination = Mock(spec=vc.Coordination)
++    ledger = Mock(spec=vc.VersionLedger)
++    facts = Mock(spec=vc.OperationFacts)
++    approvals = Mock(spec=vc.ApprovalService)
++    transport = Mock(spec=vc.GenieTransport)
++    flags = Mock()
++    flags.enabled.return_value = True
++    versions = {}
++
++    def append(snapshot, context):
++        trace.append("commit:" + context.observation_reason)
++        version = vc.Version(uid(), snapshot, context)
++        versions[version.version_id] = version
++        return vc.ObservationRef(version.version_id, binding.binding_id, 1,
++                                 snapshot.state_digest, snapshot.response_envelope_digest)
++
++    def admit(reservation, preimage, authorization):
++        trace.append("admit")
++        return vc.AdmissionClaim(**vc.to_wire(fence), request=reservation.request,
++                                 preimage=preimage, approval_id=None, approval_digest=None)
++
++    def get(*args):
++        trace.append("get")
++        return deepcopy(state)
++
++    def config(bound, serialized, claim):
++        trace.append("patch_config")
++        state["serialized_space"] = deepcopy(serialized)
++
++    def description(bound, text, claim):
++        trace.append("patch_description")
++        state["description"] = text
++
++    coordination.reserve.side_effect = lambda *args: (trace.append("reserve") or vc.Reservation(
++        fence, args[1], executor, datetime.now(timezone.utc) + timedelta(minutes=5)))
++    coordination.admit.side_effect = admit
++    coordination.assert_owner.side_effect = lambda *args: trace.append("assert_owner")
++    coordination.checkpoint.side_effect = lambda claim, stage, evidence: trace.append(stage.value)
++    coordination.finish.side_effect = lambda *args: trace.append("finish")
++    coordination.quarantine.side_effect = lambda *args: trace.append("quarantine")
++    ledger.append_observation.side_effect = append
++    ledger.verify_committed.side_effect = lambda ref: trace.append("verify_commit") or True
++    ledger.get_version.side_effect = lambda bound, version_id: versions[version_id]
++    facts.lookup_request.return_value = vc.RequestHistory((), False)
++    facts.verify_flush.return_value = True
++    facts.append.side_effect = lambda fact: trace.append("fact:" + fact.status.value) or vc.FactRef(
++        fact.event_id, fact.event_key, "a" * 64)
++    desired = canonicalizer.observe({"serialized_space": dict(request.serialized_space), "description": request.description})
++    approvals.authorize.side_effect = lambda req, exe: trace.append("authorize") or vc.AuthorizationGrant(
++        req.binding, req.identity, "grant", before.fingerprints, desired.state_digest,
++        datetime.now(timezone.utc) + timedelta(minutes=5), None, None)
++    transport.get.side_effect = get
++    transport.patch_config_once.side_effect = config
++    transport.patch_description_once.side_effect = description
++    gate = MutationGate(coordination=coordination, ledger=ledger, facts=facts,
++                        approvals=approvals, transport=transport, canonicalizer=canonicalizer, flags=flags)
++    return SimpleNamespace(**locals())
++
++
++def test_gate_has_no_transport_write_before_reserve_evidence_and_admit(rig):
++    rig.gate.execute(rig.request, rig.executor)
++    assert rig.trace[:6] == ["reserve", "get", "commit:preimage", "verify_commit", "authorize", "admit"]
++    assert rig.trace.index("admit") < rig.trace.index("patch_config")
++
++
++@pytest.mark.parametrize("failure", ["reserve", "append_observation", "verify_committed", "authorize", "admit"])
++def test_required_port_failure_never_writes(rig, failure):
++    owner = {"reserve": rig.coordination, "append_observation": rig.ledger,
++             "verify_committed": rig.ledger, "authorize": rig.approvals, "admit": rig.coordination}[failure]
++    getattr(owner, failure).side_effect = RuntimeError("unavailable")
++    with pytest.raises(RuntimeError):
++        rig.gate.execute(rig.request, rig.executor)
++    rig.transport.patch_config_once.assert_not_called()
++    rig.transport.patch_description_once.assert_not_called()
++
++
++def test_noop_all_three_fingerprints_skips_both_patches(rig):
++    request = replace(rig.request, serialized_space=rig.state["serialized_space"], description="old")
++    result = rig.gate.execute(request, rig.executor)
++    assert result.status == vc.OperationStatus.NOOP
++    rig.transport.patch_config_once.assert_not_called()
++    rig.transport.patch_description_once.assert_not_called()
++    assert rig.facts.append.call_args.args[0].status == vc.FactStatus.NOOP
++    rig.coordination.finish.assert_called_once()
++
++
++@pytest.mark.parametrize("field", ["instructions", "benchmarks"])
++def test_noop_requires_config_and_benchmark_equality(rig, field):
++    request = replace(rig.request, serialized_space={**rig.state["serialized_space"], field: {"value": "changed"}}, description="old")
++    rig.gate.execute(request, rig.executor)
++    rig.transport.patch_config_once.assert_called_once()
++
++
++def test_reviewed_base_mismatch_preserves_external_preimage_and_blocks(rig):
++    rig.state["description"] = "external edit"
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result.status == vc.OperationStatus.CONFLICTED
++    assert rig.versions[result.preimage.version_id].snapshot.restorable_metadata["description"] == "external edit"
++    rig.coordination.admit.assert_not_called()
++    rig.transport.patch_config_once.assert_not_called()
++    rig.transport.patch_description_once.assert_not_called()
++
++
++def test_two_patch_happy_path_checkpoints_and_reasserts_each_send(rig):
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result is not None, "Both PATCHes need checkpointed final evidence"
++    assert result.status == vc.OperationStatus.CONFIRMED
++    assert rig.trace.count("admit") == 1
++    for send in ("patch_config", "patch_description"):
++        assert rig.trace[rig.trace.index(send) - 1] == "assert_owner"
++    assert rig.trace.index("config_observed") < rig.trace.index("patch_description")
++    assert rig.trace.index("description_observed") < rig.trace.index("finish")
++    version = rig.versions[result.postimage.version_id]
++    assert version.context.parent_version_id == result.preimage.version_id
++    assert version.context.attempt_id == rig.fence.attempt_id
++    assert version.context.generation == rig.fence.generation
++    assert version.snapshot.fingerprints == rig.desired.fingerprints
++
++
++@pytest.mark.parametrize("drift", ["config", "benchmark", "metadata"])
++def test_description_requires_expected_config_and_approved_metadata_preimage(rig, drift):
++    def interfering_patch(*args):
++        rig.config(*args)
++        if drift == "metadata":
++            rig.state["description"] = "external"
++        else:
++            rig.state["serialized_space"]["benchmarks" if drift == "benchmark" else "instructions"] = {"external": True}
++    rig.transport.patch_config_once.side_effect = interfering_patch
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result.status == vc.OperationStatus.APPLIED_PARTIAL
++    assert result.unresolved
++    rig.transport.patch_description_once.assert_not_called()
++    rig.coordination.quarantine.assert_called_once()
++
++
++def test_final_readback_must_match_all_fingerprints(rig):
++    rig.transport.patch_description_once.side_effect = lambda *args: None
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result.status == vc.OperationStatus.APPLIED_PARTIAL
++    assert result.unresolved
++
++
++def test_config_timeout_matching_readback_never_replays_or_sends_description(rig):
++    def lost_response(*args):
++        rig.config(*args)
++        raise TimeoutError("response lost after apply")
++    rig.transport.patch_config_once.side_effect = lost_response
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
++    assert result.unresolved
++    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
++    verified = rig.gate.verify_only(rig.identity.operation_id, rig.executor)
++    assert verified.unresolved
++    rig.transport.patch_config_once.assert_called_once()
++    rig.transport.patch_description_once.assert_not_called()
++    rig.coordination.finish.assert_not_called()
++
++
++@pytest.mark.parametrize("error", [TimeoutError("timeout"), RuntimeError("HTTP 503")])
++def test_description_timeout_and_5xx_quarantine_without_replay(rig, error):
++    def lost_response(*args):
++        rig.description(*args)
++        raise error
++    rig.transport.patch_description_once.side_effect = lost_response
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
++    assert result.unresolved
++    rig.transport.patch_config_once.assert_called_once()
++    rig.transport.patch_description_once.assert_called_once()
++    rig.coordination.quarantine.assert_called_once()
++    rig.coordination.finish.assert_not_called()
++
++
++@pytest.mark.parametrize("read_number", [2, 3])
++def test_successful_patch_then_failed_readback_is_applied_unverified(rig, read_number):
++    reads = 0
++    def get(*args):
++        nonlocal reads
++        reads += 1
++        if reads == read_number:
++            raise RuntimeError("GET unavailable")
++        return rig.get(*args)
++    rig.transport.get.side_effect = get
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
++    assert result.unresolved
++    rig.coordination.finish.assert_not_called()
++    rig.coordination.quarantine.assert_called_once()
++    assert rig.facts.append.call_args.args[0].status == vc.FactStatus.APPLIED_UNVERIFIED
++
++
++@pytest.mark.parametrize("boundary", ["config_before", "config_after", "description_before", "description_after"])
++def test_worker_crash_at_every_send_boundary_keeps_attempt_unresolved(rig, boundary):
++    transport_method = rig.transport.patch_config_once if boundary.startswith("config") else rig.transport.patch_description_once
++    original = rig.config if boundary.startswith("config") else rig.description
++    stage = "config_in_flight" if boundary.startswith("config") else "description_in_flight"
++    def crash(*args):
++        assert stage in rig.trace, "Durable send intent must precede even a crashing send"
++        if boundary.endswith("after"):
++            original(*args)
++        raise SystemExit("worker died")
++    transport_method.side_effect = crash
++    with pytest.raises(SystemExit):
++        rig.gate.execute(rig.request, rig.executor)
++    rig.coordination.finish.assert_not_called()
++    assert stage in rig.trace
++    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
++    assert rig.gate.verify_only(rig.identity.operation_id, rig.executor).unresolved
++    assert transport_method.call_count == 1
++
++
++def test_failed_final_fact_publish_never_releases_attempt(rig):
++    def append(fact):
++        if fact.status == vc.FactStatus.CONFIRMED:
++            raise RuntimeError("lost fact response")
++        return vc.FactRef(fact.event_id, fact.event_key, "a" * 64)
++    rig.facts.append.side_effect = append
++    result = rig.gate.execute(rig.request, rig.executor)
++    assert result.unresolved
++    rig.coordination.finish.assert_not_called()
++    rig.coordination.quarantine.assert_called_once()
++
++
++def test_resumed_request_never_enters_a_new_send_sequence(rig):
++    rig.gate.execute(rig.request, rig.executor)
++    rig.state.update(vc.to_wire(rig.before.response_envelope))
++    rig.facts.lookup_request.return_value = vc.RequestHistory(
++        tuple(call.args[0] for call in rig.facts.append.call_args_list), False)
++    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
++    rig.gate.execute(rig.request, rig.executor)
++    rig.transport.patch_config_once.assert_called_once()
++    rig.transport.patch_description_once.assert_called_once()
++
++
++@pytest.mark.parametrize("flags", [None, False])
++def test_all_existing_mutation_entrypoints_use_gate_and_fail_closed(rig, flags):
++    if flags is None:
++        rig.gate.flags = None
++    else:
++        rig.flags.enabled.return_value = False
++    with pytest.raises(PermissionError, match="disabled"):
++        rig.gate.execute(rig.request, rig.executor)
++    rig.coordination.reserve.assert_not_called()
++    rig.transport.patch_config_once.assert_not_called()
++
++
++@pytest.mark.parametrize("operation_type", ["restore", "promotion", "optimizer_apply", "reapply"])
++def test_governed_operations_cannot_use_app_executor(rig, operation_type):
++    with pytest.raises(PermissionError):
++        rig.gate.execute(replace(rig.request, operation_type=operation_type),
++                         replace(rig.executor, execution_ref="app/worker"))
++    rig.transport.patch_config_once.assert_not_called()
+diff --git a/backend/tests/test_vc_observer.py b/backend/tests/test_vc_observer.py
+new file mode 100644
+index 0000000..2b25d4c
+--- /dev/null
++++ b/backend/tests/test_vc_observer.py
+@@ -0,0 +1,100 @@
++"""M04 serialized observer port tests (no platform claims)."""
++
++from datetime import datetime, timedelta, timezone
++from dataclasses import replace
++from concurrent.futures import ThreadPoolExecutor
++from threading import Event
++from unittest.mock import Mock
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.services.version_control.observer import Observer
++from backend.tests.test_vc_mutation_gate import rig, uid
++from backend.tests.vc_fakes.fixtures import actor_fixture
++
++
++@pytest.fixture
++def observer_rig(rig):
++    viewer = actor_fixture()
++    status = vc.BindingStatus(rig.binding.binding_id, 1, vc.Heads(None, uid(), uid()),
++                              vc.DriftState.EXTERNAL_AHEAD, False, None, None,
++                              datetime.now(timezone.utc), False, (), ())
++    identity = Mock(spec=vc.IdentityProvider)
++    identity.executor.return_value = rig.executor
++    selection = vc.ExplicitExecutorSelection(rig.executor.workspace_id, rig.executor.host,
++        rig.executor.principal_id, rig.executor.execution_ref, None)
++    rig.coordination.observe_exclusively.side_effect = lambda *args: rig.trace.append("lease") or vc.ObservationLease(
++        rig.fence, 1, datetime.now(timezone.utc) + timedelta(minutes=1))
++    rig.coordination.advance_heads.side_effect = lambda fence, update: rig.trace.append("advance") or vc.Heads(
++        update.observed, status.heads.approved, status.heads.deployed)
++    observer = Observer(coordination=rig.coordination, ledger=rig.ledger, canonicalizer=rig.canonicalizer,
++        transport=rig.transport, identity=identity, reader_selection=selection,
++        status_reader=lambda binding, actor: status)
++    return rig, observer, viewer, status, identity
++
++
++def test_capture_on_open_commits_before_display_and_advances_only_observed(observer_rig):
++    rig, observer, viewer, status, identity = observer_rig
++    result = observer.capture_on_open(rig.binding, viewer)
++    assert result is not None, "Capture must return committed display evidence"
++    assert rig.trace == ["lease", "get", "commit:open", "verify_commit", "advance"]
++    assert result.captured_version.version_id == result.status.heads.observed
++    assert result.status.heads.approved == status.heads.approved
++    assert result.status.heads.deployed == status.heads.deployed
++    assert result.status.drift != vc.DriftState.CLEAN
++    update = rig.coordination.advance_heads.call_args.args[1]
++    assert update.approved is update.deployed is None
++    assert rig.transport.get.call_args.args[1] is rig.executor
++    identity.executor.assert_called_once()
++
++
++def test_concurrent_opens_deduplicate_without_regressing_or_mislabeling_managed_checkpoint(observer_rig):
++    rig, observer, viewer, status, identity = observer_rig
++    entered, release = Event(), Event()
++    lease = rig.coordination.observe_exclusively.side_effect
++    def acquire(*args):
++        if entered.is_set():
++            raise RuntimeError("active observation or managed checkpoint")
++        return lease(*args)
++    def slow_get(*args):
++        entered.set()
++        assert release.wait(5)
++        return rig.get(*args)
++    rig.coordination.observe_exclusively.side_effect = acquire
++    rig.transport.get.side_effect = slow_get
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        first = pool.submit(observer.capture_on_open, rig.binding, viewer)
++        assert entered.wait(5)
++        try:
++            second = observer.capture_on_open(rig.binding, viewer)
++            assert second.busy and second.status.stale
++            assert second.captured_version is None
++            assert second.status.heads == status.heads
++        finally:
++            release.set()
++        assert first.result().captured_version is not None
++    rig.transport.get.assert_called_once()
++    rig.ledger.append_observation.assert_called_once()
++
++
++def test_unchanged_open_deduplicates_committed_observation(observer_rig):
++    rig, observer, viewer, status, identity = observer_rig
++    first = observer.capture_on_open(rig.binding, viewer)
++    observer.status_reader = lambda *args: first.status
++    second = observer.capture_on_open(rig.binding, viewer)
++    assert second.status.heads.observed == first.status.heads.observed
++    rig.ledger.append_observation.assert_called_once()
++
++
++@pytest.mark.parametrize("failure", ["append_observation", "verify_committed", "advance_heads"])
++def test_capture_persistence_failure_returns_stale_and_disables_actions(observer_rig, failure):
++    rig, observer, viewer, status, identity = observer_rig
++    owner = rig.coordination if failure == "advance_heads" else rig.ledger
++    getattr(owner, failure).side_effect = RuntimeError("persistence unavailable")
++    result = observer.capture_on_open(rig.binding, viewer)
++    assert result.status.stale
++    assert result.status.allowed_actions == ()
++    assert result.status.heads == status.heads
++    assert result.captured_version is None
++    assert result.status.drift != vc.DriftState.CLEAN
+diff --git a/backend/tests/test_vc_restore.py b/backend/tests/test_vc_restore.py
+new file mode 100644
+index 0000000..d0aea0c
+--- /dev/null
++++ b/backend/tests/test_vc_restore.py
+@@ -0,0 +1,96 @@
++"""M04 Job restore and conditional compensation port tests."""
++
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++from unittest.mock import Mock
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.services.version_control.restore import RestoreService
++from backend.tests.test_vc_mutation_gate import rig, uid
++from backend.tests.vc_fakes.fixtures import actor_fixture
++
++
++@pytest.fixture
++def restore_rig(rig):
++    source = vc.Version(rig.request.source_version_id, rig.desired,
++        vc.CaptureContext(rig.binding, "historical", datetime.now(timezone.utc),
++                          "history", actor_fixture(), vc.Origin.WORKBENCH))
++    rig.versions[source.version_id] = source
++    request = replace(rig.request, operation_type="restore")
++    rig.facts.get_request.return_value = vc.ApprovedOperation(request, None)
++    dispatcher = Mock(spec=vc.JobDispatcher)
++    dispatcher.submit_local.return_value = vc.OperationHandle(request.identity.operation_id,
++                                                             vc.OperationStatus.REQUESTED, "run/123")
++    identity = Mock(spec=vc.IdentityProvider)
++    identity.can_edit.return_value = True
++    validate = Mock(return_value=True)
++    service = RestoreService(facts=rig.facts, ledger=rig.ledger, gate=rig.gate,
++        dispatcher=dispatcher, identity=identity, flags=rig.flags, validate=validate)
++    return rig, service, request, dispatcher, identity, validate
++
++
++def test_restore_is_job_executed_and_appends_historical_lineage(restore_rig):
++    rig, service, request, dispatcher, identity, validate = restore_rig
++    handle = service.submit(request.identity.operation_id, actor_fixture())
++    assert handle is not None, "Restore must dispatch an operation-id-only Job"
++    dispatcher.submit_local.assert_called_once_with(request.identity.operation_id, "restore")
++    rig.transport.patch_config_once.assert_not_called()
++    result = service.run(request.identity.operation_id, rig.executor)
++    assert result.status == vc.OperationStatus.CONFIRMED
++    version = rig.versions[result.postimage.version_id]
++    assert version.context.restored_from_version_id == request.source_version_id
++    assert version.context.parent_version_id == result.preimage.version_id
++    assert version.context.origin == vc.Origin.RESTORE
++    identity.verify_run_as.assert_called_once_with(rig.executor.execution_ref, rig.executor.principal_id)
++    assert validate.call_count == 2
++
++
++@pytest.mark.parametrize("invalid", ["workspace", "app", "source", "validation"])
++def test_restore_rejects_invalid_job_or_historical_payload(restore_rig, invalid):
++    rig, service, request, dispatcher, identity, validate = restore_rig
++    executor = rig.executor
++    if invalid == "workspace":
++        executor = replace(executor, workspace_id="other")
++    elif invalid == "app":
++        executor = replace(executor, execution_ref="app/worker")
++    elif invalid == "source":
++        rig.facts.get_request.return_value = vc.ApprovedOperation(replace(request, serialized_space={"tampered": True}), None)
++    else:
++        validate.return_value = False
++    with pytest.raises((PermissionError, ValueError)):
++        service.run(request.identity.operation_id, executor)
++    rig.transport.patch_config_once.assert_not_called()
++
++
++@pytest.mark.parametrize("case", ["authorized", "no_policy", "external_drift", "ambiguous"])
++def test_compensation_requires_preauthorization_and_unchanged_post_stage(restore_rig, case):
++    rig, service, original, dispatcher, identity, validate = restore_rig
++    applied = service.run(original.identity.operation_id, rig.executor)
++    original_fact = rig.facts.append.call_args.args[0]
++    compensation = replace(original, identity=vc.RequestIdentity(uid(), "compensate", "b" * 64),
++        source_version_id=applied.preimage.version_id, expected_base=applied.postimage.state_digest,
++        serialized_space=rig.before.serialized_space, description="old")
++    approval = Mock(spec=vc.ApprovalRecord)
++    approval.request = Mock(spec=vc.ApprovalRequest)
++    approval.request.requested_at = datetime.now(timezone.utc) - timedelta(hours=1)
++    approval.request.inputs = Mock(spec=vc.ApprovalInputs)
++    approval.request.inputs.recovery_policy = {} if case == "no_policy" else {
++        "compensation_operation_id": compensation.identity.operation_id,
++        "compensation_request_digest": compensation.identity.request_digest}
++    rig.facts.get_request.side_effect = lambda operation_id: vc.ApprovedOperation(
++        original, approval) if operation_id == original.identity.operation_id else vc.ApprovedOperation(compensation, None)
++    rig.facts.lookup_request.side_effect = lambda binding, key: vc.RequestHistory(
++        (replace(original_fact, status=vc.FactStatus.APPLIED_UNVERIFIED),) if case == "ambiguous" else (original_fact,),
++        False) if key == original.identity.idempotency_key else vc.RequestHistory((), False)
++    if case == "external_drift":
++        rig.state["description"] = "external edit after restore"
++    if case in {"no_policy", "ambiguous"}:
++        with pytest.raises(PermissionError):
++            service.compensate(original.identity.operation_id, compensation.identity.operation_id, rig.executor)
++    else:
++        result = service.compensate(original.identity.operation_id, compensation.identity.operation_id, rig.executor)
++        assert result is not None, "Compensation must be a fresh guarded operation"
++        assert result.status == (vc.OperationStatus.CONFLICTED if case == "external_drift" else vc.OperationStatus.CONFIRMED)
++    assert rig.transport.patch_config_once.call_count == (2 if case == "authorized" else 1)

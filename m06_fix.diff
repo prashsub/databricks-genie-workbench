@@ -1,0 +1,414 @@
+diff --git a/backend/services/version_control/governance/approvals.py b/backend/services/version_control/governance/approvals.py
+index 6346f29..e46f9f9 100644
+--- a/backend/services/version_control/governance/approvals.py
++++ b/backend/services/version_control/governance/approvals.py
+@@ -92,8 +92,8 @@ class ApprovalService:
+                 or (request.operation_type == 'adopt' and request.source_version_id != observation.version_id)):
+             raise PermissionError('Approval must review newly captured base')
+ 
+-    def _unused(self, request, approval_id):
+-        if self.suspended(request.binding):
++    def _unused(self, request, approval_id, *, reconciliation=False):
++        if not reconciliation and self.suspended(request.binding):
+             raise PermissionError('Break-glass suspension requires mandatory reconciliation')
+         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+         if (history.ambiguous or not history.facts
+@@ -110,9 +110,14 @@ class ApprovalService:
+     def _record(self, record, actor, kind):
+         inputs = record.request.inputs
+         request = self.facts.get_request(inputs.operation_id).request
++        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        if history.ambiguous:
++            raise ValueError('Ambiguous approval evidence')
++        sequence = 1 + max((row.transition_sequence for row in history.facts
++                            if isinstance(row.evidence, ApprovalRecord)), default=-1)
+         provisional = OperationFact(
+             event_id=inputs.operation_id, fact_kind=kind, operation_id=inputs.operation_id,
+-            transition_sequence=len(record.votes) + (1 if kind == FactKind.APPROVAL_GRANTED else 0),
++            transition_sequence=sequence,
+             event_key='', binding=inputs.target_binding,
+             request=request.identity, operation_type=inputs.operation_type,
+             requester_id=inputs.requester_id, actor=actor, status=record.status,
+@@ -164,6 +169,9 @@ class ApprovalService:
+         return updated
+ 
+     def authorize(self, request, executor):
++        return self._authorize(request, executor)
++
++    def _authorize(self, request, executor, *, reconciliation=False):
+         self._enabled()
+         record = self.get(request.approval_id)
+         if record.status not in (FactStatus.REQUESTED, FactStatus.APPROVED):
+@@ -175,7 +183,7 @@ class ApprovalService:
+             raise ValueError('Immutable request identity or digest mismatch')
+         self._bound(request, inputs)
+         self._captured_base(request, record.request.requested_at)
+-        self._unused(request, record.request.approval_id)
++        self._unused(request, record.request.approval_id, reconciliation=reconciliation)
+         if executor.workspace_id != inputs.target_binding.workspace_id or executor.actor_kind != 'service':
+             raise PermissionError('Target service executor required')
+         target = self.target_identity(executor)
+@@ -214,8 +222,37 @@ class ApprovalService:
+                      FactKind.APPROVAL_GRANTED)
+ 
+     def suspended(self, binding):
+-        history = self.facts.lookup_request(binding, 'vc:break-glass-suspension')
+-        return history.ambiguous or bool(history.facts)
++        return any(not self.facts.reconciled(incident)
++                   for incident in self.facts.binding_facts(binding.binding_id, FactKind.BREAK_GLASS))
++
++    def reconcile(self, incident_reference, request, executor):
++        self._enabled()
++        incidents = self.facts.binding_facts(request.binding.binding_id, FactKind.BREAK_GLASS)
++        incident = next((row for row in incidents if row.event_id == incident_reference), None)
++        record = self.get(request.approval_id)
++        if (incident is None or request.operation_type not in ('adopt', 'reapply')
++                or record.request.requested_at <= incident.recorded_at
++                or record.request.approval_id == incident.approval_id):
++            raise PermissionError('Fresh reconciliation authorization required')
++        grant = self._authorize(request, executor, reconciliation=True)
++        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        existing = next((row for row in history.facts if row.fact_kind == FactKind.ACKNOWLEDGEMENT
++                         and row.approval_reference == incident_reference), None)
++        if existing is not None:
++            return self.facts.append(existing)
++        provisional = OperationFact(
++            event_id=request.identity.operation_id, fact_kind=FactKind.ACKNOWLEDGEMENT,
++            operation_id=request.identity.operation_id,
++            transition_sequence=1 + max(row.transition_sequence for row in history.facts),
++            event_key='', binding=request.binding, request=request.identity, operation_type=request.operation_type,
++            requester_id=record.request.inputs.requester_id,
++            actor=ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
++            status=FactStatus.ACKNOWLEDGED, evidence=self.get(request.approval_id), recorded_at=self.now(),
++            approval_id=grant.approval_id, approval_digest=grant.approval_digest,
++            approval_reference=incident_reference,
++        )
++        key = fact_key(provisional)
++        return self.facts.append(replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key))))
+ 
+     def break_glass(self, request, actor):
+         self._enabled()
+@@ -238,20 +275,23 @@ class ApprovalService:
+         use = self.facts.approval_use(request.binding, record.request.approval_id)
+         if use.ambiguous or use.consumptions or use.operation_ids:
+             raise PermissionError('Break-glass cannot reuse consumed evidence')
+-        scope_digest = canonical_json_hash('vc-break-glass-scope/1', to_wire(request.binding))
++        scope_digest = canonical_json_hash('vc-break-glass-scope/1', {
++            'binding': to_wire(request.binding), 'operation_id': request.identity.operation_id,
++        })
+         scope_id = str(uuid5(NAMESPACE_URL, scope_digest))
++        incident_key = f'vc:break-glass:{request.identity.operation_id}'
+         override_digest = canonical_json_hash('vc-break-glass/1', {'request': to_wire(request), 'actor': to_wire(actor)})
+         provisional = OperationFact(
+             event_id=scope_id, fact_kind=FactKind.BREAK_GLASS, operation_id=scope_id,
+             transition_sequence=0, event_key='', binding=request.binding,
+-            request=RequestIdentity(scope_id, 'vc:break-glass-suspension', scope_digest),
++            request=RequestIdentity(scope_id, incident_key, scope_digest),
+             operation_type='break_glass', requester_id=inputs.requester_id, actor=actor,
+             status=FactStatus.QUARANTINED, evidence=request, recorded_at=self.now(),
+             approval_id=record.request.approval_id, approval_digest=override_digest,
+             approval_reference=request.identity.operation_id, drift_override=True,
+         )
+         key = fact_key(provisional)
+-        history = self.facts.lookup_request(request.binding, 'vc:break-glass-suspension')
++        history = self.facts.lookup_request(request.binding, incident_key)
+         if history.ambiguous:
+             raise PermissionError('Ambiguous break-glass evidence')
+         if history.facts:
+diff --git a/backend/services/version_control/governance/facts.py b/backend/services/version_control/governance/facts.py
+index 40616d1..5121c70 100644
+--- a/backend/services/version_control/governance/facts.py
++++ b/backend/services/version_control/governance/facts.py
+@@ -20,11 +20,16 @@ from backend.services.version_control.contracts import (
+ 
+ 
+ def fact_key(fact: OperationFact) -> str:
+-    return canonical_json_hash('vc-fact-key/1', {
++    payload = {
+         'binding': to_wire(fact.binding), 'operation_id': fact.operation_id,
+         'kind': fact.fact_kind.value, 'sequence': fact.transition_sequence,
+         'attempt_id': fact.attempt_id, 'generation': fact.generation,
+-    })
++    }
++    if fact.fact_kind == FactKind.APPROVAL_VOTE:
++        payload['voter'] = fact.actor.subject_id
++    if fact.fact_kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY) and fact.approval_reference is not None:
++        payload['approval_reference'] = fact.approval_reference
++    return canonical_json_hash('vc-fact-key/1', payload)
+ 
+ 
+ def validate_evidence(fact):
+@@ -73,6 +78,12 @@ class DurableOperationFacts:
+             raise PermissionError('Fact writes disabled')
+         fact = from_wire(OperationFact, to_wire(fact))
+         validate_evidence(fact)
++        if (fact.fact_kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY)
++                and fact.approval_reference is not None):
++            incidents = self.binding_facts(fact.binding.binding_id, FactKind.BREAK_GLASS)
++            incident = next((row for row in incidents if row.event_id == fact.approval_reference), None)
++            if incident is None or not self._authorized_reconciliation(fact, incident):
++                raise PermissionError('Fresh reconciliation authorization required')
+         if fact.operation_id != fact.request.operation_id:
+             raise ValueError('Operation identity mismatch')
+         if fact.fact_kind == FactKind.CREATE_INTENT:
+@@ -132,6 +143,43 @@ class DurableOperationFacts:
+                      for row in unique.values())
+         return ApprovalUse(binding, approval_id, refs, operations, ambiguous)
+ 
++    def binding_facts(self, binding_id, fact_kind=None):
++        unique = {}
++        for row in self._rows():
++            if row.binding.binding_id != binding_id or (fact_kind is not None and row.fact_kind != fact_kind):
++                continue
++            if row.event_key in unique and unique[row.event_key] != row:
++                raise ValueError('Ambiguous binding evidence')
++            unique[row.event_key] = row
++        return tuple(sorted(unique.values(), key=lambda row: (row.recorded_at, row.event_key)))
++
++    def _authorized_reconciliation(self, fact, incident):
++        if (fact.approval_reference != incident.event_id
++                or fact.binding.binding_id != incident.binding.binding_id
++                or fact.recorded_at <= incident.recorded_at
++                or fact.operation_type not in ('adopt', 'reapply')
++                or fact.status != FactStatus.ACKNOWLEDGED
++                or fact.approval_id is None or fact.approval_id == incident.approval_id):
++            return False
++        grants = self.binding_facts(fact.binding.binding_id, FactKind.APPROVAL_GRANTED)
++        return any(
++            grant.binding == fact.binding and grant.request == fact.request
++            and grant.actor == fact.actor and grant.actor.actor_kind == 'service'
++            and grant.operation_type == fact.operation_type
++            and grant.approval_id == fact.approval_id and grant.approval_digest == fact.approval_digest
++            and grant.status == FactStatus.APPROVED
++            and isinstance(grant.evidence, ApprovalRecord)
++            and incident.recorded_at < grant.evidence.request.requested_at <= grant.recorded_at <= fact.recorded_at
++            and fact.recorded_at < grant.evidence.request.inputs.expires_at
++            and (fact.fact_kind == FactKind.RECOVERY or fact.evidence == grant.evidence)
++            for grant in grants
++        )
++
++    def reconciled(self, incident):
++        return any(self._authorized_reconciliation(row, incident)
++                   for kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY)
++                   for row in self.binding_facts(incident.binding.binding_id, kind))
++
+     def get_request(self, operation_id):
+         requests = []
+         for row in self._read():
+@@ -143,13 +191,37 @@ class DurableOperationFacts:
+             raise LookupError('Durable request evidence unavailable')
+         if any(request != requests[0] for request in requests):
+             raise ValueError('Ambiguous durable request')
+-        records = [row for row in self._rows() if row.operation_id == operation_id
+-                   and isinstance(row.evidence, ApprovalRecord)]
++        history = self.lookup_request(requests[0].binding, requests[0].identity.idempotency_key)
++        if history.ambiguous or not history.facts:
++            raise ValueError('Ambiguous or missing approval evidence')
++        records = [row for row in history.facts if row.operation_id == operation_id
++                   and isinstance(row.evidence, ApprovalRecord)
++                   and row.fact_kind not in (FactKind.APPROVAL_VOTE, FactKind.ACKNOWLEDGEMENT)]
+         records.sort(key=lambda row: row.transition_sequence)
+         if records and any(row.transition_sequence == records[-1].transition_sequence
+                            and row.evidence != records[-1].evidence for row in records):
+             raise ValueError('Ambiguous approval evidence')
+-        return ApprovedOperation(requests[0], records[-1].evidence if records else None)
++        record = records[-1].evidence if records else None
++        if record is not None and record.status == FactStatus.REQUESTED:
++            from .approvals import approval_digest
++
++            votes = {}
++            for row in history.facts:
++                if row.fact_kind != FactKind.APPROVAL_VOTE:
++                    continue
++                if row.evidence.request != record.request:
++                    raise ValueError('Ambiguous approval inputs')
++                own_votes = [vote for vote in row.evidence.votes if vote.approver_id == row.actor.subject_id]
++                if len(own_votes) != 1:
++                    raise ValueError('Ambiguous voter evidence')
++                vote = own_votes[0]
++                if vote.approver_id in votes and votes[vote.approver_id] != vote:
++                    raise ValueError('Ambiguous approval vote')
++                votes[vote.approver_id] = vote
++            if votes:
++                ordered = tuple(sorted(votes.values(), key=lambda vote: (vote.approved_at, vote.approver_id)))
++                record = replace(record, votes=ordered, approval_digest=approval_digest(record.request.inputs, ordered))
++        return ApprovedOperation(requests[0], record)
+ 
+     def _claims(self, operation_id):
+         return tuple((from_wire(AdmissionClaim, row['admission_claim']), row)
+@@ -206,8 +278,8 @@ class DurableOperationFacts:
+             normal = (record.request.approval_id == claim.approval_id
+                       and record.approval_digest == claim.approval_digest and record.status == FactStatus.APPROVED)
+             if not normal:
+-                overrides = [row for row in self.lookup_request(request.binding, 'vc:break-glass-suspension').facts
+-                             if row.fact_kind == FactKind.BREAK_GLASS and row.approval_id == claim.approval_id
++                overrides = [row for row in self.binding_facts(request.binding.binding_id, FactKind.BREAK_GLASS)
++                             if row.approval_id == claim.approval_id
+                              and row.approval_digest == claim.approval_digest
+                              and row.evidence.identity == claim.request and row.evidence.binding == request.binding]
+                 if len(overrides) != 1:
+diff --git a/backend/tests/test_vc_approvals.py b/backend/tests/test_vc_approvals.py
+index 7057123..199ee83 100644
+--- a/backend/tests/test_vc_approvals.py
++++ b/backend/tests/test_vc_approvals.py
+@@ -7,7 +7,7 @@ import pytest
+ from backend.services.version_control.contracts import (
+     ActorContext, ApprovalInputs, ApprovalUse, ApprovalVote, AuthenticatedRequest, BreakGlassRequest,
+     FactKind, FactStatus, Fingerprints, MutationRequest, ObservationRef, PatchStage, RequestHistory, StageEvidence,
+-    RequestIdentity, canonical_json_hash, from_wire, to_wire,
++    OperationFact, RequestIdentity, canonical_json_hash, from_wire, to_wire,
+ )
+ from backend.tests.test_vc_operation_facts import NOW, DIGEST, durable, fact, uid
+ from backend.tests.vc_fakes.fixtures import FakeIdentityProvider, binding_fixture, executor_fixture
+@@ -125,6 +125,55 @@ def submit(context):
+     return context.service.request(context.bound, context.identity.actors['requester'])
+ 
+ 
++def test_distinct_approvers_produce_distinct_vote_event_keys():
++    from backend.services.version_control.governance.approvals import approval_digest
++    from backend.services.version_control.governance.facts import fact_key
++
++    context = setup_approval()
++    approval = submit(context)
++    snapshot = context.service.get(approval.approval_id)
++    vote_facts = []
++    for subject in ('human-1', 'human-2'):
++        votes = (ApprovalVote(subject, 'approve', NOW),)
++        record = replace(snapshot, votes=votes, approval_digest=approval_digest(context.bound, votes))
++        vote_facts.append(fact(
++            fact_kind=FactKind.APPROVAL_VOTE, transition_sequence=1,
++            binding=context.request.binding, request=context.request.identity,
++            actor=context.identity.actors[subject], evidence=record,
++            approval_id=approval.approval_id, approval_digest=record.approval_digest,
++        ))
++    assert fact_key(vote_facts[0]) != fact_key(vote_facts[1])
++
++
++@pytest.mark.parametrize('deferred_commit', [False, True])
++def test_concurrent_votes_from_snapshot_both_persist_and_approval_stays_readable(monkeypatch, deferred_commit):
++    from backend.services.version_control.governance.audit import AuditService
++
++    context = setup_approval()
++    approval = submit(context)
++    snapshot = context.service.get(approval.approval_id)
++    pending = []
++    with monkeypatch.context() as pinned:
++        pinned.setattr(context.service, 'get', lambda approval_id: snapshot)
++        if deferred_commit:
++            pinned.setattr(context.facts, 'append', pending.append)
++        for subject in ('human-1', 'human-2'):
++            context.service.vote(approval.approval_id, 'approve', context.identity.actors[subject])
++    for vote_fact in pending:
++        context.store.append(vote_fact.event_key, to_wire(vote_fact))
++    history = context.facts.lookup_request(context.request.binding, context.request.identity.idempotency_key)
++    assert not history.ambiguous
++    vote_rows = [row for row in history.facts if row.fact_kind == FactKind.APPROVAL_VOTE]
++    assert len(vote_rows) == 2
++    record = context.service.get(approval.approval_id)
++    assert [vote.approver_id for vote in record.votes] == ['human-1', 'human-2']
++    grant = context.service.authorize(context.request, context.executor)
++    assert grant.approval_id == approval.approval_id
++    assert context.service.authorize(context.request, context.executor) == grant
++    audit = AuditService(context.facts, context.identity, context.clock.now, None)
++    assert audit.get(approval.approval_id, context.identity.actors['requester'])['status'] == 'requested'
++
++
+ def test_vote_identity_is_server_derived_not_request_body():
+     from fastapi import FastAPI
+     from fastapi.testclient import TestClient
+@@ -400,6 +449,95 @@ def test_break_glass_requires_group_reason_expiry_and_cannot_skip_evidence(fault
+                    for row in context.store.state.rows)
+ 
+ 
++def followup_approval(context, number, operation_type='edit', binding=None):
++    from backend.services.version_control.governance.approvals import request_digest
++
++    binding = binding or context.request.binding
++    request = replace(context.request, identity=RequestIdentity(uid(number), f'key-{number}', DIGEST),
++                      approval_id=uid(number), binding=binding, operation_type=operation_type)
++    request = replace(request, identity=replace(request.identity, request_digest=request_digest(request)))
++    bound = replace(context.bound, operation_id=uid(number), target_binding=binding,
++                    operation_type=operation_type)
++    context.facts.record_request(request, fact(operation_id=uid(number), binding=binding,
++                                              request=request.identity, operation_type=operation_type))
++    if operation_type in ('adopt', 'reapply'):
++        observation = ObservationRef(uid(3), binding.binding_id, binding.binding_revision,
++                                     request.expected_base, DIGEST)
++        context.facts.append(fact(
++            operation_id=uid(number), binding=binding, request=request.identity,
++            operation_type=operation_type, transition_sequence=1, status=FactStatus.PREIMAGE_CAPTURED,
++            pre_version_id=observation.version_id, recorded_at=context.clock.now(),
++            evidence=StageEvidence('VC/1.0', PatchStage.CONFIG_PENDING, context.clock.now(), DIGEST, observation),
++        ))
++    followup = SimpleNamespace(**{**vars(context), 'request': request, 'bound': bound})
++    approve(followup)
++    return followup
++
++
++def emergency_incident(context):
++    actor = ActorContext('emergency-human', '123', 'human')
++    context.identity.memberships[(actor.subject_id, '123')] = frozenset({'break-glass'})
++    request = BreakGlassRequest(context.request.identity, context.request.binding, 'incident',
++                                context.clock.now() + timedelta(minutes=15),
++                                context.bound.preflight_evidence_digest, True)
++    context.service.break_glass(request, actor)
++    payload = next(row.payload for row in reversed(context.store.state.rows)
++                   if row.payload['fact_kind'] == FactKind.BREAK_GLASS.value)
++    return from_wire(OperationFact, payload)
++
++
++def test_break_glass_suspension_is_cleared_only_by_authorized_reconciliation():
++    context = setup_approval()
++    approve(context)
++    incident = emergency_incident(context)
++    with pytest.raises(PermissionError, match='reconciliation'):
++        context.service.authorize(context.request, context.executor)
++    context.clock.advance(timedelta(seconds=1))
++    second = followup_approval(context, 22)
++    second_incident = emergency_incident(second)
++    assert second_incident.request.idempotency_key != incident.request.idempotency_key
++    context.clock.advance(timedelta(seconds=1))
++    reconciliation = followup_approval(context, 23, 'adopt')
++    unauthorized = fact(
++        fact_kind=FactKind.ACKNOWLEDGEMENT, operation_id=uid(23), transition_sequence=10,
++        binding=reconciliation.request.binding, request=reconciliation.request.identity,
++        operation_type='adopt', approval_reference=incident.event_id,
++        recorded_at=context.clock.now(),
++    )
++    with pytest.raises(PermissionError, match='authorization'):
++        context.facts.append(unauthorized)
++    context.target_identity.memberships.clear()
++    with pytest.raises(PermissionError, match='Target-side'):
++        context.service.reconcile(incident.event_id, reconciliation.request, context.executor)
++    assert context.service.suspended(context.request.binding)
++    context.target_identity.memberships[('human-1', '123')] = frozenset({'target-approvers'})
++    context.service.reconcile(incident.event_id, reconciliation.request, context.executor)
++    assert context.service.suspended(context.request.binding)
++    with pytest.raises(PermissionError, match='reconciliation'):
++        context.service.authorize(context.request, context.executor)
++    context.service.reconcile(second_incident.event_id, reconciliation.request, context.executor)
++    assert not context.service.suspended(context.request.binding)
++    assert context.service.authorize(context.request, context.executor).approval_id == uid(2)
++    closures = [row.payload for row in context.store.state.rows
++                if row.payload['fact_kind'] == FactKind.ACKNOWLEDGEMENT.value]
++    assert {row['approval_reference'] for row in closures} == {incident.event_id, second_incident.event_id}
++    assert all(row['approval_id'] == uid(23) and row['approval_digest'] for row in closures)
++    context.clock.advance(timedelta(hours=2))
++    assert not context.service.suspended(context.request.binding)
++
++
++def test_rebind_does_not_lift_unreconciled_break_glass_suspension():
++    context = setup_approval()
++    approve(context)
++    emergency_incident(context)
++    rebound = replace(context.request.binding, binding_revision=2)
++    context.registry.binding = rebound
++    assert context.service.suspended(rebound)
++    followup = followup_approval(context, 22, binding=rebound)
++    with pytest.raises(PermissionError, match='reconciliation'):
++        context.service.authorize(followup.request, context.executor)
++
++
+ def test_authorization_publishes_durable_grant_before_return_and_invalidations_block():
+     from backend.tests.vc_fakes.stores import CrashBoundary, InjectedCrash
+ 

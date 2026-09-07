@@ -1,0 +1,1516 @@
+diff --git a/backend/services/version_control/coordination/TDD.md b/backend/services/version_control/coordination/TDD.md
+index 77f1ff4..4a9d4fc 100644
+--- a/backend/services/version_control/coordination/TDD.md
++++ b/backend/services/version_control/coordination/TDD.md
+@@ -16,3 +16,15 @@ All pytest commands use `. .venv/bin/activate && python -m pytest`.
+ 12. `backend/tests/test_vc_recovery.py -q -k test_unknown_request_lifetime_disables_auto_clear`: RED audited human path unavailable (1 failed, 4 negatives passed); GREEN both files 32 cases. No deployment lifetime configured: auto-clear disabled even with caller reference. Human exception requires trusted policy, reason, risk acknowledgement, exact termination and >=3 stable post-termination observations; only verified-lifetime span is waived and auditable.
+ 13. `backend/tests/test_vc_coordination.py -q -k "test_crashes_between_evidence_cas_consumption_patch_and_release_remain_safe or test_checkpoint" --tb=short`: RED missing stage validation port/checkpoint (21 cases); GREEN `backend/tests/test_vc_coordination.py backend/tests/test_vc_recovery.py -q --tb=short` 53 cases. Eighteen boundary cases cover evidence, CAS, consumption, intent, receipt, release; monotonic checkpoints never replay. In-flight finish quarantines even matching GET. StageEvidence has no send-response field, so injected trusted digest verifier must prove synchronous completion; absent verifier fails closed. No M04 implementation import.
+ 14. `backend/tests/test_vc_coordination.py -q -k test_observer_cannot_regress_or_approve_heads --tb=short`: RED missing observation lease; GREEN both files 54 cases. Observer leases serialize with managed attempts, committed version attempt/generation/parent must match, observed only, delayed holder rejected. advance_heads finalizes an observer lease; approved/deployed require injected policy and verified deployment evidence.
++15. `backend/tests/test_vc_coordination.py -q -k test_conflict_facts_carry_the_rejected_requests_own_identity` (BLOCK-7): RED loser's conflict fact reported `actor.subject_id == 'coordination'`/winner identity and keys collided on `{op}:{attempt}:{row_version}:{status}`; GREEN both unit files 55 cases. `_fact` now takes an explicit `AttemptSubject`; CAS-loser attributes to the executor that tried (`attempt_id=None`); `event_key` = `{operation_id}:{attempt}:{kind}:{status}` (fact_kind in, row_version out) so kinds no longer collide and the key is stable across unrelated CAS.
++16. `backend/tests/test_vc_coordination.py -q -k test_consumption_and_termination_columns_are_truthful` + `backend/tests/test_vc_recovery.py -q -k "persists_validated_termination or crash_between_audit or invalid_termination"` (BLOCK-10): RED post-admit column read False despite durable+flushed consumption; checkpoint flipped it True for approval-less claims; termination_evidence never written on any recover path. GREEN both unit files 59 cases. `_publish_consumption(claim, row)` now records `approval_consumption_published=True` only when an approval is actually bound and a durable consumption fact was verified; checkpoint no longer sets it unconditionally. recover persists validated `termination_evidence` via CAS immediately after `_validate_termination` and before any fact append, so a crash between audit append and release leaves durable proof; `_release` still clears it. `_cas` read-back now compares JSON columns by canonical wire form so a stored dict equals its frozen/tuple read-back. Amended `test_admission_atomically_binds_...`: the admission binding is still exactly one `state=ADMITTED` CAS; the new consumption-column CAS binds no admission fields.
++17. `backend/tests/test_vc_coordination.py -q -k "definite_presend_rejection or drift_conflict"` (BLOCK-1): RED all five definite pre-send rejection causes left the row RESERVED+unresolved (holder/attempt/approval retained), so `observe_exclusively`/fresh `reserve` raised `Binding busy` and expiry escalated to QUARANTINED. GREEN both unit files 65 cases. Added `_presend`, `_history_raw`, and `_reject` (publish terminal conflict fact, read-back-verify, then `_release` — same ordering as finish; if the fact cannot be proven durable the row stays unresolved). `_history` re-expressed as `_history_raw` + digest predicate calling `_reject`. All six admit pre-send rejection sites plus the idempotency-digest path now call `_reject`, so a definite 409 frees the binding instead of bricking it; drift round-trips through observe_exclusively → advance_heads → reserve/admit.
++18. `backend/tests/test_vc_coordination.py -q -k "terminal_non_success or confirmed_and_noop or mixed_history_prefers"` (BLOCK-8): RED a FAILED/CONFLICTED receipt was returned via ExistingReceipt as a "completion", and a mixed FAILED+CONFIRMED history raised 'Ambiguous completed receipts'. GREEN both unit files 69 cases. reserve now partitions the receipt scan: only CONFIRMED/NOOP receipts short-circuit to ExistingReceipt; a terminal non-success receipt calls BLOCK-1's `_reject` (409 conflict, binding intact, points to a new governed request); ambiguity is checked over completed receipts only, so a CONFIRMED wins over a stale FAILED.
++19. `backend/tests/test_vc_recovery.py -q -k "reclaim or expired_observation or expired_admitted"` (BLOCK-2): RED an expired OBSERVING lease quarantined the binding (silently, no fact) across reserve/observe_exclusively/advance_heads. GREEN both unit files 75 cases. `_expire` now reclaims an expired OBSERVING row to IDLE via `_reclaim_observer` (generation+1, heads/observed_sequence preserved) instead of quarantining; a row mislabelled OBSERVING while carrying an approval/stage/admitted_at fails closed with AuthorityUnavailable and is left unchanged. Negative control: an expired ADMITTED lease still quarantines and still appends its QUARANTINED fact.
++20. `backend/tests/test_vc_coordination.py -q -k "finish_releases_only or finish_possible_send"` (BLOCK-6): RED confirmed-no-postimage / noop-no-postimage / compensation-attempted results stranded the row ADMITTED+unresolved (then quarantined on expiry). GREEN both unit files 81 cases. finish reordered: caller-identity mismatch (operation_id/preimage) is a 409 that touches no state; the in-flight/unresolved/applied_* possible-send guard still quarantines first (C5.7); a non-terminal status or a CONFIRMED/NOOP-without-postimage on a PROVEN pre-send row (`_presend`) routes through `_reject(status=FAILED)` to release the binding, otherwise raises leaving it unresolved. Negative controls preserved: caller error on a possible-send row quarantines; `verify_flush` failure keeps a valid CONFIRMED result unresolved (C5.8).
++21. `backend/tests/test_vc_coordination.py -q -k "stage_machine_is_scoped or replay_skip_and_attempt"` (BLOCK-12): RED the six-stage global PatchStage index arithmetic forced every operation through all stages (a config-only op could illegally advance into DESCRIPTION_PENDING; a description-only op could not checkpoint at all), and the checkpoint CAS fenced on mutation_stage alone, not the attempt. GREEN both unit files 85 cases. admit records the planned stage sequence in the checkpoint via `_planned_stages(authorization)` (getattr default = full march, NB-5); checkpoint scopes advance/replay/skip to that planned list and rejects stages not in it; recorded_at/stale-stage bounds are a separate distinguishable raise (NB-4); the CAS now fences `r.attempt_id == claim.attempt_id AND r.mutation_stage == row.mutation_stage`. `approval_consumption_published=True` stays removed (BLOCK-10). Existing normal-sequence test still green under the default plan.
++22. `backend/tests/test_vc_recovery.py -q -k "closes_the_operation or recovery_publication_failure"` (BLOCK-5): RED recover appended only a RECOVERY fact and released, leaving the key with no RECEIPT so the same idempotency_key could be reserved+admitted again (M04 re-issues the PATCH for an unknown-outcome attempt). GREEN both unit files 88 cases. recover now appends both a RECOVERY audit and a terminal RECEIPT (both CONFLICTED, post_version_id None) via BLOCK-7's fact_kind-bearing distinct keys, read-back-verifies BOTH via `_history_raw`, and only then releases; a read-back failure keeps the row QUARANTINED. NOTE deviation from BLOCK-5(d) assertion 4: after BLOCK-8 a CONFLICTED receipt is a conflict, not a completion, so the second same-key reserve raises CoordinationError via `_reject` (not ExistingReceipt) — the safety property (no Reservation, no AdmissionClaim, binding intact) holds and is asserted; a different idempotency_key still admits.
++23. `backend/tests/test_vc_recovery.py -q -k classification_is_derived` (BLOCK-11): RED recover accepted any non-blank `checkpoint_classification` (the diff's 'observed-preimage' passed for every stage) and recorded the caller's string as durable audit truth. GREEN both unit files 92 cases. Added `_classification(row)` deriving the value from durable state (recorded resume_classification; else in-flight->read-only-possible-send; else never-admitted/presend by admitted_at). recover now requires the caller value to equal the derived one and `replace`s evidence with the derived string before appending, so the RECOVERY/RECEIPT facts carry authoritative classification. Amended `recovery_evidence` helper to default classification='read-only-presend' (the admit+quarantine path's derived value) — justified by C5.9 'classify against checkpoint'.
++24. `backend/tests/test_vc_coordination.py -q -k "reservation_fence_cannot_advance or empty_head_update or admission_claim_can_advance"` (BLOCK-3): RED a bare RESERVED Reservation fence could set observed/approved/deployed heads (policy callback was the only 'gate' and it never fired for a never-admitted attempt), and an all-None update silently consumed an observer lease. GREEN both unit files 97 cases. advance_heads now rejects an empty update, and for any non-observer write requires `isinstance(fence, AdmissionClaim)` then `assert_owner` (re-verifies ADMITTED + request/approval/preimage vs the durable row) BEFORE the authorize_heads policy callback, so a reservation can no longer write governed heads. Positive control: an admitted authorized claim still advances all three heads; a tampered claim request_digest is rejected.
++25. `backend/tests/test_vc_coordination.py -q -k "require_committed_versions or positive_control_and_earlier"` (BLOCK-9): RED approved/deployed heads flowed straight into the CAS with no ledger resolution, so an unknown id, a foreign-binding version, an old-revision version, or an uncommitted id all became this binding's approved/deployed head (authorize_heads, a boolean policy oracle, was the only 'gate'). GREEN both unit files 106 cases. Added `_committed_head(row, version_id, name)` resolving via ledger.get_version, requiring version.context.binding == row.binding and verify_committed(ref); advance_heads calls it for approved/deployed BEFORE authorize_heads (evidence before policy). Deliberate asymmetry with observed: no attempt_id/generation equality on approved/deployed, so a version captured under an earlier attempt is a valid approved head (positive control).
++26. `backend/tests/test_vc_coordination.py -q -k cannot_regress` (BLOCK-4): RED approved/deployed heads were written with `x or row.heads.x` and no lineage guard, so approved could regress to an ancestor, deployed could lead approved, and an off-lineage id was accepted. GREEN both unit files 107 cases. Added `_advances(binding, current, candidate)` walking committed parent lineage via ledger.get_version with a cycle guard (fails closed on a corrupted cycle). advance_heads enforces per-head monotonicity along committed lineage and the C5.8 cross-head rule (deployed must not lead approved), and the three head assignments use explicit `is None` tests (NB-3). Existing observer/admit head test still green.
+diff --git a/backend/services/version_control/coordination/service.py b/backend/services/version_control/coordination/service.py
+index 34a0ee4..543c274 100644
+--- a/backend/services/version_control/coordination/service.py
++++ b/backend/services/version_control/coordination/service.py
+@@ -1,5 +1,5 @@
+ """Synchronous, fail-closed coordination. Never sends a Genie mutation."""
+-from dataclasses import replace
++from dataclasses import dataclass, replace
+ from datetime import timedelta
+ from math import isfinite
+ from uuid import uuid4
+@@ -8,6 +8,24 @@ from backend.services.version_control import contracts as c
+ from .row import CoordinationRow
+ 
+ 
++@dataclass(frozen=True)
++class AttemptSubject:
++    """Names the attempt a fact is ABOUT; not a VC/1.0 contract type (M03-private)."""
++    attempt_id: str | None
++    generation: int | None
++    holder: str | None
++    executor_kind: str | None
++    pre_version_id: str | None
++    approval_id: str | None
++    approval_digest: str | None
++
++
++def _rejected_subject(executor):
++    """A CAS loser never acquired an attempt; attribute the fact to who tried."""
++    return AttemptSubject(None, None, executor.principal_id, executor.actor_kind,
++                          None, None, None)
++
++
+ class CoordinationError(RuntimeError):
+     """No write authority may be inferred from a failed coordination call."""
+ 
+@@ -92,11 +110,21 @@ class CoordinationService:
+         if result is None:
+             raise OwnershipError('Serializable CAS lost; do not retry acquisition')
+         observed = self._row(row.binding)
++        def _mismatch(key, value):
++            got = getattr(observed, key)
++            if got == value:
++                return False
++            # JSON columns re-read as frozen mappings/tuples; compare canonical wire
++            # form so a stored dict/list equals its read-back proxy/tuple.
++            try:
++                return c.to_wire(got) != c.to_wire(value)
++            except TypeError:
++                return True
+         if (observed.row_version != row.row_version + 1
+                 or observed.holder != changes.get('holder', row.holder)
+                 or observed.attempt_id != changes.get('attempt_id', row.attempt_id)
+                 or observed.generation != changes.get('generation', row.generation)
+-                or any(getattr(observed, key) != value for key, value in changes.items())):
++                or any(_mismatch(key, value) for key, value in changes.items())):
+             raise AuthorityUnavailable('CAS read-back did not prove exact ownership/claim')
+         return observed
+ 
+@@ -106,22 +134,26 @@ class CoordinationService:
+                             row.attempt_id, row.generation, row.row_version)
+ 
+     def _fact(self, row, request, status, *, evidence=None, kind=c.FactKind.OPERATION,
+-              post_version_id=None):
++              post_version_id=None, subject=None):
++        """`subject` names the attempt this fact is ABOUT; None means row's own attempt."""
+         stage = row.mutation_stage or c.PatchStage.CONFIG_PENDING
++        subject = subject or AttemptSubject(row.attempt_id, row.generation, row.holder,
++                                            row.executor_kind, row.pre_version_id,
++                                            row.approval_id, row.approval_digest)
+         if evidence is None:
+             evidence = c.StageEvidence('VC/1.0', stage, self.clock.now(),
+                 c.canonical_json_hash('vc-coordination/1', {
+-                    'status': status.value, 'attempt': row.attempt_id,
+-                    'row_version': row.row_version}), None)
+-        key = f'{request.operation_id}:{row.attempt_id}:{row.row_version}:{status.value}'
++                    'status': status.value, 'kind': kind.value,
++                    'attempt': subject.attempt_id, 'row_version': row.row_version}), None)
++        key = f'{request.operation_id}:{subject.attempt_id}:{kind.value}:{status.value}'
+         fact = c.OperationFact(str(uuid4()), kind, request.operation_id,
+             row.row_version, key, row.binding, request, 'coordination',
+-            row.holder or 'coordination',
+-            c.ActorContext(row.holder or 'coordination', row.binding.workspace_id,
+-                           row.executor_kind or 'service'), status, evidence,
+-            self.clock.now(), attempt_id=row.attempt_id, generation=row.generation,
+-            pre_version_id=row.pre_version_id, post_version_id=post_version_id,
+-            approval_id=row.approval_id, approval_digest=row.approval_digest)
++            subject.holder or 'coordination',
++            c.ActorContext(subject.holder or 'coordination', row.binding.workspace_id,
++                           subject.executor_kind or 'service'), status, evidence,
++            self.clock.now(), attempt_id=subject.attempt_id, generation=subject.generation,
++            pre_version_id=subject.pre_version_id, post_version_id=post_version_id,
++            approval_id=subject.approval_id, approval_digest=subject.approval_digest)
+         return self._io(self.facts.append, fact)
+ 
+     def reserve(self, binding: c.BindingRef, operation: c.RequestIdentity,
+@@ -142,16 +174,23 @@ class CoordinationService:
+                 active_operation_id=operation.operation_id,
+                 idempotency_key=operation.idempotency_key, request_digest=operation.request_digest)
+         except OwnershipError:
+-            self._fact(row, operation, c.FactStatus.CONFLICTED)
++            self._fact(row, operation, c.FactStatus.CONFLICTED,
++                       subject=_rejected_subject(executor))
+             raise
+         history = self._history(row, operation)
+         receipts = [f for f in history.facts if f.fact_kind == c.FactKind.RECEIPT]
+-        if receipts:
+-            identities = {(f.operation_id, f.status, f.post_version_id) for f in receipts}
++        completed = [f for f in receipts
++                     if f.status in {c.FactStatus.CONFIRMED, c.FactStatus.NOOP}]
++        if completed:
++            identities = {(f.operation_id, f.status, f.post_version_id) for f in completed}
+             if len(identities) != 1:
+                 raise CoordinationError('Ambiguous completed receipts')
+             self._release(row)  # This reservation never acquired write authority.
+-            raise ExistingReceipt(receipts[0])
++            raise ExistingReceipt(completed[0])
++        if receipts:
++            # Terminal non-success: a conflict for the request, not a completion.
++            self._reject(row, operation,
++                         'Request already terminated non-successfully; file a new governed request')
+         return c.Reservation(self._fence(row), operation, executor, row.lease_expires_at)
+ 
+     def _owned(self, fence, *, allow_quarantine=False):
+@@ -207,16 +246,17 @@ class CoordinationService:
+                 or authorization.expires_at <= self.clock.now()
+                 or bool(authorization.approval_id) != bool(authorization.approval_digest)
+                 or not self._io(self.validate_authorization, authorization, reservation.executor)):
+-            raise CoordinationError('Authorization is stale, mismatched or revoked')
++            self._reject(row, reservation.request, 'Authorization is stale, mismatched or revoked')
+         if (preimage.binding_id, preimage.binding_revision) != (
+                 row.binding.binding_id, row.binding.binding_revision):
+-            raise OwnershipError('Preimage belongs to another binding/revision')
++            self._reject(row, reservation.request,
++                         'Preimage belongs to another binding/revision')
+         if isinstance(preimage, c.ObservationRef):
+             if not self._io(self.ledger.verify_committed, preimage):
+-                raise CoordinationError('Preimage not committed')
++                self._reject(row, reservation.request, 'Preimage not committed')
+             if preimage.state_digest != authorization.expected_base_fingerprints.state_digest:
+-                self._fact(row, reservation.request, c.FactStatus.CONFLICTED)
+-                raise CoordinationError('Committed preimage differs from reviewed base')
++                self._reject(row, reservation.request,
++                             'Committed preimage differs from reviewed base')
+             evidence = dict(pre_version_id=preimage.version_id,
+                             preimage_digest=preimage.state_digest, create_intent_event_id=None)
+         elif isinstance(preimage, c.CreateIntentRef):
+@@ -224,7 +264,8 @@ class CoordinationService:
+                     or preimage.operation_id != reservation.request.operation_id
+                     or preimage.request_digest != reservation.request.request_digest
+                     or not self._io(self.verify_create_intent, preimage)):
+-                raise CoordinationError('Committed provisional create intent required')
++                self._reject(row, reservation.request,
++                             'Committed provisional create intent required')
+             evidence = dict(pre_version_id=None, preimage_digest=None,
+                             create_intent_event_id=preimage.event_id)
+         else:
+@@ -233,7 +274,8 @@ class CoordinationService:
+         if authorization.approval_id is not None:
+             use = self._io(self.facts.approval_use, row.binding, authorization.approval_id)
+             if use.ambiguous or use.consumptions or use.operation_ids:
+-                raise CoordinationError('Consumed or ambiguous approval cannot authorize another attempt')
++                self._reject(row, reservation.request,
++                             'Consumed or ambiguous approval cannot authorize another attempt')
+         row = self._cas(row, lambda r: (r.state == c.CoordinationState.RESERVED
+             and r.lease_expires_at > self.clock.now()
+             and authorization.expires_at > self.clock.now()),
+@@ -244,13 +286,14 @@ class CoordinationService:
+             approval_id=authorization.approval_id, approval_digest=authorization.approval_digest,
+             expected_base_fingerprint=authorization.expected_base_fingerprints.state_digest,
+             admitted_at=self.clock.now(), mutation_stage=c.PatchStage.CONFIG_PENDING,
+-            checkpoint={'schema_version': 'VC/1.0', 'preimage': c.to_wire(preimage)},
++            checkpoint={'schema_version': 'VC/1.0', 'preimage': c.to_wire(preimage),
++                        'stages': [s.value for s in self._planned_stages(authorization)]},
+             **evidence)
+         claim = c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
+             row.attempt_id, row.generation, row.row_version, reservation.request,
+             preimage, row.approval_id, row.approval_digest)
+         try:
+-            self._publish_consumption(claim)
++            row = self._publish_consumption(claim, row)
+         except CoordinationError:
+             self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
+                       state=c.CoordinationState.QUARANTINED,
+@@ -258,18 +301,61 @@ class CoordinationService:
+             raise
+         return claim
+ 
+-    def _publish_consumption(self, claim):
++    def _publish_consumption(self, claim, row=None):
+         self._io(self.facts.publish_consumption, claim)
+         if not self._io(self.facts.verify_flush, claim):
+             raise AuthorityUnavailable('Consumption facts not durably verified')
++        # Truthful column: a durable consumption fact exists for the approval bound
++        # to THIS row. No approval bound means nothing was consumed.
++        if (row is not None and claim.approval_id is not None
++                and not row.approval_consumption_published):
++            return self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
++                             approval_consumption_published=True)
++        return row
+ 
+-    def _history(self, row, request):
+-        history = self._io(self.facts.lookup_request, row.binding, request.idempotency_key)
++    @staticmethod
++    def _presend(row):
++        """Durable proof that no Genie mutation can have been issued for this attempt."""
++        return (row.mutation_stage in {None, c.PatchStage.CONFIG_PENDING}
++                and 'resume_classification' not in (row.checkpoint or {}))
++
++    @staticmethod
++    def _classification(row):
++        """The only authority on what a quarantined attempt may have sent."""
++        recorded = (row.checkpoint or {}).get('resume_classification')
++        if recorded is not None:
++            return recorded
++        if row.mutation_stage in {c.PatchStage.CONFIG_IN_FLIGHT,
++                                  c.PatchStage.DESCRIPTION_IN_FLIGHT}:
++            # In-flight without a recorded classification: fail closed (C5.7 default).
++            return 'read-only-possible-send'
++        if row.admitted_at is None:
++            return 'read-only-never-admitted'
++        return 'read-only-presend'
++
++    def _history_raw(self, row, idempotency_key):
++        """lookup_request + ambiguity check ONLY. No digest predicate, so _reject can call it."""
++        history = self._io(self.facts.lookup_request, row.binding, idempotency_key)
+         if history.ambiguous:
+             raise CoordinationError('Ambiguous durable request history')
++        return history
++
++    def _reject(self, row, request, message, *, status=c.FactStatus.CONFLICTED):
++        """Definite pre-send rejection: publish the terminal fact, then free the binding."""
++        if not self._presend(row):
++            raise AuthorityUnavailable('Possible send cannot be closed as a definite rejection')
++        ref = self._fact(row, request, status)
++        if not any(f.event_id == ref.event_id
++                   for f in self._history_raw(row, request.idempotency_key).facts):
++            raise AuthorityUnavailable('Rejection fact not durably verified; row stays unresolved')
++        self._release(row)
++        raise CoordinationError(message)
++
++    def _history(self, row, request):
++        history = self._history_raw(row, request.idempotency_key)
+         if any(f.request.request_digest != request.request_digest for f in history.facts):
+-            self._fact(row, request, c.FactStatus.CONFLICTED)
+-            raise CoordinationError('Idempotency key already bound to a different request digest')
++            self._reject(row, request,
++                         'Idempotency key already bound to a different request digest')
+         return history
+ 
+     def _release(self, row, *, generation=None):
+@@ -287,15 +373,23 @@ class CoordinationService:
+     def finish(self, claim: c.AdmissionClaim, result: c.OperationResult) -> None:
+         self.assert_owner(claim)
+         row = self._owned(claim)
++        # Argument checks that cannot depend on mutation state run first and reject
++        # a caller mistake without touching row state (409, binding intact).
++        if (result.operation_id != row.active_operation_id
++                or result.preimage != claim.preimage):
++            raise CoordinationError('Result does not identify this admitted operation')
++        # Possible-send: assume-possible-send obligation (C5.7); quarantine.
+         if (row.mutation_stage in {c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
+                 or result.unresolved or result.status in {
+                     c.OperationStatus.APPLIED_UNVERIFIED, c.OperationStatus.APPLIED_PARTIAL}):
+             self._quarantine_row(row, 'Possible send remains unresolved; GET cannot prove termination')
+             raise CoordinationError('In-flight or ambiguous result cannot release the attempt')
+-        if (result.operation_id != row.active_operation_id or result.preimage != claim.preimage
+-                or result.unresolved or result.status not in {
+-                    c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP,
+-                    c.OperationStatus.CONFLICTED, c.OperationStatus.FAILED}):
++        if result.status not in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP,
++                                 c.OperationStatus.CONFLICTED, c.OperationStatus.FAILED}:
++            if self._presend(row):
++                return self._reject(row, claim.request,
++                    'Non-terminal result on a proven pre-send attempt',
++                    status=c.FactStatus.FAILED)
+             raise CoordinationError('Not a resolved terminal result')
+         if result.postimage is not None:
+             if ((result.postimage.binding_id, result.postimage.binding_revision) !=
+@@ -303,8 +397,12 @@ class CoordinationService:
+                     or not self._io(self.ledger.verify_committed, result.postimage)):
+                 raise CoordinationError('Terminal observation not committed to this binding')
+         elif result.status in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP}:
++            if self._presend(row):
++                return self._reject(row, claim.request,
++                    'Successful completion requires committed postimage',
++                    status=c.FactStatus.FAILED)
+             raise CoordinationError('Successful completion requires committed postimage')
+-        self._publish_consumption(claim)
++        row = self._publish_consumption(claim, row)
+         ref = self._fact(row, claim.request, c.FactStatus(result.status.value),
+                          kind=c.FactKind.RECEIPT,
+                          post_version_id=result.postimage.version_id if result.postimage else None)
+@@ -314,10 +412,21 @@ class CoordinationService:
+         self._release(row)
+ 
+     def _expire(self, row):
+-        if (row.state not in {c.CoordinationState.IDLE, c.CoordinationState.QUARANTINED}
+-                and (row.lease_expires_at is None or row.lease_expires_at <= self.clock.now())):
+-            return self._quarantine_row(row, 'Lease expired; termination is unproven')
+-        return row
++        if row.state in {c.CoordinationState.IDLE, c.CoordinationState.QUARANTINED}:
++            return row
++        if row.lease_expires_at is not None and row.lease_expires_at > self.clock.now():
++            return row
++        if row.state == c.CoordinationState.OBSERVING:
++            return self._reclaim_observer(row)
++        return self._quarantine_row(row, 'Lease expired; termination is unproven')
++
++    def _reclaim_observer(self, row):
++        # An observation lease never carried write authority; reclaim to IDLE.
++        # Fail closed if the row somehow carries mutation authority.
++        if (row.active_operation_id is not None or row.admitted_at is not None
++                or row.approval_id is not None or not self._presend(row)):
++            raise AuthorityUnavailable('Observation row carries mutation authority; refusing reclaim')
++        return self._release(row, generation=row.generation + 1)
+ 
+     def _quarantine_row(self, row, reason):
+         if not reason.strip():
+@@ -345,27 +454,41 @@ class CoordinationService:
+                 or trusted.attempt_id != row.attempt_id or trusted.execution_ref != row.executor_ref):
+             raise CoordinationError('Trusted termination of the exact prior attempt is required')
+         self._validate_termination(trusted)
++        # Persist validated evidence BEFORE any fact append, so a crash between the
++        # audit append and release leaves durable proof for the next worker.
++        row = self._cas(row, lambda r: r.attempt_id == evidence.fence.attempt_id,
++                        termination_evidence=c.to_wire(trusted))
+         human = bool(evidence.human_authorization_reference and evidence.human_reason
+                      and evidence.human_reason.strip() and evidence.residual_risk_acknowledged
+                      and self._io(self.authorize_human_recovery, binding, evidence))
+         self._validate_samples(evidence, human=human)
+-        if not evidence.checkpoint_classification.strip():
+-            raise CoordinationError('Recovery checkpoint classification required')
++        derived = self._classification(row)
++        if evidence.checkpoint_classification.strip() != derived:
++            raise CoordinationError(
++                f'Recovery classification must equal the durable checkpoint classification ({derived})')
++        evidence = replace(evidence, checkpoint_classification=derived)
+         if row.admitted_at is not None:
+-            self._publish_consumption(self._claim_from_row(row))
++            row = self._publish_consumption(self._claim_from_row(row), row)
+         request = self._request(row)
+         # Strip AdmissionClaim's extra fields at the frozen FenceToken wire seam.
+         evidence = replace(evidence, fence=self._fence(row))
++        # Recovery CLOSES the operation: append the audit AND a terminal receipt so
++        # the same idempotency key cannot be re-admitted (C5.5, C5.7). CONFLICTED,
++        # never CONFIRMED/NOOP — recovery proves the executor is dead, not success.
+         ref = self._fact(row, request, c.FactStatus.CONFLICTED,
+                          evidence=evidence, kind=c.FactKind.RECOVERY)
+-        history = self._history(row, request)
+-        if not any(f.event_id == ref.event_id for f in history.facts):
+-            raise AuthorityUnavailable('Recovery audit publication not verified')
++        receipt = self._fact(row, request, c.FactStatus.CONFLICTED,
++                             evidence=evidence, kind=c.FactKind.RECEIPT)
++        history = self._history_raw(row, request.idempotency_key)
++        if not {ref.event_id, receipt.event_id} <= {f.event_id for f in history.facts}:
++            raise AuthorityUnavailable(
++                'Recovery audit/receipt publication not verified; row stays unresolved')
+         released = self._release(row, generation=row.generation + 1)
+         # A recovery result is a historical fence, not a new write capability.
+         fence = c.FenceToken(binding.binding_id, binding.binding_revision,
+                             row.attempt_id, released.generation, released.row_version)
+-        return c.RecoveryResult(binding, c.OperationStatus.CONFLICTED, fence, False, (ref.event_id,))
++        return c.RecoveryResult(binding, c.OperationStatus.CONFLICTED, fence, False,
++                                (ref.event_id, receipt.event_id))
+ 
+     def _claim_from_row(self, row):
+         if not row.checkpoint or 'preimage' not in row.checkpoint:
+@@ -406,14 +529,28 @@ class CoordinationService:
+                 or (not human and (samples[-1].observed_at - samples[0].observed_at).total_seconds() <= capability[0])):
+             raise CoordinationError('Need three stable post-termination GETs spanning beyond verified lifetime')
+ 
++    @staticmethod
++    def _planned_stages(authorization):
++        # M03 does not decide which fields change; M04's rendering does. Derive the
++        # planned sequence from the validated grant, defaulting conservatively to
++        # the full config+description march when no plan is declared (NB-5).
++        planned = getattr(authorization, 'planned_stages', None)
++        if not planned:
++            return tuple(c.PatchStage)
++        return tuple(planned)
++
+     def checkpoint(self, claim: c.AdmissionClaim, stage: c.PatchStage,
+                    evidence: c.StageEvidence) -> None:
+         self.assert_owner(claim)
+         row = self._owned(claim)
+-        stages = list(c.PatchStage)
+         if (evidence.stage != stage or evidence.recorded_at > self.clock.now()
+-                or evidence.recorded_at < row.admitted_at
+-                or stages.index(stage) != stages.index(row.mutation_stage) + 1):
++                or evidence.recorded_at < row.admitted_at):
++            raise CoordinationError('Checkpoint evidence has a stale stage or recorded_at')
++        planned = [c.PatchStage(v) for v in ((row.checkpoint or {}).get('stages')
++                                             or [s.value for s in c.PatchStage])]
++        if row.mutation_stage not in planned or stage not in planned:
++            raise CoordinationError('Stage is not part of this admitted operation')
++        if planned.index(stage) != planned.index(row.mutation_stage) + 1:
+             raise CoordinationError('Checkpoint stage must advance exactly once, never replay or skip')
+         observed = stage in {c.PatchStage.CONFIG_OBSERVED, c.PatchStage.DESCRIPTION_OBSERVED}
+         if observed:
+@@ -425,15 +562,15 @@ class CoordinationService:
+                     or not self._io(self.validate_stage_evidence, claim, row, evidence)):
+                 self._quarantine_row(row, 'GET does not prove synchronous send completion')
+                 raise CoordinationError('Trusted send completion and committed observation required')
+-        self._publish_consumption(claim)
++        row = self._publish_consumption(claim, row)
+         checkpoint = dict(row.checkpoint or {})
+         checkpoint.update(evidence=c.to_wire(evidence),
+             resume_classification=('read-only-possible-send' if stage in {
+                 c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
+                 else 'read-only-unless-next-stage-proven-unsent'))
+-        self._cas(row, lambda r: r.mutation_stage == row.mutation_stage,
+-                  mutation_stage=stage, checkpoint=checkpoint,
+-                  approval_consumption_published=True)
++        self._cas(row, lambda r: (r.attempt_id == claim.attempt_id
++                                  and r.mutation_stage == row.mutation_stage),
++                  mutation_stage=stage, checkpoint=checkpoint)
+ 
+     def observe_exclusively(self, binding: c.BindingRef,
+                             executor: c.ExecutorContext) -> c.ObservationLease:
+@@ -449,9 +586,53 @@ class CoordinationService:
+             observed_sequence=row.observed_sequence + 1)
+         return c.ObservationLease(self._fence(row), row.observed_sequence, row.lease_expires_at)
+ 
++    def _advances(self, binding, current, candidate):
++        """True iff candidate is current, or a descendant of current, by committed lineage."""
++        if current is None:
++            return True
++        seen, node = set(), candidate
++        while node is not None and node not in seen:
++            if node == current:
++                return True
++            seen.add(node)
++            version = self._io(self.ledger.get_version, binding, node)
++            if version is None or version.context.binding != binding:
++                raise CoordinationError('Head lineage is not committed to this binding')
++            node = version.context.parent_version_id
++        return False
++
++    def _committed_head(self, row, version_id, name):
++        """Prove `version_id` is a version committed to this exact binding/revision."""
++        version = self._io(self.ledger.get_version, row.binding, version_id)
++        if version is None or version.version_id != version_id:
++            raise CoordinationError(f'{name} head does not resolve to a committed version')
++        if version.context.binding != row.binding:
++            raise CoordinationError(f'{name} head belongs to another binding or revision')
++        ref = c.ObservationRef(version.version_id, row.binding.binding_id,
++                               row.binding.binding_revision,
++                               version.snapshot.state_digest,
++                               version.snapshot.response_envelope_digest)
++        if not self._io(self.ledger.verify_committed, ref):
++            raise CoordinationError(f'{name} head is not committed evidence')
++        return version
++
+     def advance_heads(self, fence: c.FenceToken, update: c.HeadUpdate) -> c.Heads:
+         row = self._owned(fence)
++        if update.observed is None and update.approved is None and update.deployed is None:
++            raise CoordinationError('Empty head update')
+         observing = row.state == c.CoordinationState.OBSERVING
++        if not observing:
++            # Any non-observer head write requires a verified admission. assert_owner
++            # re-checks AdmissionClaim + ADMITTED + request/approval/preimage vs row.
++            if not isinstance(fence, c.AdmissionClaim):
++                raise OwnershipError('Head updates require an observation lease or an admission claim')
++            self.assert_owner(fence)
++        # Evidence before policy: resolve every governed head to a committed version
++        # of THIS binding before asking the policy oracle to authorize it.
++        for name in ('approved', 'deployed'):
++            value = getattr(update, name)
++            if value is not None:
++                self._committed_head(row, value, name)
+         if update.approved is not None or update.deployed is not None:
+             if (observing or not update.authorization_reference
+                     or not self._io(self.authorize_heads, row.binding, fence, update)):
+@@ -467,9 +648,17 @@ class CoordinationService:
+                     or context.parent_version_id != row.heads.observed
+                     or not self._io(self.ledger.verify_committed, ref)):
+                 raise CoordinationError('Observation is stale, uncommitted or regresses the serialized head')
+-        heads = c.Heads(update.observed or row.heads.observed,
+-                        update.approved or row.heads.approved,
+-                        update.deployed or row.heads.deployed)
++        # Governed heads may only advance along committed lineage, never regress.
++        for name in ('approved', 'deployed'):
++            value = getattr(update, name)
++            if value is not None and not self._advances(row.binding, getattr(row.heads, name), value):
++                raise CoordinationError(f'{name} head cannot regress or leave the committed lineage')
++        final_approved = row.heads.approved if update.approved is None else update.approved
++        final_deployed = row.heads.deployed if update.deployed is None else update.deployed
++        if final_deployed is not None and not self._advances(row.binding, final_deployed, final_approved):
++            raise CoordinationError('Deployed head must not lead the approved head')
++        heads = c.Heads(row.heads.observed if update.observed is None else update.observed,
++                        final_approved, final_deployed)
+         row = self._cas(row, lambda r: r.attempt_id == fence.attempt_id, heads=heads)
+         if observing:
+             self._release(row)  # advance_heads is observation lease finalization.
+diff --git a/backend/tests/test_vc_coordination.py b/backend/tests/test_vc_coordination.py
+index 68979de..7e0a66b 100644
+--- a/backend/tests/test_vc_coordination.py
++++ b/backend/tests/test_vc_coordination.py
+@@ -85,6 +85,617 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
+         reserve(h)
+ 
+ 
++def test_approved_and_deployed_heads_cannot_regress(h):
++    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
++    v1, v2, v3 = uid(), uid(), uid()
++    parents = {v1: None, v2: v1, v3: v2}
++
++    def version(vid, parent, binding=None):
++        return c.Version(vid, snapshot, c.CaptureContext(binding or h.binding, 'obs',
++            h.clock.now(), 'open', c.ActorContext('a', h.binding.workspace_id, 'service'),
++            c.Origin.EXTERNAL, attempt_id=uid(), generation=0, parent_version_id=parent))
++
++    chain = dict(parents)
++    extra = {}
++
++    def get_version(binding, version_id):
++        if version_id in extra:
++            return extra[version_id]
++        if version_id in chain:
++            return version(version_id, chain[version_id])
++        return None
++
++    h.ledger.get_version.side_effect = get_version
++    h.authorize_heads.return_value = True
++
++    # 1. baseline: advance both heads to v2.
++    heads = h.service.advance_heads(claim, c.HeadUpdate(None, v2, v2, 'ref'))
++    assert heads == c.Heads(None, v2, v2)
++
++    original_cas = h.store.compare_and_swap
++    h.store.compare_and_swap = Mock(wraps=original_cas)
++    before = h.store.read(h.binding.binding_id).heads
++
++    # 2/3. regress approved to an ancestor -> raises, no CAS.
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(claim, c.HeadUpdate(None, v1, None, 'ref'))
++    assert h.store.read(h.binding.binding_id).heads == before
++    assert h.store.compare_and_swap.call_count == 0
++
++    # 4. deployed leading approved raises (approved still v2).
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(claim, c.HeadUpdate(None, None, v3, 'ref'))
++    assert h.store.read(h.binding.binding_id).heads == before
++
++    # 5. an unrelated chain (parent never reaches v2) raises.
++    unrelated = uid()
++    extra[unrelated] = version(unrelated, uid())  # parent is an unknown id
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(claim, c.HeadUpdate(None, unrelated, None, 'ref'))
++
++    # 6. a lineage cycle terminates with a CoordinationError.
++    va, vb = uid(), uid()
++    extra[va] = version(va, vb)
++    extra[vb] = version(vb, va)
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(claim, c.HeadUpdate(None, va, None, 'ref'))
++
++    # 7. genuine forward advance v2 -> v3 for both heads succeeds.
++    h.store.compare_and_swap = original_cas
++    heads = h.service.advance_heads(claim, c.HeadUpdate(None, v3, v3, 'ref'))
++    assert heads == c.Heads(None, v3, v3)
++
++
++@pytest.mark.parametrize('head', ['approved', 'deployed'])
++@pytest.mark.parametrize('defect', ['unknown-id', 'foreign-binding', 'old-revision', 'uncommitted'])
++def test_approved_and_deployed_heads_require_committed_versions_of_this_binding(h, head, defect):
++    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++    durable_facts(h)
++    if defect == 'old-revision':
++        h.binding = replace(h.binding, binding_revision=2)
++        h.resolve_binding.return_value = h.binding
++        h.grant = replace(h.grant, binding=h.binding)
++        h.preimage = replace(h.preimage, binding_revision=2)
++        h.proof = c.EnrollmentProof(uid(), h.binding.binding_id, 2, 'serialized-enrollment')
++    enroll(h)
++    claim = admit(h)
++    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
++    value = uid()
++
++    def context_for(binding):
++        return c.CaptureContext(binding, 'obs', h.clock.now(), 'open',
++            c.ActorContext('a', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
++            attempt_id=uid(), generation=0)
++
++    def get_version(binding, version_id):
++        if defect == 'unknown-id' or version_id != value:
++            return None
++        if defect == 'foreign-binding':
++            return c.Version(value, snapshot, context_for(replace(h.binding, binding_id=uid())))
++        if defect == 'old-revision':
++            return c.Version(value, snapshot, context_for(replace(h.binding, binding_revision=1)))
++        return c.Version(value, snapshot, context_for(h.binding))
++
++    h.ledger.get_version.side_effect = get_version
++    if defect == 'uncommitted':
++        h.ledger.verify_committed.side_effect = lambda ref: getattr(ref, 'version_id', None) != value
++    h.authorize_heads.return_value = True
++
++    original_cas = h.store.compare_and_swap
++    h.store.compare_and_swap = Mock(wraps=original_cas)
++    before = h.store.read(h.binding.binding_id).heads
++    update = c.HeadUpdate(None, value, None, 'ref') if head == 'approved' \
++        else c.HeadUpdate(None, None, value, 'ref')
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(claim, update)
++    # 2. no partial write.
++    assert h.store.read(h.binding.binding_id).heads == before
++    assert h.store.compare_and_swap.call_count == 0
++    # 3. evidence resolution precedes policy.
++    h.authorize_heads.assert_not_called()
++    # 5. resolution was on the path.
++    h.ledger.get_version.assert_any_call(h.binding, value)
++
++
++def test_approved_head_positive_control_and_earlier_attempt_allowed(h):
++    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
++    value = uid()
++
++    def get_version(binding, version_id):
++        if version_id != value:
++            return None
++        # captured under an EARLIER attempt/generation than the admitted claim.
++        return c.Version(value, snapshot, c.CaptureContext(h.binding, 'obs', h.clock.now(), 'open',
++            c.ActorContext('a', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
++            attempt_id=uid(), generation=0))
++
++    h.ledger.get_version.side_effect = get_version
++    h.authorize_heads.return_value = True
++    # 6 & 7: an approved head captured under an earlier attempt is accepted.
++    heads = h.service.advance_heads(claim, c.HeadUpdate(None, value, None, 'ref'))
++    assert heads.approved == value
++
++
++@pytest.mark.parametrize('head', ['observed', 'approved', 'deployed'])
++def test_reservation_fence_cannot_advance_any_head(h, head):
++    durable_facts(h)
++    enroll(h)
++    reservation = reserve(h)
++    v = uid()
++    h.authorize_heads.return_value = True  # policy is NOT the missing gate.
++    update = {
++        'observed': c.HeadUpdate(v, None, None, 'ref'),
++        'approved': c.HeadUpdate(None, v, None, 'ref'),
++        'deployed': c.HeadUpdate(None, None, v, 'ref'),
++    }[head]
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(reservation.fence, update)
++    # 2. no partial write.
++    assert h.store.read(h.binding.binding_id).heads == c.Heads(None, None, None)
++    # 3. authority precedes the policy callback.
++    if head in {'approved', 'deployed'}:
++        h.authorize_heads.assert_not_called()
++
++
++def test_empty_head_update_rejected_and_lease_retained(h):
++    enroll(h)
++    lease = h.service.observe_exclusively(h.binding, h.executor)
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(lease.fence, c.HeadUpdate(None, None, None, None))
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.OBSERVING and row.unresolved
++
++
++def test_admission_claim_can_advance_heads_positive_control(h):
++    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++    durable_facts(h)
++    enroll(h)
++    # Establish an observed head first via an observer lease.
++    lease = h.service.observe_exclusively(h.binding, h.executor)
++    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
++    v = uid()
++    context = c.CaptureContext(h.binding, 'observer-1', h.clock.now(), 'open',
++        c.ActorContext('observer', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
++        attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
++    h.ledger.get_version.return_value = c.Version(v, snapshot, context)
++    h.service.advance_heads(lease.fence, c.HeadUpdate(v, None, None, None))
++    h.service.quarantine(h.service.observe_exclusively(h.binding, h.executor).fence, 'reset')
++    h.store.state.rows[:] = [replace(h.store.state.rows[0],
++        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
++        active_operation_id=None, idempotency_key=None, request_digest=None,
++        lease_expires_at=None, mutation_stage=None, checkpoint=None)]
++    claim = admit(h)
++    # 5. positive control: admitted claim + authorized policy succeeds.
++    h.authorize_heads.return_value = True
++    heads = h.service.advance_heads(claim, c.HeadUpdate(None, v, v, 'verified-deployment'))
++    assert heads == c.Heads(v, v, v)
++    # 6. assert_owner durable-row comparison is on the path.
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(replace(claim, request=replace(h.request, request_digest='f' * 64)),
++                                c.HeadUpdate(None, v, v, 'verified-deployment'))
++
++
++@pytest.mark.parametrize('shape', ['config-only', 'description-only', 'config-and-description'])
++def test_checkpoint_stage_machine_is_scoped_to_the_admitted_operation(h, shape):
++    durable_facts(h)
++    enroll(h)
++    plans = {
++        'config-only': (c.PatchStage.CONFIG_PENDING, c.PatchStage.CONFIG_IN_FLIGHT,
++                        c.PatchStage.CONFIG_OBSERVED),
++        'description-only': (c.PatchStage.CONFIG_PENDING, c.PatchStage.DESCRIPTION_PENDING,
++                             c.PatchStage.DESCRIPTION_IN_FLIGHT, c.PatchStage.DESCRIPTION_OBSERVED),
++        'config-and-description': tuple(c.PatchStage),
++    }
++    h.service._planned_stages = staticmethod(lambda auth: plans[shape])
++    claim = admit(h)
++
++    def cp(stage, observation=None):
++        h.service.checkpoint(claim, stage,
++            c.StageEvidence('VC/1.0', stage, h.clock.now(), 'a' * 64, observation))
++
++    planned = plans[shape]
++    if shape == 'config-only':
++        cp(c.PatchStage.CONFIG_IN_FLIGHT)
++        cp(c.PatchStage.CONFIG_OBSERVED, h.preimage)
++        # 2. a description stage is not part of this operation.
++        with pytest.raises(CoordinationError, match='not part of this admitted operation'):
++            cp(c.PatchStage.DESCRIPTION_PENDING)
++        assert h.store.read(h.binding.binding_id).mutation_stage == c.PatchStage.CONFIG_OBSERVED
++        # 1. terminate from CONFIG_OBSERVED.
++        complete(h, claim)
++        assert not h.store.read(h.binding.binding_id).unresolved
++        return
++
++    if shape == 'description-only':
++        # 3. first checkpoint is DESCRIPTION_PENDING and succeeds from CONFIG_PENDING.
++        cp(c.PatchStage.DESCRIPTION_PENDING)
++        assert h.store.read(h.binding.binding_id).mutation_stage == c.PatchStage.DESCRIPTION_PENDING
++        # 4. a config stage is not part of this operation.
++        with pytest.raises(CoordinationError):
++            cp(c.PatchStage.CONFIG_IN_FLIGHT)
++        return
++
++    # config-and-description: walk all planned transitions.
++    for stage in planned[1:]:
++        obs = h.preimage if stage in {c.PatchStage.CONFIG_OBSERVED,
++                                      c.PatchStage.DESCRIPTION_OBSERVED} else None
++        cp(stage, obs)
++    assert h.store.read(h.binding.binding_id).mutation_stage == planned[-1]
++
++
++def test_checkpoint_replay_skip_and_attempt_fencing(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
++    h.service.checkpoint(claim, send.stage, send)
++    # 5. replay current stage raises.
++    with pytest.raises(CoordinationError):
++        h.service.checkpoint(claim, send.stage, send)
++    # skipping a planned stage raises.
++    with pytest.raises(CoordinationError):
++        h.service.checkpoint(claim, c.PatchStage.DESCRIPTION_PENDING,
++            c.StageEvidence('VC/1.0', c.PatchStage.DESCRIPTION_PENDING, h.clock.now(), 'a' * 64, None))
++
++    # 6. attempt fencing: a foreign attempt_id row is rejected without change.
++    row = h.store.read(h.binding.binding_id)
++    foreign = replace(row, attempt_id=uid())
++    h.store.state.rows[:] = [foreign]
++    observed = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED, h.clock.now(), 'a' * 64, h.preimage)
++    with pytest.raises(CoordinationError):
++        h.service.checkpoint(claim, observed.stage, observed)
++    after = h.store.read(h.binding.binding_id)
++    assert after.attempt_id == foreign.attempt_id
++    assert after.mutation_stage == c.PatchStage.CONFIG_IN_FLIGHT
++
++    # 7. recorded_at bounds raise with a distinguishable message.
++    h.store.state.rows[:] = [row]
++    with pytest.raises(CoordinationError, match='recorded'):
++        h.service.checkpoint(claim, c.PatchStage.CONFIG_OBSERVED,
++            c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED,
++                            h.clock.now() + timedelta(seconds=1), 'a' * 64, h.preimage))
++    with pytest.raises(CoordinationError, match='recorded'):
++        h.service.checkpoint(claim, c.PatchStage.CONFIG_OBSERVED,
++            c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED,
++                            row.admitted_at - timedelta(seconds=1), 'a' * 64, h.preimage))
++
++
++@pytest.mark.parametrize('case', ['confirmed-no-postimage', 'wrong-preimage',
++    'wrong-operation-id', 'compensation-attempted', 'noop-no-postimage'])
++def test_finish_releases_only_on_proven_presend_failure(h, case):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    row = h.store.read(h.binding.binding_id)
++    # _presend holds: CONFIG_PENDING and no resume_classification.
++    assert row.mutation_stage == c.PatchStage.CONFIG_PENDING
++    assert 'resume_classification' not in (row.checkpoint or {})
++
++    if case == 'confirmed-no-postimage':
++        result = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
++                                   claim.preimage, None, False, ('x',))
++    elif case == 'wrong-preimage':
++        result = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
++            c.ObservationRef(uid(), h.binding.binding_id, 1, '2' * 64, '5' * 64), h.preimage, False, ('x',))
++    elif case == 'wrong-operation-id':
++        result = c.OperationResult(uid(), c.OperationStatus.CONFIRMED,
++                                   claim.preimage, h.preimage, False, ('x',))
++    elif case == 'compensation-attempted':
++        result = c.OperationResult(claim.request.operation_id,
++            c.OperationStatus.COMPENSATION_ATTEMPTED, claim.preimage, None, False, ('x',))
++    elif case == 'noop-no-postimage':
++        result = c.OperationResult(claim.request.operation_id, c.OperationStatus.NOOP,
++                                   claim.preimage, None, False, ('x',))
++
++    with pytest.raises(CoordinationError):
++        h.service.finish(claim, result)
++
++    # wrong-preimage / wrong-operation-id are argument errors: rejected before any
++    # state change (row still ADMITTED+unresolved). The other three are proven
++    # pre-send failures and must release.
++    row = h.store.read(h.binding.binding_id)
++    if case in {'wrong-preimage', 'wrong-operation-id'}:
++        assert row.state == c.CoordinationState.ADMITTED and row.unresolved
++        return
++
++    assert row.state == c.CoordinationState.IDLE and not row.unresolved
++    assert row.attempt_id is None and row.quarantine_reason is None
++    assert row.heads == c.Heads(None, None, None)
++    assert row.observed_sequence == 0
++    facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows
++             if c.from_wire(c.OperationFact, r.payload).request.idempotency_key == claim.request.idempotency_key
++             and c.from_wire(c.OperationFact, r.payload).status == c.FactStatus.FAILED]
++    assert len(facts) == 1
++    assert facts[0].fact_kind == c.FactKind.OPERATION
++    assert facts[0].attempt_id == claim.attempt_id
++    # binding reusable.
++    h.request = c.RequestIdentity(uid(), 'key-after', 'a' * 64)
++    fresh = h.service.reserve(h.binding, h.request, h.executor)
++    assert isinstance(fresh, c.Reservation)
++
++
++def test_finish_possible_send_and_publication_failures_stay_unresolved(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
++    h.service.checkpoint(claim, send.stage, send)
++    # 7. caller error on a possible-send row is not released (quarantined).
++    bad = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
++        c.ObservationRef(uid(), h.binding.binding_id, 1, '2' * 64, '5' * 64), h.preimage, False, ('x',))
++    with pytest.raises(CoordinationError):
++        h.service.finish(claim, bad)
++    assert h.store.read(h.binding.binding_id).unresolved
++
++    # 8. publication failure still strands a fully valid result.
++    h.service = CoordinationService(**{k: getattr(h, k) for k in (
++        'store', 'facts', 'ledger', 'clock', 'resolve_binding', 'verify_enrollment',
++        'insert_enrolled', 'validate_authorization', 'verify_create_intent',
++        'termination', 'authorize_human_recovery', 'authorize_heads', 'validate_stage_evidence')})
++    # reset to a fresh admitted claim on a clean binding
++    h.store.state.rows[:] = [replace(h.store.state.rows[0],
++        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
++        active_operation_id=None, idempotency_key=None, request_digest=None, approval_id=None,
++        approval_consumption_published=False, lease_expires_at=None, mutation_stage=None,
++        checkpoint=None, admitted_at=None, pre_version_id=None, preimage_digest=None,
++        expected_base_fingerprint=None, quarantine_reason=None)]
++    h.request = c.RequestIdentity(uid(), 'key-flush', 'a' * 64)
++    h.grant = replace(h.grant, request=h.request, approval_id=uid(), approval_digest='7' * 64)
++    claim2 = admit(h)
++    h.facts.verify_flush.side_effect = lambda _: False
++    with pytest.raises(CoordinationError):
++        complete(h, claim2)
++    assert h.store.read(h.binding.binding_id).unresolved
++
++
++@pytest.mark.parametrize('terminal', ['failed', 'conflicted'])
++def test_terminal_non_success_receipt_is_a_conflict_not_a_completion(h, terminal):
++    from backend.services.version_control.coordination import ExistingReceipt
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    status = {'failed': c.OperationStatus.FAILED,
++              'conflicted': c.OperationStatus.CONFLICTED}[terminal]
++    h.service.finish(claim, c.OperationResult(claim.request.operation_id, status,
++        claim.preimage, None, False, ('pre-send-rejected',)))
++    row = h.store.read(h.binding.binding_id)
++    assert not row.unresolved
++
++    # Retry with a new operation_id but the SAME idempotency key + digest.
++    second = replace(h.request, operation_id=uid())
++    h.request = second
++    with pytest.raises(CoordinationError) as caught:
++        reserve(h)
++    # 1. not an ExistingReceipt "completion".
++    assert not isinstance(caught.value, ExistingReceipt)
++    # 2. a new OPERATION/CONFLICTED fact for the SECOND request.
++    facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
++    new = [f for f in facts if f.request.operation_id == second.operation_id
++           and f.fact_kind == c.FactKind.OPERATION and f.status == c.FactStatus.CONFLICTED]
++    assert len(new) == 1
++    # 3. row released.
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.IDLE and not row.unresolved
++    assert row.attempt_id is None
++    # 4. no quarantine on expiry.
++    h.request = c.RequestIdentity(uid(), 'key-later', 'a' * 64)
++    fresh = h.service.reserve(h.binding, h.request, h.executor)
++    h.clock.advance(timedelta(seconds=61))
++    with pytest.raises(CoordinationError):
++        h.service.renew(fresh.fence)
++    # the fresh reserve genuinely expired -> quarantined; but the terminal path
++    # itself did not brick the binding (proved by 3).
++
++
++def test_confirmed_and_noop_receipts_still_return_existing_receipt(h):
++    from backend.services.version_control.coordination import ExistingReceipt
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    complete(h, claim)  # CONFIRMED with committed postimage
++    original_id = claim.request.operation_id
++    h.request = replace(h.request, operation_id=uid())
++    with pytest.raises(ExistingReceipt) as caught:
++        reserve(h)
++    assert caught.value.receipt.status == c.FactStatus.CONFIRMED
++    assert caught.value.receipt.operation_id == original_id
++
++
++def test_mixed_history_prefers_confirmed_over_failed_receipt(h):
++    from backend.services.version_control.coordination import ExistingReceipt
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    row = h.store.read(h.binding.binding_id)
++    # Seed a FAILED receipt for the key alongside the eventual CONFIRMED one.
++    h.service._fact(row, claim.request, c.FactStatus.FAILED, kind=c.FactKind.RECEIPT)
++    complete(h, claim)  # CONFIRMED receipt
++    h.request = replace(h.request, operation_id=uid())
++    with pytest.raises(ExistingReceipt) as caught:
++        reserve(h)
++    assert caught.value.receipt.status == c.FactStatus.CONFIRMED
++
++
++@pytest.mark.parametrize('cause', ['reviewed-base', 'different-digest', 'revoked-grant',
++                                    'uncommitted-preimage', 'consumed-approval'])
++def test_definite_presend_rejection_releases_binding_and_publishes_conflict(h, cause):
++    durable_facts(h)
++    enroll(h)
++    reservation = reserve(h)
++    before = h.store.read(h.binding.binding_id)
++
++    if cause == 'reviewed-base':
++        h.grant = replace(h.grant, expected_base_fingerprints=replace(
++            h.grant.expected_base_fingerprints, config='9' * 64))
++    elif cause == 'different-digest':
++        # A prior durable fact bound this idempotency key to a different digest.
++        other = c.RequestIdentity(uid(), h.request.idempotency_key, 'e' * 64)
++        h.service._fact(before, other, c.FactStatus.CONFIRMED)
++    elif cause == 'revoked-grant':
++        h.validate_authorization.return_value = False
++    elif cause == 'uncommitted-preimage':
++        h.ledger.verify_committed.return_value = False
++    elif cause == 'consumed-approval':
++        h.facts.approval_use.side_effect = lambda b, a: c.ApprovalUse(
++            b, a, (c.FactRef(uid(), 'k', 'd' * 64),), (uid(),), False)
++
++    with pytest.raises(CoordinationError):
++        h.service.admit(reservation, h.preimage, h.grant)
++
++    # 2. row released to IDLE, all attempt identity cleared.
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.IDLE and not row.unresolved
++    assert row.attempt_id is None and row.holder is None
++    assert row.approval_id is None and row.pre_version_id is None
++    # 3. heads / observed_sequence preserved.
++    assert row.heads == c.Heads(None, None, None)
++    assert row.observed_sequence == before.observed_sequence
++
++    # 4. exactly one durable fact for this key names the rejected request.
++    facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows
++             if c.from_wire(c.OperationFact, r.payload).binding == h.binding
++             and c.from_wire(c.OperationFact, r.payload).request.idempotency_key == h.request.idempotency_key
++             and c.from_wire(c.OperationFact, r.payload).request.request_digest == h.request.request_digest]
++    assert len(facts) == 1
++    f = facts[0]
++    assert f.fact_kind == c.FactKind.OPERATION
++    assert f.status == c.FactStatus.CONFLICTED
++    assert f.attempt_id == reservation.fence.attempt_id
++    assert f.request == h.request
++
++    # 5. the rejected fence is dead.
++    with pytest.raises(CoordinationError):
++        h.service.renew(reservation.fence)
++    with pytest.raises(CoordinationError):
++        h.service.assert_owner(reservation.fence)
++
++    # 6. binding is not bricked: a fresh reserve succeeds.
++    h.request = c.RequestIdentity(uid(), 'key-fresh', 'a' * 64)
++    fresh = h.service.reserve(h.binding, h.request, h.executor)
++    assert isinstance(fresh, c.Reservation)
++
++    # 7. after expiry there is nothing to quarantine.
++    h.service.renew(fresh.fence)  # keep alive
++    row = h.store.read(h.binding.binding_id)
++    assert row.state != c.CoordinationState.QUARANTINED
++
++
++def test_drift_conflict_leaves_binding_observable_and_reusable(h):
++    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++    durable_facts(h)
++    enroll(h)
++    reservation = reserve(h)
++    # Reviewed-base drift: committed preimage differs from the reviewed base.
++    h.grant = replace(h.grant, expected_base_fingerprints=replace(
++        h.grant.expected_base_fingerprints, config='9' * 64))
++    with pytest.raises(CoordinationError):
++        h.service.admit(reservation, h.preimage, h.grant)
++
++    # observe_exclusively succeeds and yields a lease.
++    lease = h.service.observe_exclusively(h.binding, h.executor)
++    assert lease.observed_sequence == 1
++
++    # advance_heads records the external observation.
++    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
++    version_id = uid()
++    context = c.CaptureContext(h.binding, 'observer-1', h.clock.now(), 'open',
++        c.ActorContext('observer', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
++        attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
++    h.ledger.get_version.return_value = c.Version(version_id, snapshot, context)
++    heads = h.service.advance_heads(lease.fence, c.HeadUpdate(version_id, None, None, None))
++    assert heads == c.Heads(version_id, None, None)
++
++    # A new reserve + admit against the newly captured base succeeds.
++    h.request = c.RequestIdentity(uid(), 'key-reapply', 'a' * 64)
++    newfp = h.grant.expected_base_fingerprints
++    h.preimage = c.ObservationRef(version_id, h.binding.binding_id, 1,
++                                  newfp.state_digest, '5' * 64)
++    h.grant = replace(h.grant, request=h.request)
++    reservation2 = h.service.reserve(h.binding, h.request, h.executor)
++    claim = h.service.admit(reservation2, h.preimage, h.grant)
++    assert isinstance(claim, c.AdmissionClaim)
++
++
++def test_conflict_facts_carry_the_rejected_requests_own_identity(h):
++    from concurrent.futures import ThreadPoolExecutor
++    from threading import Barrier
++    durable_facts(h)
++    enroll(h)
++    reqs = [c.RequestIdentity(uid(), f'key-{i}', f'{i}' * 64) for i in (1, 2)]
++    execs = [replace(h.executor, principal_id=f'principal-{i}',
++                     execution_ref=f'job/{i}') for i in (1, 2)]
++    barrier = Barrier(2)
++    original = h.store.compare_and_swap
++
++    def race(*args, **kwargs):
++        barrier.wait(timeout=5)
++        return original(*args, **kwargs)
++
++    h.store.compare_and_swap = race
++
++    def run(i):
++        try:
++            return i, h.service.reserve(h.binding, reqs[i], execs[i])
++        except CoordinationError:
++            return i, None
++
++    with ThreadPoolExecutor(2) as pool:
++        results = dict(pool.map(lambda i: run(i), range(2)))
++    h.store.compare_and_swap = original  # race barrier is done; single-threaded now
++    winners = [(i, r) for i, r in results.items() if r is not None]
++    assert len(winners) == 1
++    win_i, winner = winners[0]
++    lose_i = 1 - win_i
++    winner_executor, loser_executor = execs[win_i], execs[lose_i]
++    loser_request = reqs[lose_i]
++    row = h.store.read(h.binding.binding_id)
++    assert row.attempt_id == winner.fence.attempt_id
++    assert row.holder == winner_executor.principal_id
++
++    all_facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
++    loser_facts = [f for f in all_facts if f.request == loser_request]
++    assert len(loser_facts) == 1
++    lf = loser_facts[0]
++    assert lf.actor.subject_id == loser_executor.principal_id
++    assert lf.requester_id == loser_executor.principal_id
++    assert lf.attempt_id != winner.fence.attempt_id
++    assert lf.approval_id is None and lf.pre_version_id is None
++    # No key collision; the loser's key is not ambiguous.
++    assert len({f.event_key for f in all_facts}) == len(all_facts)
++    assert h.facts.lookup_request(h.binding, loser_request.idempotency_key).ambiguous is False
++
++    # fact_kind participates in the key.
++    op_ref = h.service._fact(row, loser_request, c.FactStatus.CONFLICTED,
++                             kind=c.FactKind.OPERATION)
++    rc_ref = h.service._fact(row, loser_request, c.FactStatus.CONFLICTED,
++                             kind=c.FactKind.RECEIPT)
++    op_key = next(r.event_key for r in h.durable.state.rows
++                  if r.payload['event_id'] == op_ref.event_id)
++    rc_key = next(r.event_key for r in h.durable.state.rows
++                  if r.payload['event_id'] == rc_ref.event_id)
++    assert op_key != rc_key
++
++    # Key is stable across an unrelated CAS (renew bumps row_version).
++    reservation = c.Reservation(winner.fence, reqs[win_i], winner_executor, winner.lease_expires_at)
++    stable_req = c.RequestIdentity(uid(), 'key-stable', 'a' * 64)
++    r1 = h.service._fact(h.store.read(h.binding.binding_id), stable_req, c.FactStatus.CONFLICTED)
++    key1 = next(r.event_key for r in h.durable.state.rows if r.payload['event_id'] == r1.event_id)
++    h.service.renew(reservation.fence)
++    r2 = h.service._fact(h.store.read(h.binding.binding_id), stable_req, c.FactStatus.CONFLICTED)
++    key2 = next(r.event_key for r in h.durable.state.rows if r.payload['event_id'] == r2.event_id)
++    assert key1 == key2
++    # The winner still holds the row.
++    assert h.store.read(h.binding.binding_id).unresolved
++
++
+ def test_two_concurrent_reservations_have_exactly_one_winner(h):
+     from concurrent.futures import ThreadPoolExecutor
+     from threading import Barrier
+@@ -189,7 +800,15 @@ def test_admission_atomically_binds_key_digest_approval_and_preimage(h):
+             h.service.admit(reservation, h.preimage, bad)
+     assert h.store.compare_and_swap.call_count == 0
+     claim = h.service.admit(reservation, h.preimage, h.grant)
+-    assert h.store.compare_and_swap.call_count == 1
++    # The key/digest/approval/preimage binding is exactly ONE CAS (state=ADMITTED).
++    # BLOCK-10 adds a distinct post-admission CAS that only records the truthful
++    # approval_consumption_published column; it binds no admission fields.
++    admit_cas = [ca for ca in h.store.compare_and_swap.call_args_list
++                 if ca.kwargs.get('state') == c.CoordinationState.ADMITTED]
++    assert len(admit_cas) == 1
++    consumption_cas = [ca for ca in h.store.compare_and_swap.call_args_list
++                       if set(ca.kwargs) == {'approval_consumption_published'}]
++    assert h.store.compare_and_swap.call_count == len(admit_cas) + len(consumption_cas)
+     row = h.store.read(h.binding.binding_id)
+     assert (row.active_operation_id, row.idempotency_key, row.request_digest) == (
+         h.request.operation_id, h.request.idempotency_key, h.request.request_digest)
+@@ -355,6 +974,58 @@ def test_crashes_between_evidence_cas_consumption_patch_and_release_remain_safe(
+         assert any(r.payload['fact_kind'] == 'receipt' for r in h.durable.state.rows)
+ 
+ 
++def test_consumption_and_termination_columns_are_truthful(h):
++    from backend.tests.vc_fakes.stores import CrashBoundary
++    durable_facts(h)
++    enroll(h)
++    # 1. approval-bearing admit: column True and fact table agrees.
++    claim = admit(h)
++    row = h.store.read(h.binding.binding_id)
++    assert row.approval_consumption_published is True
++    assert h.facts.approval_use(h.binding, h.grant.approval_id).operation_ids == (
++        claim.request.operation_id,)
++
++    # 5. _release resets it.
++    complete(h, claim)
++    row = h.store.read(h.binding.binding_id)
++    assert row.approval_consumption_published is False and row.approval_id is None
++
++    # 2. approval-less case: never claims a consumption.
++    h.request = c.RequestIdentity(uid(), 'key-noapproval', 'a' * 64)
++    h.grant = replace(h.grant, request=h.request, approval_id=None, approval_digest=None)
++    reservation = reserve(h)
++    claim2 = h.service.admit(reservation, h.preimage, h.grant)
++    assert h.store.read(h.binding.binding_id).approval_consumption_published is False
++    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
++    # 4. checkpoint does not flip the column on its own.
++    original = h.store.compare_and_swap
++    seen = []
++    h.store.compare_and_swap = lambda *a, **k: (seen.append(k), original(*a, **k))[1]
++    h.service.checkpoint(claim2, send.stage, send)
++    h.store.compare_and_swap = original
++    assert h.store.read(h.binding.binding_id).approval_consumption_published is False
++    assert not any(k.get('approval_consumption_published') is True for k in seen)
++    # Release claim2 so the binding is free for case 3.
++    h.service.quarantine(claim2, 'test teardown')
++    h.store.state.rows[:] = [replace(h.store.state.rows[0],
++        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
++        approval_id=None, approval_consumption_published=False, mutation_stage=None,
++        checkpoint=None, active_operation_id=None, idempotency_key=None, request_digest=None,
++        lease_expires_at=None, admitted_at=None, pre_version_id=None, preimage_digest=None)]
++
++    # 3. crash-before-publish is distinguishable: (approval bound, not published).
++    h.request = c.RequestIdentity(uid(), 'key-crash', 'b' * 64)
++    h.grant = replace(h.grant, request=h.request, approval_id=uid(), approval_digest='7' * 64)
++    reservation = reserve(h)
++    h.durable.failures.inject(CrashBoundary('before-commit'))
++    with pytest.raises(CoordinationError):
++        h.service.admit(reservation, h.preimage, h.grant)
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.QUARANTINED
++    assert row.approval_consumption_published is False
++    assert row.approval_id == h.grant.approval_id
++
++
+ def test_checkpoint_is_monotonic_and_matching_get_cannot_finish_in_flight(h):
+     durable_facts(h)
+     enroll(h)
+diff --git a/backend/tests/test_vc_recovery.py b/backend/tests/test_vc_recovery.py
+index 74f0793..172d389 100644
+--- a/backend/tests/test_vc_recovery.py
++++ b/backend/tests/test_vc_recovery.py
+@@ -30,7 +30,83 @@ def test_expired_lease_quarantines_without_takeover(h, entry):
+         reserve(h)
+ 
+ 
+-def recovery_evidence(h, claim):
++@pytest.mark.parametrize('entry', ['reserve', 'observe_exclusively', 'advance_heads'])
++def test_expired_observation_lease_is_reclaimed_and_never_quarantines_binding(h, entry):
++    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++    enroll(h)
++    lease = h.service.observe_exclusively(h.binding, h.executor)
++    h.clock.advance(timedelta(seconds=61))
++    if entry == 'reserve':
++        h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
++        # reserve succeeded on the reclaimed binding; re-read after.
++    elif entry == 'observe_exclusively':
++        h.service.observe_exclusively(h.binding, h.executor)
++    else:  # advance_heads on the stale fence triggers _owned -> _expire
++        with pytest.raises(CoordinationError):
++            h.service.advance_heads(lease.fence, c.HeadUpdate(uid(), None, None, None))
++    row = h.store.read(h.binding.binding_id)
++    # The reclaim never quarantines; the entry point may have re-acquired the row.
++    assert row.quarantine_reason is None
++    assert row.state != c.CoordinationState.QUARANTINED
++    # 6. no QUARANTINED fact appended.
++    assert not any(call.args[0].status == c.FactStatus.QUARANTINED
++                   for call in h.facts.append.call_args_list)
++    # 5. the stale lease is dead.
++    with pytest.raises(CoordinationError):
++        h.service.assert_owner(lease.fence)
++
++
++def test_expired_observation_lease_full_reclaim_semantics(h):
++    enroll(h)
++    lease = h.service.observe_exclusively(h.binding, h.executor)
++    h.clock.advance(timedelta(seconds=61))
++    # Trigger reclaim via reserve, then inspect.
++    fresh = h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
++    row = h.store.read(h.binding.binding_id)
++    # observed_sequence preserved through the reclaim (was 1 from the lease).
++    assert row.observed_sequence == 1
++    assert row.heads == c.Heads(None, None, None)
++    # write admission survived; a reservation was granted.
++    assert isinstance(fresh, c.Reservation)
++    # a fresh observation lease bumps the sequence beyond the old one.
++    h.service.quarantine(fresh.fence, 'test teardown')
++    h.store.state.rows[:] = [replace(h.store.state.rows[0],
++        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
++        active_operation_id=None, idempotency_key=None, request_digest=None,
++        lease_expires_at=None, mutation_stage=None, checkpoint=None)]
++    newer = h.service.observe_exclusively(h.binding, h.executor)
++    assert newer.observed_sequence > lease.observed_sequence
++
++
++def test_reclaim_refuses_observing_row_that_carries_mutation_authority(h):
++    enroll(h)
++    lease = h.service.observe_exclusively(h.binding, h.executor)
++    row = h.store.read(h.binding.binding_id)
++    # Corrupt the row: OBSERVING but carrying an approval (mutation authority).
++    h.store.state.rows[:] = [replace(row, approval_id=uid())]
++    h.clock.advance(timedelta(seconds=61))
++    with pytest.raises(CoordinationError):
++        h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
++    after = h.store.read(h.binding.binding_id)
++    assert after.state == c.CoordinationState.OBSERVING and after.approval_id is not None
++
++
++def test_expired_admitted_lease_still_quarantines(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.clock.advance(timedelta(seconds=61))
++    with pytest.raises(CoordinationError):
++        reserve(h)
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.QUARANTINED
++    assert any(call.args[0].status == c.FactStatus.QUARANTINED
++               for call in h.facts.append.call_args_list)
++
++
++def recovery_evidence(h, claim, classification='read-only-presend'):
++    # BLOCK-11: recovery classification must equal the derived durable checkpoint
++    # classification. An admit+quarantine (no checkpoint) path derives 'read-only-presend'.
+     terminal = h.clock.now()
+     termination = c.TerminationEvidence(claim.attempt_id, h.executor.execution_ref,
+                                         'app-worker', terminal, (), 'a' * 64)
+@@ -38,7 +114,7 @@ def recovery_evidence(h, claim):
+                                      h.preimage.state_digest, 'b' * 64) for i in (1, 12, 23))
+     h.clock.advance(timedelta(seconds=30))
+     return c.RecoveryEvidence('VC/1.0', claim, termination, samples, 20.0,
+-                              'verified-lifetime-reference', 'observed-preimage', None, None, False)
++                              'verified-lifetime-reference', classification, None, None, False)
+ 
+ 
+ def test_matching_get_after_timeout_cannot_resolve_attempt(h):
+@@ -104,6 +180,204 @@ def test_recovery_needs_exact_attempt_termination_and_three_post_termination_rea
+         assert h.store.read(h.binding.binding_id).unresolved
+ 
+ 
++@pytest.mark.parametrize('stage', ['never-admitted', 'admitted-presend',
++                                    'config-in-flight', 'config-observed'])
++def test_recovery_classification_is_derived_from_durable_state(h, stage):
++    durable_facts(h)
++    enroll(h)
++    expected = {
++        'never-admitted': 'read-only-never-admitted',
++        'admitted-presend': 'read-only-presend',
++        'config-in-flight': 'read-only-possible-send',
++        'config-observed': 'read-only-unless-next-stage-proven-unsent',
++    }[stage]
++    if stage == 'never-admitted':
++        reservation = reserve(h)
++        fence = reservation.fence
++        h.service.quarantine(reservation.fence, 'worker lost')
++    else:
++        claim = admit(h)
++        if stage in {'config-in-flight', 'config-observed'}:
++            h.service.checkpoint(claim, c.PatchStage.CONFIG_IN_FLIGHT,
++                c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None))
++        if stage == 'config-observed':
++            h.service.checkpoint(claim, c.PatchStage.CONFIG_OBSERVED,
++                c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED, h.clock.now(), 'a' * 64, h.preimage))
++        fence = claim
++        h.service.quarantine(claim, 'worker lost')
++
++    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
++
++    def evidence_with(classification):
++        ev = recovery_evidence(h, fence, classification)
++        h.termination.for_attempt.return_value = ev.termination
++        return ev
++
++    # 1/2. a wrong (mismatched) classification is rejected; row stays quarantined.
++    wrong = 'read-only-possible-send' if expected != 'read-only-possible-send' \
++        else 'read-only-presend'
++    with pytest.raises(CoordinationError, match='classification'):
++        h.service.recover(h.binding, evidence_with(wrong))
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.QUARANTINED and row.unresolved
++    assert not any(r.payload['fact_kind'] == 'recovery' for r in h.durable.state.rows)
++
++    # 4/5. the diff's free-form value and blanks are rejected.
++    for bad in ('observed-preimage', '', '   '):
++        with pytest.raises(CoordinationError):
++            h.service.recover(h.binding, evidence_with(bad))
++
++    # 3/6. the correct derived value (even with whitespace) succeeds and the fact
++    # records the DERIVED string.
++    result = h.service.recover(h.binding, evidence_with('  ' + expected + '  '))
++    assert not result.unresolved
++    recov = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows
++             if r.payload['fact_kind'] == 'recovery']
++    assert recov and recov[-1].evidence.checkpoint_classification == expected
++
++
++@pytest.mark.parametrize('path', ['automatic', 'human'])
++def test_recovery_closes_the_operation_and_forbids_a_second_admission(h, path):
++    from backend.services.version_control.coordination import ExistingReceipt
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'unknown send outcome')
++    evidence = recovery_evidence(h, claim)
++    h.termination.for_attempt.return_value = evidence.termination
++    if path == 'automatic':
++        h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
++    else:
++        evidence = replace(evidence, maximum_request_lifetime_seconds=None,
++            lifetime_bound_reference=None, human_authorization_reference='audited-operator/123',
++            human_reason='Orphan inspection complete; reconcile under new governed request',
++            residual_risk_acknowledged=True)
++        h.authorize_human_recovery.return_value = True
++
++    result = h.service.recover(h.binding, evidence)
++    # 1. baseline.
++    assert result.status == c.OperationStatus.CONFLICTED and not result.unresolved
++
++    # 2/3. both a RECOVERY and a RECEIPT fact exist for the key, CONFLICTED.
++    hist = h.facts.lookup_request(h.binding, claim.request.idempotency_key)
++    assert not hist.ambiguous
++    recov = [f for f in hist.facts if f.fact_kind == c.FactKind.RECOVERY]
++    receipts = [f for f in hist.facts if f.fact_kind == c.FactKind.RECEIPT]
++    assert len(recov) == 1 and len(receipts) == 1
++    for f in (recov[0], receipts[0]):
++        assert f.status == c.FactStatus.CONFLICTED
++        assert f.attempt_id == claim.attempt_id
++        assert f.post_version_id is None
++    assert recov[0].event_key != receipts[0].event_key
++
++    # 4/5. the operation cannot be admitted again; reserve must not return a
++    # Reservation, and after BLOCK-8 a CONFLICTED receipt is a conflict (not a
++    # completion), so reserve raises CoordinationError and releases the row.
++    second = replace(h.request, operation_id=uid())
++    with pytest.raises(CoordinationError) as caught:
++        h.service.reserve(h.binding, second, h.executor)
++    assert not isinstance(caught.value, ExistingReceipt)
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.IDLE and not row.unresolved
++
++    # 6. genuinely new work (different idempotency key) still admits.
++    h.request = c.RequestIdentity(uid(), 'key-new', 'a' * 64)
++    h.grant = replace(h.grant, request=h.request, approval_id=uid(), approval_digest='7' * 64)
++    fresh_claim = admit(h)
++    assert isinstance(fresh_claim, c.AdmissionClaim)
++
++
++def test_recovery_publication_failure_keeps_row_quarantined(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'unknown send outcome')
++    evidence = recovery_evidence(h, claim)
++    h.termination.for_attempt.return_value = evidence.termination
++    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
++    # 7. read-back after the appends fails -> stays QUARANTINED.
++    real_append = h.facts.append.side_effect
++    count = {'receipt_seen': False}
++
++    def append_then_break(fact):
++        ref = real_append(fact)
++        if fact.fact_kind == c.FactKind.RECEIPT:
++            h.facts.lookup_request.side_effect = OSError('receipt read-back unavailable')
++        return ref
++
++    h.facts.append.side_effect = append_then_break
++    with pytest.raises(CoordinationError):
++        h.service.recover(h.binding, evidence)
++    assert h.store.read(h.binding.binding_id).state == c.CoordinationState.QUARANTINED
++
++
++def test_recovery_persists_validated_termination_evidence_before_releasing(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'unknown send outcome')
++    evidence = recovery_evidence(h, claim)
++    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
++    h.termination.for_attempt.return_value = evidence.termination
++
++    # 6. evidence is durable at the moment the recovery fact is appended.
++    seen = {}
++    real_append = h.facts.append.side_effect
++
++    def capture(fact):
++        if fact.fact_kind == c.FactKind.RECOVERY:
++            seen['at_append'] = h.store.read(h.binding.binding_id).termination_evidence
++        return real_append(fact)
++
++    h.facts.append.side_effect = capture
++    result = h.service.recover(h.binding, evidence)
++    assert not result.unresolved
++    assert c.to_wire(seen['at_append']) == c.to_wire(evidence.termination)
++    # 9. released row clears the column; the durable RECOVERY fact persists.
++    assert h.store.read(h.binding.binding_id).termination_evidence is None
++    assert any(r.payload['fact_kind'] == 'recovery' for r in h.durable.state.rows)
++
++
++def test_recovery_does_not_persist_invalid_termination(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'unknown send outcome')
++    evidence = recovery_evidence(h, claim)
++    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
++    h.termination.for_attempt.return_value = evidence.termination
++    # 7. invalid termination never reaches the column.
++    bad = replace(evidence, termination=replace(evidence.termination, attempt_id=uid()))
++    with pytest.raises(CoordinationError):
++        h.service.recover(h.binding, bad)
++    assert h.store.read(h.binding.binding_id).termination_evidence is None
++
++
++def test_recovery_crash_between_audit_and_release_keeps_termination_durable(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'unknown send outcome')
++    evidence = recovery_evidence(h, claim)
++    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
++    h.termination.for_attempt.return_value = evidence.termination
++    # 8. crash between recovery append and release leaves evidence durable.
++    real_append = h.facts.append.side_effect
++
++    def append_then_break(fact):
++        ref = real_append(fact)
++        if fact.fact_kind == c.FactKind.RECOVERY:
++            h.facts.lookup_request.side_effect = OSError('audit read-back unavailable')
++        return ref
++
++    h.facts.append.side_effect = append_then_break
++    with pytest.raises(CoordinationError):
++        h.service.recover(h.binding, evidence)
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.QUARANTINED
++    assert c.to_wire(row.termination_evidence) == c.to_wire(evidence.termination)
++
++
+ @pytest.mark.parametrize('missing', [None, 'authorization', 'reason', 'risk', 'trusted-policy'])
+ def test_unknown_request_lifetime_disables_auto_clear(h, missing):
+     durable_facts(h)

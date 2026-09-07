@@ -1,0 +1,1347 @@
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index b77e451..df1dbd6 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -13,6 +13,7 @@ import { AdminDashboard } from "@/pages/AdminDashboard"
+ import { HowItWorks } from "@/pages/HowItWorks"
+ import { CreateAgentChat } from "@/components/CreateAgentChat"
+ import { getSpaceDetail } from "@/lib/api"
++import { VersionControlWorkbench } from "@/pages/VersionControlWorkbench"
+ import {
+   LIST_ROUTE,
+   buildAppRouteUrl,
+@@ -62,6 +63,13 @@ function stringField(value: unknown): string | undefined {
+ }
+ 
+ export default function App() {
++  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === "version-control") {
++    return <VersionControlWorkbench />
++  }
++  return <WorkbenchApp />
++}
++
++function WorkbenchApp() {
+   useTheme()
+   const [route, setRoute] = useState<AppRoute>(initialRoute)
+   const [detailState, setDetailState] = useState<DetailState | null>(null)
+@@ -175,6 +183,7 @@ export default function App() {
+ 
+           {/* Nav links */}
+           <nav className="flex items-center gap-1">
++            <a href="?view=version-control" className="px-3 py-1.5 rounded-lg text-sm font-medium text-muted hover:text-secondary">Version Control demo</a>
+             <button
+               onClick={handleNavList}
+               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+diff --git a/frontend/src/components/version-control/approvals.test.tsx b/frontend/src/components/version-control/approvals.test.tsx
+new file mode 100644
+index 0000000..0efe697
+--- /dev/null
++++ b/frontend/src/components/version-control/approvals.test.tsx
+@@ -0,0 +1,18 @@
++import { renderToStaticMarkup } from 'react-dom/server'
++import { expect, it, vi } from 'vitest'
++import { ApprovalDetails, voteApproval } from './approvals'
++import { approvalFixture } from './fixtures'
++import { VersionControlApi } from '@/lib/version-control-api'
++
++it('approval_ui_shows_bound_digests_distinct_approvers_and_expiry', async () => {
++  const vote = { actor_id: 'human-1', decision: 'approve' as const, recorded_at: '2026-09-07T01:00:00Z', target_group_eligible: true }
++  const record = { ...approvalFixture, votes: [vote, vote, { ...vote, actor_id: 'demo-requester' }] }
++  const html = renderToStaticMarkup(<ApprovalDetails record={record} />)
++  for (const text of ['raw-3', 'rendered-3', 'validation-1', 'benchmark-policy-1', 'preflight-1', '1 distinct', '2026-09-07T23:00:00Z', 'Base changed after capture', 'neither requester nor deployer', 'Server authorization']) expect(html).toContain(text)
++  const transport = vi.fn(async () => new Response(JSON.stringify(record)))
++  await voteApproval(new VersionControlApi(transport), record, 'approve', 'vote-intent')
++  expect(transport.mock.calls[0][0]).toBe('/api/version-control/approvals/demo-approval/votes')
++  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual({ decision: 'approve' })
++  await expect(voteApproval(new VersionControlApi(transport), { ...record, allowed_actions: [] }, 'approve', 'denied')).rejects.toThrow('not allowed')
++  expect(transport).toHaveBeenCalledTimes(1)
++})
+diff --git a/frontend/src/components/version-control/approvals.tsx b/frontend/src/components/version-control/approvals.tsx
+new file mode 100644
+index 0000000..1c741e6
+--- /dev/null
++++ b/frontend/src/components/version-control/approvals.tsx
+@@ -0,0 +1,65 @@
++import { useEffect, useState } from 'react'
++import type { VersionControlApi } from '@/lib/version-control-api'
++import { createMutationIntent } from '@/lib/version-control-api'
++import type { ApprovalInputs, ApprovalRecord } from '@/types/version-control'
++
++export function ApprovalDetails({ record }: { record: ApprovalRecord }) {
++  const approvers = new Set(record.votes.filter(vote => vote.decision === 'approve' && vote.actor_id !== record.inputs.requester_id).map(vote => vote.actor_id))
++  return <section aria-label="Approval evidence">
++    <h3>Approval {record.approval_id}</h3>
++    <p>Server authorization: {record.valid ? 'Valid approval' : 'Not approved / invalidated'}</p>
++    <p>{approvers.size} distinct non-requester approvers recorded. Production requires two distinct humans, neither requester nor deployer; at least one target-group eligible. Server revalidates eligibility at execution.</p>
++    <p>Expires: <time>{record.inputs.expires_at}</time> · Maximum production lifetime: 24 hours.</p>
++    <p>Approval digest: {record.approval_digest ?? 'Not yet bound'}</p>
++    <ul>{record.invalidation_reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
++    <h4>Bound inputs and policy digests</h4><pre>{JSON.stringify(record.inputs, null, 2)}</pre>
++    <h4>Vote audit</h4><ul>{record.votes.map((vote, index) => <li key={index}>{vote.actor_id}: {vote.decision} · {vote.recorded_at} · Target-group eligible: {vote.target_group_eligible ? 'yes' : 'no'}</li>)}</ul>
++  </section>
++}
++export function voteApproval(api: VersionControlApi, record: ApprovalRecord, decision: 'approve' | 'reject', key: string) {
++  if (!record.allowed_actions.includes('vote')) return Promise.reject(new Error('Voting is not allowed by the server.'))
++  return api.vote(record.approval_id, decision, key)
++}
++export function ApprovalsPanel({ api, approvalId, inputs, disabled, onApproval, onRecord }: {
++  api: VersionControlApi; approvalId: string; inputs: ApprovalInputs; disabled: boolean
++  onApproval: (approvalId: string) => void; onRecord: (record: ApprovalRecord) => void
++}) {
++  const [record, setRecord] = useState<ApprovalRecord | null>(null)
++  const [busy, setBusy] = useState(false)
++  const [error, setError] = useState('')
++  const [intent] = useState(createMutationIntent)
++  useEffect(() => {
++    let active = true
++    setRecord(null)
++    if (!approvalId) return
++    setBusy(true)
++    api.approval(approvalId).then(result => { if (active) { setRecord(result); onRecord(result) } })
++      .catch(error => { if (active) setError(String(error)) })
++      .finally(() => { if (active) setBusy(false) })
++    return () => { active = false }
++  }, [api, approvalId, onRecord])
++  const request = async () => {
++    if (busy || disabled) return
++    setBusy(true)
++    try { const result = await api.requestApproval(inputs, intent.key({ action: 'request', inputs })); onApproval(result.approval_id) }
++    catch (error) { setError(String(error)) }
++    finally { setBusy(false) }
++  }
++  const vote = async (decision: 'approve' | 'reject') => {
++    if (!record || busy || disabled) return
++    setBusy(true)
++    try { const result = await voteApproval(api, record, decision, intent.key({ approvalId: record.approval_id, decision })); setRecord(result); onRecord(result) }
++    catch (error) { setError(String(error)) }
++    finally { setBusy(false) }
++  }
++  return <section aria-label="Approvals and audit">
++    <h3>Approvals and audit</h3>
++    {!record && <p>No approval loaded. Request a new approval bound to the reviewed inputs.</p>}
++    <button disabled={disabled || busy || Boolean(error)} onClick={() => void request()}>Request fresh approval</button>
++    {record && <ApprovalDetails record={record} />}
++    <button disabled={disabled || busy || !record?.allowed_actions.includes('vote') || Boolean(error)} onClick={() => void vote('approve')}>Approve as authenticated user</button>
++    <button disabled={disabled || busy || !record?.allowed_actions.includes('vote') || Boolean(error)} onClick={() => void vote('reject')}>Reject as authenticated user</button>
++    {busy && <p role="status">Loading approval evidence…</p>}
++    {error && <p role="alert">{error} Approval remains unverified.</p>}
++  </section>
++}
+diff --git a/frontend/src/components/version-control/demo-api.ts b/frontend/src/components/version-control/demo-api.ts
+new file mode 100644
+index 0000000..c1d22cb
+--- /dev/null
++++ b/frontend/src/components/version-control/demo-api.ts
+@@ -0,0 +1,126 @@
++import { VersionControlApi } from '@/lib/version-control-api'
++import type { ApprovalInputs, ApprovalRecord, BindingStatus, DeploymentReceipt, Operation, OperationStatus, ReleaseCommand, VersionSummary } from '@/types/version-control'
++import { approvalFixture, bindingFixture, receiptFixture, versionFixture } from './fixtures'
++
++const statuses: BindingStatus[] = [
++  bindingFixture,
++  { ...bindingFixture, binding_id: 'demo-quarantined', quarantined: true, allowed_actions: [], unresolved_operation_id: 'quarantined-operation' },
++  { ...bindingFixture, binding_id: 'demo-conflicted', drift: 'conflicted', allowed_actions: [] },
++  { ...bindingFixture, binding_id: 'demo-unknown', drift: 'unknown', heads: { observed: null, approved: null, deployed: null }, allowed_actions: [] },
++  { ...bindingFixture, binding_id: 'demo-unreachable', drift: 'unreachable', stale: true, allowed_actions: [] },
++  { ...bindingFixture, binding_id: 'demo-unverified', drift: 'applied_unverified', unresolved_operation_id: 'unverified-operation', allowed_actions: [] },
++  { ...bindingFixture, binding_id: 'demo-partial', unresolved_operation_id: 'partial-operation', allowed_actions: [] },
++  { ...bindingFixture, binding_id: 'demo-busy', allowed_actions: [] },
++  { ...bindingFixture, binding_id: 'demo-history-unreachable', drift: 'unreachable', stale: true, allowed_actions: [] },
++]
++
++export function createDemoTransport(): typeof fetch {
++  const approvals = new Map<string, ApprovalRecord>([[approvalFixture.approval_id, structuredClone(approvalFixture)]])
++  const operations = new Map<string, Operation>()
++  const releases = new Map<string, { selection: ReleaseCommand; validated: boolean; receipt: DeploymentReceipt | null }>()
++  const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
++  const failure = (status: number, message: string) => json({ code: `DEMO_${status}`, message, stale: true, retryable: false }, status)
++  const operation = (status: OperationStatus, evidence: string) => {
++    const result: Operation = { operation_id: `demo-operation-${operations.size + 1}`, status, job_run_id: 'demo-job', checkpoints: ['Preimage persisted', evidence], audit: ['Fixture target executor; no real workspace execution.'], receipt_references: [] }
++    operations.set(result.operation_id, result)
++    return { ...result, status: 'requested' }
++  }
++  const approved = (id: string, bindingId: string) => {
++    const record = approvals.get(id)
++    return record?.valid && record.inputs.target_binding === bindingId && Date.parse(record.inputs.expires_at) > Date.now() ? record : null
++  }
++  return async (input, init) => {
++    init?.signal?.throwIfAborted()
++    const url = new URL(String(input), 'https://vc-demo.invalid')
++    const path = url.pathname.replace('/api/version-control', '')
++    if (!url.pathname.startsWith('/api/version-control/')) return failure(404, 'Only the VC/1.0 fixture surface is available.')
++    const isCommand = init?.method === 'POST'
++    if (isCommand && !new Headers(init.headers).get('Idempotency-Key')) return failure(422, 'Idempotency-Key required.')
++    const body: Record<string, unknown> = init?.body ? JSON.parse(String(init.body)) : {}
++    const bindingId = decodeURIComponent(path.split('/')[2] ?? '')
++    const status = statuses.find(status => status.binding_id === bindingId)
++    const history: VersionSummary[] = [
++      { ...versionFixture, binding_id: bindingId },
++      { ...versionFixture, binding_id: bindingId, version_id: 'approved-2', origin: 'optimizer', optimizer_run_id: 'demo-run-2', champion_id: 'champion-2', parent_version_id: 'deployed-1' },
++      { ...versionFixture, binding_id: bindingId, version_id: 'deployed-1', origin: 'workbench', parent_version_id: null },
++    ]
++    if (path === '/overview' && !isCommand) {
++      const offset = Number(url.searchParams.get('cursor') ?? 0)
++      const size = Math.min(3, Number(url.searchParams.get('limit') ?? 25))
++      return json({ items: statuses.slice(offset, offset + size), next_cursor: offset + size < statuses.length ? String(offset + size) : null })
++    }
++    if (path.startsWith('/bindings/') && !status) return failure(404, 'Binding is not in this demo.')
++    if (path.endsWith('/status')) return json(status)
++    if (path.endsWith('/observe') && isCommand) {
++      if (status?.stale) return failure(503, 'Snapshot persistence unavailable; retained history is stale.')
++      return json({ status, captured_version: status?.heads.observed ? history[0] : null, busy: bindingId === 'demo-busy' })
++    }
++    if (path.endsWith('/versions')) {
++      if (bindingId === 'demo-history-unreachable') return failure(503, 'History storage unreachable.')
++      const offset = Number(url.searchParams.get('cursor') ?? 0)
++      return json({ items: history.slice(offset, offset + 2), next_cursor: offset === 0 ? '2' : null })
++    }
++    if (path.includes('/versions/')) {
++      const version = history.find(version => version.version_id === decodeURIComponent(path.split('/').at(-1) ?? ''))
++      return version ? json(version) : failure(404, 'Version unavailable.')
++    }
++    if (path.endsWith('/diff')) return json({ comparison: status?.stale ? 'unknown' : 'known', items: status?.stale ? [] : [{ category: 'sql', path: 'example_queries/1', change: 'modified', before: 'SELECT old_column FROM sales', after: 'SELECT new_column FROM sales', review_required: true }] })
++    if ((path.endsWith('/restore') || path.endsWith('/reconcile')) && isCommand) {
++      if (status?.quarantined || status?.unresolved_operation_id) return failure(423, 'Quarantined / unresolved operation. Inspect evidence; no replay.')
++      if (status?.stale) return failure(503, 'Coordination unavailable.')
++      if (status?.drift === 'conflicted' || body.binding_revision !== status?.binding_revision || JSON.stringify(body.expected_base) !== JSON.stringify(versionFixture.fingerprints)) return failure(409, 'Reviewed base conflict; preserved external history.')
++      if (body.action !== 'acknowledge' && !approved(String(body.approval_id), bindingId)) return failure(409, 'Fresh binding-local approval required.')
++      return json(operation('confirmed', body.action === 'acknowledge' ? 'Divergence acknowledged; heads unchanged.' : 'Demo read-back verified; projection remains an illustrative fixture.'), 202)
++    }
++    if (path === '/approvals' && isCommand) {
++      const inputs: ApprovalInputs = JSON.parse(String(init?.body))
++      const approvalId = `demo-approval-${approvals.size + 1}`
++      const record: ApprovalRecord = { approval_id: approvalId, inputs, valid: false, approval_digest: null, invalidation_reasons: [], allowed_actions: ['vote'], votes: [{ actor_id: 'demo-reviewer-one', decision: 'approve', recorded_at: new Date().toISOString(), target_group_eligible: true }] }
++      approvals.set(approvalId, record)
++      return json({ approval_id: approvalId, inputs })
++    }
++    if (path.startsWith('/approvals/')) {
++      const approvalId = decodeURIComponent(path.split('/')[2])
++      const record = approvals.get(approvalId)
++      if (!record) return failure(404, 'Approval unavailable.')
++      if (path.endsWith('/votes') && isCommand) {
++        if (Object.keys(body).some(key => key !== 'decision') || !['approve', 'reject'].includes(String(body.decision))) return failure(422, 'A vote accepts a decision only; actor comes from authentication.')
++        record.votes = [...record.votes.filter(vote => vote.actor_id !== 'demo-reviewer-two'), { actor_id: 'demo-reviewer-two', decision: body.decision as 'approve' | 'reject', recorded_at: new Date().toISOString(), target_group_eligible: false }]
++        record.valid = body.decision === 'approve' && Date.parse(record.inputs.expires_at) > Date.now() && record.invalidation_reasons.length === 0
++        record.approval_digest = record.valid ? 'demo-bound-approval-digest' : null
++      }
++      return json(record)
++    }
++    if (path === '/releases' && isCommand) {
++      if (body.target_binding !== 'demo-target' || body.mapping_digest !== 'mapping-1' || body.policy !== 'production') return failure(422, 'Use pre-enrolled demo-target, immutable mapping-1 and production policy.')
++      const releaseId = `demo-release-${releases.size + 1}`
++      const selection: ReleaseCommand = JSON.parse(String(init?.body))
++      releases.set(releaseId, { selection, validated: false, receipt: null })
++      return json({ ...operation('confirmed', 'Demo package prepared'), release_id: releaseId }, 202)
++    }
++    if (path.startsWith('/releases/')) {
++      const releaseId = decodeURIComponent(path.split('/')[2])
++      const release = releases.get(releaseId)
++      if (!release) return failure(404, 'Release unavailable.')
++      if (path.endsWith('/validate') && isCommand) { release.validated = true; return json(operation('confirmed', 'Mapping and preflight evidence validated'), 202) }
++      if (path.endsWith('/promote') && isCommand) {
++        const approval = approved(String(body.approval_id), release.selection.target_binding)
++        if (!release.validated || !approval || approval.inputs.mapping_digest !== release.selection.mapping_digest || approval.inputs.source_version_id !== release.selection.source_version_id) return failure(409, 'Release requires validated mapping and matching target-local approval.')
++        const handle = operation('confirmed', 'Rendered target read-back verified')
++        release.receipt = { ...receiptFixture, release_id: releaseId, operation_id: handle.operation_id, target_binding: release.selection.target_binding, approval_id: approval.approval_id, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, status: 'confirmed', observed_fingerprints: receiptFixture.rendered_fingerprints, post_version_id: 'demo-target-after', compensation_operation_id: null }
++        return json(handle, 202)
++      }
++      if (path.endsWith('/receipt')) return release.receipt ? json(release.receipt) : json({ operation_id: releaseId, status: 'requested', job_run_id: null }, 202)
++    }
++    if (path.startsWith('/operations/')) {
++      const operationId = decodeURIComponent(path.split('/')[2])
++      const stored = operations.get(operationId)
++      if (stored) return json(stored)
++      const status: OperationStatus = operationId === 'partial-operation' ? 'applied_partial' : operationId === 'unverified-operation' ? 'applied_unverified' : 'quarantined'
++      return json({ operation_id: operationId, status, job_run_id: 'demo-job', checkpoints: ['Description write incomplete or ambiguous create response'], audit: ['Operator must inspect persisted evidence; no blind retry.'], receipt_references: ['demo-partial-receipt'] })
++    }
++    return failure(404, 'This fixture route is unavailable; no network fallback.')
++  }
++}
++export const demoTransport = createDemoTransport()
++export const demoApi = new VersionControlApi(demoTransport)
+diff --git a/frontend/src/components/version-control/diff.test.tsx b/frontend/src/components/version-control/diff.test.tsx
+new file mode 100644
+index 0000000..4c99baa
+--- /dev/null
++++ b/frontend/src/components/version-control/diff.test.tsx
+@@ -0,0 +1,14 @@
++import { renderToStaticMarkup } from 'react-dom/server'
++import { expect, it } from 'vitest'
++import { SemanticDiffView } from './diff'
++
++it('semantic_diff_groups_changes_and_flags_manual_sql_review', () => {
++  const html = renderToStaticMarkup(<SemanticDiffView diff={{ comparison: 'known', items: [
++    { category: 'sql', path: 'queries/1', change: 'modified', before: 'select 1', after: 'select 2', review_required: true },
++    { category: 'columns', path: 'sales/id', change: 'added', before: null, after: 'id', review_required: false },
++  ] }} />)
++  for (const text of ['sql', 'columns', 'Manual SQL review required', 'select 1', 'select 2', 'sales/id']) expect(html).toContain(text)
++  const unknown = renderToStaticMarkup(<SemanticDiffView diff={{ comparison: 'unknown', items: [] }} />)
++  expect(unknown).toContain('Unknown comparison')
++  expect(unknown).not.toContain('No changes')
++})
+diff --git a/frontend/src/components/version-control/diff.tsx b/frontend/src/components/version-control/diff.tsx
+new file mode 100644
+index 0000000..f5c6326
+--- /dev/null
++++ b/frontend/src/components/version-control/diff.tsx
+@@ -0,0 +1,17 @@
++import type { SemanticDiff } from '@/types/version-control'
++export function SemanticDiffView({ diff }: { diff: SemanticDiff }) {
++  if (diff.comparison === 'unknown') return <p role="status">Unknown comparison — evidence is unavailable; not proof of equality.</p>
++  const categories = [...new Set(diff.items.map(item => item.category))]
++  return <section aria-label="Semantic diff">
++    <h3>Semantic diff</h3>
++    {!diff.items.length && <p>No changes in this comparison.</p>}
++    {categories.map(category => <section key={category} aria-label={category}>
++      <h4>{category}</h4>
++      {diff.items.filter(item => item.category === category).map((item, index) => <article key={`${item.path}-${index}`}>
++        <h5>{item.path} · {item.change}</h5>
++        {item.review_required && <p role="note">{category === 'sql' ? 'Manual SQL review required' : 'Manual review required'}</p>}
++        <dl><dt>Before</dt><dd><pre>{JSON.stringify(item.before, null, 2)}</pre></dd><dt>After</dt><dd><pre>{JSON.stringify(item.after, null, 2)}</pre></dd></dl>
++      </article>)}
++    </section>)}
++  </section>
++}
+diff --git a/frontend/src/components/version-control/fixtures.ts b/frontend/src/components/version-control/fixtures.ts
+new file mode 100644
+index 0000000..c3b4057
+--- /dev/null
++++ b/frontend/src/components/version-control/fixtures.ts
+@@ -0,0 +1,36 @@
++import type { ApprovalInputs, ApprovalRecord, BindingStatus, DeploymentReceipt, Fingerprints, VersionSummary } from '@/types/version-control'
++
++export const fingerprints: Fingerprints = { config: 'config-3', benchmark: 'benchmark-1', metadata: 'metadata-2', canonicalizer_version: 'VC/1.0' }
++export const bindingFixture: BindingStatus = {
++  binding_id: 'demo-binding', binding_revision: 3,
++  heads: { observed: 'external-3', approved: 'approved-2', deployed: 'deployed-1' },
++  drift: 'diverged', quarantined: false, unresolved_operation_id: null,
++  observed_at: '2026-09-07T00:00:00Z', projection_as_of: '2026-09-07T00:00:00Z', stale: false,
++  allowed_actions: ['restore', 'adopt', 'reapply', 'acknowledge', 'promote'], reasons: ['External changes captured; approval required'],
++}
++export const versionFixture: VersionSummary = {
++  version_id: 'external-3', binding_id: 'demo-binding', observed_at: '2026-09-07T00:00:00Z', origin: 'external',
++  observed_by: 'capturing-user', parent_version_id: 'approved-2', restored_from_version_id: null,
++  fingerprints, optimizer_run_id: null, champion_id: null,
++}
++export const approvalInputsFixture: ApprovalInputs = {
++  schema_version: 'VC/1.0', operation_id: 'demo-operation', operation_type: 'adopt', source_version_id: 'external-3',
++  raw_source_digest: 'raw-3', source_fingerprints: fingerprints, rendered_target_digest: 'rendered-3',
++  canonicalizer_version: 'VC/1.0', target_binding: 'demo-binding', expected_base_fingerprints: fingerprints,
++  validation_policy_digest: 'validation-1', benchmark_policy_digest: 'benchmark-policy-1', preflight_evidence_digest: 'preflight-1',
++  thresholds: { minimum_accuracy: 0.9 }, requester_id: 'demo-requester', recovery_policy: 'quarantine', expires_at: '2026-09-07T23:00:00Z',
++}
++export const approvalFixture: ApprovalRecord = {
++  approval_id: 'demo-approval', inputs: approvalInputsFixture, approval_digest: 'approval-digest-1', valid: false,
++  invalidation_reasons: ['Base changed after capture'], allowed_actions: ['vote'], votes: [],
++}
++export const receiptFixture: DeploymentReceipt = {
++  schema_version: 'VC/1.0', release_id: 'demo-release', operation_id: 'demo-promotion', target_binding: 'demo-target',
++  attempt_id: 'attempt-1', generation: 1, coordination_backend: 'delta', approval_id: 'demo-approval', approval_digest: 'approval-digest-1',
++  source_version_id: 'external-3', package_digest: 'package-1', mapping_digest: 'mapping-1',
++  intended_fingerprints: fingerprints, rendered_fingerprints: { ...fingerprints, config: 'rendered-config' },
++  observed_fingerprints: { ...fingerprints, config: 'partial-config' }, pre_version_id: 'target-before', post_version_id: null,
++  transformer_version: 'transformer-1', canonicalizer_version: 'VC/1.0', executor_id: 'target-executor', job_run_id: 'target-job',
++  validation_evidence_digest: 'validation-evidence', benchmark_evidence_digest: 'benchmark-evidence', status: 'applied_partial',
++  compensation_operation_id: 'compensation-1', recorded_at: '2026-09-07T01:00:00Z',
++}
+diff --git a/frontend/src/components/version-control/history.test.tsx b/frontend/src/components/version-control/history.test.tsx
+new file mode 100644
+index 0000000..f39c687
+--- /dev/null
++++ b/frontend/src/components/version-control/history.test.tsx
+@@ -0,0 +1,10 @@
++import { renderToStaticMarkup } from 'react-dom/server'
++import { expect, it, vi } from 'vitest'
++import { History } from './history'
++import { versionFixture } from './fixtures'
++
++it('history_shows_origin_actor_lineage_and_optimizer_drillthrough', () => {
++  const html = renderToStaticMarkup(<History page={{ items: [{ ...versionFixture, origin: 'optimizer', optimizer_run_id: 'run/42', champion_id: 'champion-7', restored_from_version_id: 'original-1' }], next_cursor: 'next' }} onNext={vi.fn()} onSelect={vi.fn()} onCompare={vi.fn()} />)
++  for (const text of ['optimizer', 'capturing-user', 'approved-2', 'original-1', 'champion-7', 'run%2F42', 'Compare versions', 'Next history page', 'external-3']) expect(html).toContain(text)
++  expect(html).not.toContain('Version 3')
++})
+diff --git a/frontend/src/components/version-control/history.tsx b/frontend/src/components/version-control/history.tsx
+new file mode 100644
+index 0000000..5a02792
+--- /dev/null
++++ b/frontend/src/components/version-control/history.tsx
+@@ -0,0 +1,25 @@
++import { useState } from 'react'
++import type { VersionPage, VersionSummary } from '@/types/version-control'
++
++interface HistoryProps {
++  page: VersionPage; loading?: boolean; onNext: () => void
++  onSelect: (version: VersionSummary) => void; onCompare: (left: string, right: string) => void
++}
++export function History({ page, loading, onNext, onSelect, onCompare }: HistoryProps) {
++  const [left, setLeft] = useState('')
++  const [right, setRight] = useState('')
++  return <section aria-label="Captured history">
++    <h3>Captured history</h3>
++    {!page.items.length && <p>No captured versions.</p>}
++    <ol>{page.items.map(version => <li key={version.version_id} className="border-b border-border py-3">
++      <button onClick={() => onSelect(version)} title={version.version_id}>{version.version_id}</button>
++      <p>{version.origin} · Observed by {version.observed_by} · <time>{version.observed_at}</time></p>
++      <p>Parent: {version.parent_version_id ?? 'None'} · Restored from: {version.restored_from_version_id ?? 'None'}</p>
++      {version.optimizer_run_id && <p><a href={`?view=detail&space=${encodeURIComponent(version.binding_id)}&tab=optimize&run=${encodeURIComponent(version.optimizer_run_id)}`}>Optimizer run {version.optimizer_run_id}</a> · Champion {version.champion_id ?? 'Unknown'}</p>}
++    </li>)}</ol>
++    <label>Compare from<select value={left} onChange={event => setLeft(event.target.value)}><option value="">Select version</option>{page.items.map(version => <option key={version.version_id}>{version.version_id}</option>)}</select></label>
++    <label>Compare to<select value={right} onChange={event => setRight(event.target.value)}><option value="">Select version</option>{page.items.map(version => <option key={version.version_id}>{version.version_id}</option>)}</select></label>
++    <button disabled={!left || !right || left === right} onClick={() => onCompare(left, right)}>Compare versions</button>
++    <button disabled={loading || !page.next_cursor} onClick={onNext}>Next history page</button>
++  </section>
++}
+diff --git a/frontend/src/components/version-control/overview-badge.test.tsx b/frontend/src/components/version-control/overview-badge.test.tsx
+new file mode 100644
+index 0000000..afe3445
+--- /dev/null
++++ b/frontend/src/components/version-control/overview-badge.test.tsx
+@@ -0,0 +1,31 @@
++import { renderToStaticMarkup } from 'react-dom/server'
++import { expect, it, vi } from 'vitest'
++import { OverviewBadge } from './overview-badge'
++import { bindingFixture } from './fixtures'
++import { loadOverview } from './overview'
++import { VersionControlApi } from '@/lib/version-control-api'
++
++it('overview_badge_uses_approved_deployed_not_observed_equality', () => {
++  const render = (changes = {}) => renderToStaticMarkup(<OverviewBadge status={{ ...bindingFixture, ...changes }} />)
++  expect(render()).not.toContain('In sync')
++  expect(render({ drift: 'clean', heads: { observed: 'same', approved: null, deployed: null } })).toContain('Unknown')
++  expect(render({ drift: 'clean', heads: { observed: 'same', approved: 'policy', deployed: 'policy' } })).toContain('In sync')
++  for (const [drift, label] of [['unknown', 'Unknown'], ['unreachable', 'Unreachable'], ['applied_unverified', 'Applied, unverified'], ['conflicted', 'Conflicted']]) {
++    expect(render({ drift })).toContain(label)
++  }
++  expect(render({ quarantined: true })).toContain('Quarantined')
++  expect(render({ stale: true })).toContain('Stale')
++  expect(render()).toContain('external')
++  expect(render()).toContain(bindingFixture.projection_as_of)
++})
++
++it('overview_does_not_fetch_live_genie_per_row', async () => {
++  const page = { items: Array.from({ length: 25 }, (_, index) => ({ ...bindingFixture, binding_id: `binding-${index}` })), next_cursor: 'page/2' }
++  const transport = vi.fn(async () => new Response(JSON.stringify(page)))
++  const api = new VersionControlApi(transport)
++  expect(await loadOverview(api)).toEqual(page)
++  expect(transport).toHaveBeenCalledTimes(1)
++  await loadOverview(api, page.next_cursor)
++  expect(transport.mock.calls[1][0]).toBe('/api/version-control/overview?limit=25&cursor=page%2F2')
++  expect(transport.mock.calls.every(([url]) => String(url).includes('/overview?'))).toBe(true)
++})
+diff --git a/frontend/src/components/version-control/overview-badge.tsx b/frontend/src/components/version-control/overview-badge.tsx
+new file mode 100644
+index 0000000..2e5012f
+--- /dev/null
++++ b/frontend/src/components/version-control/overview-badge.tsx
+@@ -0,0 +1,16 @@
++import type { BindingStatus } from '@/types/version-control'
++export function OverviewBadge({ status }: { status: BindingStatus }) {
++  const labels = { clean: 'Policy mismatch', external_ahead: 'External ahead', desired_ahead: 'Desired ahead', diverged: 'Diverged', unknown: 'Unknown', unreachable: 'Unreachable', applied_unverified: 'Applied, unverified', conflicted: 'Conflicted' }
++  let label = labels[status.drift]
++  if (status.drift === 'clean') {
++    label = !status.heads.approved || !status.heads.deployed ? 'Unknown' : status.heads.approved === status.heads.deployed ? 'In sync' : 'Policy mismatch'
++  }
++  if (status.quarantined) label = 'Quarantined'
++  if (status.stale && label === 'In sync') label = 'Unknown'
++  return <div className="rounded-lg border border-border p-3 text-sm">
++    <strong>{label}</strong>{status.stale && <span> · Stale</span>}
++    <dl>{Object.entries(status.heads).map(([head, version]) => <div key={head}><dt>{head}</dt><dd title={version ?? undefined}>{version?.slice(0, 8) ?? 'Not recorded'}</dd></div>)}</dl>
++    <p>Projection as of <time>{status.projection_as_of}</time></p>
++    <p>Observed: {status.observed_at ?? 'Unknown'}</p>
++  </div>
++}
+diff --git a/frontend/src/components/version-control/overview.tsx b/frontend/src/components/version-control/overview.tsx
+new file mode 100644
+index 0000000..e45704a
+--- /dev/null
++++ b/frontend/src/components/version-control/overview.tsx
+@@ -0,0 +1,37 @@
++import type { VersionControlApi } from '@/lib/version-control-api'
++import { useEffect, useState } from 'react'
++import type { OverviewPage } from '@/types/version-control'
++import { OverviewBadge } from './overview-badge'
++
++export function loadOverview(api: VersionControlApi, cursor?: string, signal?: AbortSignal) { return api.overview(cursor, signal) }
++
++export function VersionControlOverview({ api, onSelect }: { api: VersionControlApi; onSelect: (bindingId: string) => void }) {
++  const [page, setPage] = useState<OverviewPage>({ items: [], next_cursor: null })
++  const [cursor, setCursor] = useState<string>()
++  const [refresh, setRefresh] = useState(0)
++  const [loading, setLoading] = useState(true)
++  const [error, setError] = useState('')
++  useEffect(() => {
++    const controller = new AbortController()
++    setLoading(true)
++    setError('')
++    loadOverview(api, cursor, controller.signal).then(result => {
++      if (!controller.signal.aborted) setPage(result)
++    }).catch(error => { if (!controller.signal.aborted) setError(String(error)) })
++      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
++    return () => controller.abort()
++  }, [api, cursor, refresh])
++  return <section aria-label="Version overview" className="space-y-4">
++    <h2>Version Control overview</h2>
++    <button onClick={() => setRefresh(value => value + 1)} disabled={loading}>Refresh projections</button>
++    {loading && <p role="status">Loading projections…</p>}
++    {error && <p role="alert">Stale overview: {error}</p>}
++    {!loading && !error && page.items.length === 0 && <p>No enrolled bindings.</p>}
++    <ul>{page.items.map(status => <li key={status.binding_id}>
++      <button onClick={() => onSelect(status.binding_id)}>{status.binding_id}</button>
++      <OverviewBadge status={status} />
++    </li>)}</ul>
++    <button disabled={loading || !cursor} onClick={() => setCursor(undefined)}>First page</button>
++    <button disabled={loading || !page.next_cursor} onClick={() => setCursor(page.next_cursor ?? undefined)}>Next page</button>
++  </section>
++}
+diff --git a/frontend/src/components/version-control/promotion.test.tsx b/frontend/src/components/version-control/promotion.test.tsx
+new file mode 100644
+index 0000000..d556466
+--- /dev/null
++++ b/frontend/src/components/version-control/promotion.test.tsx
+@@ -0,0 +1,36 @@
++import { expect, it, vi } from 'vitest'
++import { createPromotionFlow, ReceiptView, pollReceipt } from './promotion'
++import { VersionControlApi } from '@/lib/version-control-api'
++import { approvalFixture, receiptFixture } from './fixtures'
++import { renderToStaticMarkup } from 'react-dom/server'
++
++it('promotion_requires_explicit_target_mapping_preflight_and_approval', async () => {
++  const transport = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(String(url).endsWith('/releases')
++    ? { release_id: 'release-1', operation_id: 'package-1', status: 'requested', job_run_id: null }
++    : { operation_id: 'operation-1', status: String(url).includes('/operations/') ? 'confirmed' : 'requested', job_run_id: null, checkpoints: [], audit: [], receipt_references: [] })))
++  const flow = createPromotionFlow(new VersionControlApi(transport))
++  await expect(flow.validate('no-target')).rejects.toThrow('explicit target')
++  const selection = { source_binding: 'source', source_version_id: 'version-1', target_binding: 'target', mapping_digest: 'mapping-1', policy: 'production' }
++  flow.configure(selection)
++  await expect(flow.promote(approvalFixture, 'premature')).rejects.toThrow('preflight')
++  await flow.validate('validate-intent')
++  expect(transport.mock.calls.map(([url]) => url)).toEqual(['/api/version-control/releases', '/api/version-control/releases/release-1/validate', '/api/version-control/operations/operation-1'])
++  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual(selection)
++  await expect(flow.promote(approvalFixture, 'invalid-approval')).rejects.toThrow('approval')
++  const valid = { ...approvalFixture, valid: true, inputs: { ...approvalFixture.inputs, target_binding: 'target', source_version_id: 'version-1', mapping_digest: 'mapping-1', expires_at: new Date(Date.now() + 3600000).toISOString() } }
++  await flow.promote(valid, 'promote-intent')
++  expect(transport.mock.calls[3][0]).toBe('/api/version-control/releases/release-1/promote')
++  expect(JSON.parse(String(transport.mock.calls[3][1]?.body))).toEqual({ approval_id: valid.approval_id })
++  flow.configure({ ...selection, mapping_digest: 'changed-mapping' })
++  await expect(flow.promote(valid, 'stale-preflight')).rejects.toThrow('preflight')
++})
++
++it('receipt_shows_intended_rendered_observed_and_compensation_status', async () => {
++  const html = renderToStaticMarkup(<ReceiptView receipt={receiptFixture} />)
++  for (const text of ['Intended', 'Rendered', 'Observed', 'config-3', 'rendered-config', 'partial-config', 'applied_partial', 'compensation-1', 'target-before', 'target-executor', 'package-1']) expect(html).toContain(text)
++  expect(html).not.toContain('Deployment confirmed')
++  const transport = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ operation_id: 'pending-1', status: 'requested', job_run_id: null }), { status: 202 })).mockResolvedValueOnce(new Response(JSON.stringify(receiptFixture)))
++  expect(await pollReceipt(new VersionControlApi(transport), 'release/1', async () => {})).toEqual(receiptFixture)
++  expect(transport.mock.calls.map(([url]) => url)).toEqual(['/api/version-control/releases/release%2F1/receipt', '/api/version-control/releases/release%2F1/receipt'])
++  expect(transport.mock.calls.every(([, init]) => !init.method)).toBe(true)
++})
+diff --git a/frontend/src/components/version-control/promotion.tsx b/frontend/src/components/version-control/promotion.tsx
+new file mode 100644
+index 0000000..3b311c0
+--- /dev/null
++++ b/frontend/src/components/version-control/promotion.tsx
+@@ -0,0 +1,118 @@
++import { useEffect, useMemo, useState } from 'react'
++import type { VersionControlApi } from '@/lib/version-control-api'
++import { createMutationIntent } from '@/lib/version-control-api'
++import type { ApprovalInputs, ApprovalRecord, DeploymentReceipt, OperationHandle, ReleaseCommand } from '@/types/version-control'
++import { pollOperation } from './restore'
++import { ApprovalsPanel } from './approvals'
++export function ReceiptView({ receipt }: { receipt: DeploymentReceipt }) {
++  const verified = receipt.status === 'confirmed' && Boolean(receipt.post_version_id) && JSON.stringify(receipt.rendered_fingerprints) === JSON.stringify(receipt.observed_fingerprints)
++  return <section aria-label="Durable deployment receipt">
++    <h3>Durable deployment receipt {receipt.release_id}</h3>
++    <p role="status">{verified ? 'Deployment confirmed by receipt evidence' : 'Deployment not verified'} · {receipt.status}</p>
++    <dl>{(['intended_fingerprints', 'rendered_fingerprints', 'observed_fingerprints'] as const).map((field, index) => <div key={field}><dt>{['Intended', 'Rendered', 'Observed'][index]}</dt><dd><pre>{JSON.stringify(receipt[field], null, 2)}</pre></dd></div>)}</dl>
++    <p>Compensation operation: {receipt.compensation_operation_id ?? 'None recorded'}. A compensation request is not proof of compensation.</p>
++    <h4>Receipt evidence and lineage</h4><pre>{JSON.stringify(receipt, null, 2)}</pre>
++  </section>
++}
++export async function pollReceipt(api: VersionControlApi, releaseId: string, wait = () => new Promise<void>(resolve => setTimeout(resolve, 1000)), signal?: AbortSignal): Promise<DeploymentReceipt | OperationHandle> {
++  for (let attempt = 0; attempt < 30; attempt += 1) {
++    signal?.throwIfAborted()
++    const receipt = await api.receipt(releaseId)
++    if ('release_id' in receipt || attempt === 29) return receipt
++    await wait()
++  }
++  throw new Error('Receipt polling exhausted')
++}
++function ReceiptPanel({ api, releaseId }: { api: VersionControlApi; releaseId: string }) {
++  const [receipt, setReceipt] = useState<DeploymentReceipt | OperationHandle | null>(null)
++  const [error, setError] = useState('')
++  const [refresh, setRefresh] = useState(0)
++  useEffect(() => {
++    const controller = new AbortController()
++    setError('')
++    pollReceipt(api, releaseId, undefined, controller.signal).then(result => { if (!controller.signal.aborted) setReceipt(result) })
++      .catch(error => { if (!controller.signal.aborted) setError(String(error)) })
++    return () => controller.abort()
++  }, [api, releaseId, refresh])
++  return <section aria-label="Receipt status">
++    {receipt && 'release_id' in receipt ? <ReceiptView receipt={receipt} /> : <p role="status">Receipt pending — deployment is not yet verified.</p>}
++    {error && <p role="alert">Receipt unreachable: {error}. Do not repeat promotion.</p>}
++    <button onClick={() => setRefresh(value => value + 1)}>Refresh receipt evidence</button>
++  </section>
++}
++
++export function createPromotionFlow(api: VersionControlApi) {
++  let selection: ReleaseCommand | null = null
++  let releaseId = ''
++  let preflight = false
++  let revision = 0
++  return {
++    configure(next: ReleaseCommand) {
++      if (JSON.stringify(next) !== JSON.stringify(selection)) { selection = next; releaseId = ''; preflight = false; revision += 1 }
++    },
++    async validate(key: string) {
++      if (!selection?.target_binding.trim() || !selection.mapping_digest.trim() || !selection.source_version_id || !selection.policy.trim() || selection.source_binding === selection.target_binding) throw new Error('Select an explicit target, immutable mapping, source version and policy.')
++      const started = revision
++      const release = await api.release(selection, `${key}:release`)
++      const handle = await api.validate(release.release_id, `${key}:validate`)
++      const operation = await pollOperation(api, handle.operation_id)
++      if (revision !== started) throw new Error('Selection changed; preflight is invalid.')
++      releaseId = release.release_id
++      preflight = operation.status === 'confirmed'
++      if (!preflight) throw new Error(`Preflight incomplete: ${operation.status}`)
++      return releaseId
++    },
++    async promote(approval: ApprovalRecord | null, key: string) {
++      if (!preflight || !releaseId) throw new Error('A confirmed preflight is required.')
++      if (!approval?.valid || !approval.approval_digest || approval.inputs.target_binding !== selection?.target_binding || approval.inputs.source_version_id !== selection.source_version_id || approval.inputs.mapping_digest !== selection.mapping_digest || Date.parse(approval.inputs.expires_at) <= Date.now()) throw new Error('Fresh target-local approval matching the selected inputs is required.')
++      const handle = await api.promote(releaseId, { approval_id: approval.approval_id }, key)
++      return pollOperation(api, handle.operation_id)
++    },
++  }
++}
++export function PromotionPanel({ api, bindingId, sourceVersionId, inputs, disabled }: { api: VersionControlApi; bindingId: string; sourceVersionId: string; inputs: ApprovalInputs; disabled: boolean }) {
++  const flow = useMemo(() => createPromotionFlow(api), [api])
++  const [target, setTarget] = useState('')
++  const [mapping, setMapping] = useState('')
++  const [policy, setPolicy] = useState('')
++  const [releaseId, setReleaseId] = useState('')
++  const [approvalId, setApprovalId] = useState('')
++  const [approval, setApproval] = useState<ApprovalRecord | null>(null)
++  const [busy, setBusy] = useState(false)
++  const [error, setError] = useState('')
++  const [message, setMessage] = useState('')
++  const [intent] = useState(createMutationIntent)
++  const selection = { source_binding: bindingId, source_version_id: sourceVersionId, target_binding: target, mapping_digest: mapping, policy }
++  const change = (setter: (value: string) => void, value: string) => { setter(value); setReleaseId(''); setApprovalId(''); setApproval(null); setError('') }
++  const validate = async () => {
++    if (disabled || busy) return
++    setBusy(true)
++    flow.configure(selection)
++    try { setReleaseId(await flow.validate(intent.key({ action: 'validate', selection }))); setMessage('Preflight confirmed. Request target-local approval next.') }
++    catch (error) { setError(String(error)) }
++    finally { setBusy(false) }
++  }
++  const promote = async () => {
++    if (disabled || busy || !releaseId) return
++    setBusy(true)
++    flow.configure(selection)
++    try { const operation = await flow.promote(approval, intent.key({ action: 'promote', selection, approvalId: approval?.approval_id })); setMessage(`Promotion operation ${operation.operation_id}: ${operation.status}. Read the durable receipt before declaring deployment success.`) }
++    catch (error) { setError(String(error)) }
++    finally { setBusy(false) }
++  }
++  return <section aria-label="Promotion" className="space-y-3">
++    <h3>Promote reviewed version</h3><p>Source: {bindingId} · Version: {sourceVersionId || 'Select a historical version'}</p>
++    <fieldset disabled={busy || disabled}><legend>Explicit target-local selection</legend>
++      <label>Target binding<input value={target} onChange={event => change(setTarget, event.target.value)} /></label>
++      <label>Immutable mapping digest<input value={mapping} onChange={event => change(setMapping, event.target.value)} /></label>
++      <label>Validation policy<input value={policy} onChange={event => change(setPolicy, event.target.value)} /></label>
++    </fieldset>
++    <button disabled={disabled || busy || !sourceVersionId || !target || !mapping || !policy || Boolean(error) || Boolean(releaseId)} onClick={() => void validate()}>Create release and validate mapping</button>
++    {releaseId && <ApprovalsPanel key={releaseId} api={api} approvalId={approvalId} inputs={{ ...inputs, operation_type: 'promotion', source_version_id: sourceVersionId, target_binding: target, mapping_digest: mapping }} disabled={disabled || busy} onApproval={setApprovalId} onRecord={setApproval} />}
++    <button disabled={disabled || busy || !releaseId || !approval?.valid || Boolean(error)} onClick={() => void promote()}>Promote with target-local approval</button>
++    {busy && <p role="status">Promotion workflow pending…</p>}
++    {message && <p role="status">{message}</p>}
++    {releaseId && <ReceiptPanel api={api} releaseId={releaseId} />}
++    {error && <p role="alert">{error} No automatic command replay.</p>}
++  </section>
++}
+diff --git a/frontend/src/components/version-control/reconcile.test.tsx b/frontend/src/components/version-control/reconcile.test.tsx
+new file mode 100644
+index 0000000..74c045e
+--- /dev/null
++++ b/frontend/src/components/version-control/reconcile.test.tsx
+@@ -0,0 +1,28 @@
++import { expect, it, vi } from 'vitest'
++import { reconcileAction, OperationStatusView } from './reconcile'
++import { renderToStaticMarkup } from 'react-dom/server'
++import { VersionControlApi } from '@/lib/version-control-api'
++import { approvalFixture, approvalInputsFixture, fingerprints } from './fixtures'
++
++it('adopt_requests_approval_and_reapply_does_not_reuse_invalid_approval', async () => {
++  const transport = vi.fn(async () => new Response(JSON.stringify(approvalFixture)))
++  const api = new VersionControlApi(transport)
++  const reviewed = { binding_revision: 3, expected_base: fingerprints, approval_id: approvalFixture.approval_id }
++  await reconcileAction(api, 'demo-binding', 'adopt', reviewed, approvalInputsFixture, approvalFixture, 'adopt-intent')
++  expect(transport.mock.calls[0][0]).toBe('/api/version-control/approvals')
++  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual(approvalInputsFixture)
++  await expect(reconcileAction(api, 'demo-binding', 'reapply', reviewed, approvalInputsFixture, approvalFixture, 'reapply-intent')).rejects.toThrow('fresh approval')
++  expect(transport).toHaveBeenCalledTimes(1)
++})
++
++it('quarantine_and_partial_outcome_never_offer_blind_retry', () => {
++  for (const status of ['quarantined', 'applied_partial', 'applied_unverified', 'conflicted'] as const) {
++    const html = renderToStaticMarkup(<OperationStatusView operation={{ operation_id: 'unresolved-1', status, job_run_id: null, checkpoints: ['Description write incomplete'], audit: ['Operator must inspect captured evidence'], receipt_references: [] }} onVerify={vi.fn()} />)
++    expect(html).toContain(status)
++    expect(html).toContain('Description write incomplete')
++    expect(html).toContain('Operator must inspect captured evidence')
++    expect(html).toContain('Verify operation status')
++    expect(html).not.toMatch(/>Retry|>Reapply|>Restore|>Promote/)
++    expect(html).toContain('No mutation replay')
++  }
++})
+diff --git a/frontend/src/components/version-control/reconcile.tsx b/frontend/src/components/version-control/reconcile.tsx
+new file mode 100644
+index 0000000..d6814af
+--- /dev/null
++++ b/frontend/src/components/version-control/reconcile.tsx
+@@ -0,0 +1,56 @@
++import { useState } from 'react'
++import type { VersionControlApi } from '@/lib/version-control-api'
++import { createMutationIntent } from '@/lib/version-control-api'
++import type { ApprovalInputs, ApprovalRecord, Operation, ReviewedCommand } from '@/types/version-control'
++import { canMutate } from '@/hooks/use-version-control'
++import type { VersionControlState } from '@/hooks/use-version-control'
++import { pollOperation } from './restore'
++export function OperationStatusView({ operation, onVerify }: { operation: Operation; onVerify: () => void }) {
++  return <section aria-label="Operation verification and audit">
++    <h3>Operation {operation.operation_id}</h3>
++    <p role="status">{operation.status}</p>
++    <p>No mutation replay. Partial, unverified, conflicted or quarantined outcomes require operator evidence and authorized recovery.</p>
++    <h4>Checkpoints</h4><ul>{operation.checkpoints.map((checkpoint, index) => <li key={index}>{checkpoint}</li>)}</ul>
++    <h4>Audit evidence</h4><ul>{operation.audit.map((fact, index) => <li key={index}>{fact}</li>)}</ul>
++    <h4>Receipt references</h4><ul>{operation.receipt_references.map(reference => <li key={reference}>{reference}</li>)}</ul>
++    <button onClick={onVerify}>Verify operation status</button>
++  </section>
++}
++
++export async function reconcileAction(api: VersionControlApi, bindingId: string, action: 'adopt' | 'reapply' | 'acknowledge', reviewed: ReviewedCommand, inputs: ApprovalInputs, approval: ApprovalRecord | null, key: string) {
++  if (action === 'adopt') return api.requestApproval(inputs, key)
++  if (action === 'reapply' && (!approval?.valid || approval.approval_id !== reviewed.approval_id || approval.inputs.target_binding !== bindingId || Date.parse(approval.inputs.expires_at) <= Date.now() || JSON.stringify(approval.inputs.expected_base_fingerprints) !== JSON.stringify(reviewed.expected_base))) {
++    throw new Error('Reapply requires a fresh approval for the newly captured base.')
++  }
++  const handle = await api.reconcile(bindingId, { ...reviewed, action, policy_inputs: { validation_policy_digest: inputs.validation_policy_digest, benchmark_policy_digest: inputs.benchmark_policy_digest } }, key)
++  return pollOperation(api, handle.operation_id)
++}
++export function ReconcilePanel({ api, state, inputs, approval, onApproval, onComplete, onCompare }: {
++  api: VersionControlApi; state: VersionControlState; inputs: ApprovalInputs; approval: ApprovalRecord | null
++  onApproval: (approvalId: string) => void; onComplete: () => void; onCompare: () => void
++}) {
++  const [busy, setBusy] = useState(false)
++  const [message, setMessage] = useState('')
++  const [error, setError] = useState('')
++  const [intent] = useState(createMutationIntent)
++  const action = async (action: 'adopt' | 'reapply' | 'acknowledge') => {
++    if (!canMutate(state, action) || busy || !state.status) return
++    setBusy(true)
++    try {
++      const reviewed = { binding_revision: state.status.binding_revision, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }
++      const result = await reconcileAction(api, state.bindingId, action, reviewed, inputs, approval, intent.key({ bindingId: state.bindingId, action, reviewed, inputs }))
++      if ('approval_id' in result) { onApproval(result.approval_id); setMessage(`Approval requested: ${result.approval_id}. Not yet approved.`) }
++      else { setMessage(`Operation ${result.operation_id}: ${result.status}. Acknowledgement does not align heads.`); onComplete() }
++    } catch (error) { setError(String(error)) }
++    finally { setBusy(false) }
++  }
++  return <section aria-label="Reconcile captured changes">
++    <h3>Reconcile captured external changes</h3>
++    <p>Capture is evidence, not approval. Reapply requires approval for the current base.</p>
++    <button onClick={onCompare} disabled={!state.status?.heads.approved || !state.status.heads.observed}>Compare approved with observed</button>
++    {(['adopt', 'reapply', 'acknowledge'] as const).map(kind => <button key={kind} disabled={busy || Boolean(error) || !canMutate(state, kind) || (kind === 'reapply' && !approval?.valid)} onClick={() => void action(kind)}>{kind === 'adopt' ? 'Request adoption approval' : kind === 'reapply' ? 'Reapply approved state' : 'Acknowledge scoped divergence'}</button>)}
++    {busy && <p role="status">Reconciliation pending…</p>}
++    {message && <p role="status">{message}</p>}
++    {error && <p role="alert">{error} No automatic mutation retry.</p>}
++  </section>
++}
+diff --git a/frontend/src/components/version-control/restore.test.tsx b/frontend/src/components/version-control/restore.test.tsx
+new file mode 100644
+index 0000000..817e0e8
+--- /dev/null
++++ b/frontend/src/components/version-control/restore.test.tsx
+@@ -0,0 +1,19 @@
++import { expect, it, vi } from 'vitest'
++import { submitRestore } from './restore'
++import { VersionControlApi } from '@/lib/version-control-api'
++import { fingerprints } from './fixtures'
++
++it('restore_and_forward_submit_reviewed_base_and_poll_operation', async () => {
++  const transport = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({ operation_id: 'restore-1', status: init?.method === 'POST' ? 'requested' : 'confirmed', job_run_id: 'job-1', checkpoints: [], audit: [], receipt_references: [] }), { status: init?.method === 'POST' ? 202 : 200 }))
++  const api = new VersionControlApi(transport)
++  const command = { version_id: 'historical-1', binding_revision: 3, expected_base: fingerprints, approval_id: 'fresh-approval' }
++  const result = await submitRestore(api, 'binding/1', command, true, 'restore-intent')
++  expect(result.status).toBe('confirmed')
++  expect(transport.mock.calls.map(([url]) => url)).toEqual(['/api/version-control/bindings/binding%2F1/restore', '/api/version-control/operations/restore-1'])
++  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual(command)
++  expect(transport.mock.calls[0][1]?.headers).toHaveProperty('Idempotency-Key', 'restore-intent')
++  await submitRestore(api, 'binding/1', { ...command, version_id: 'newer-4' }, true, 'forward-intent')
++  expect(JSON.parse(String(transport.mock.calls[2][1]?.body)).version_id).toBe('newer-4')
++  await expect(submitRestore(api, 'binding/1', command, false, 'no-confirm')).rejects.toThrow('Confirm')
++  expect(transport).toHaveBeenCalledTimes(4)
++})
+diff --git a/frontend/src/components/version-control/restore.tsx b/frontend/src/components/version-control/restore.tsx
+new file mode 100644
+index 0000000..934da04
+--- /dev/null
++++ b/frontend/src/components/version-control/restore.tsx
+@@ -0,0 +1,54 @@
++import { useState } from 'react'
++import { createMutationIntent, VersionControlError } from '@/lib/version-control-api'
++import type { VersionControlApi } from '@/lib/version-control-api'
++import type { Operation, RestoreCommand } from '@/types/version-control'
++import { OperationStatusView } from './reconcile'
++
++export async function pollOperation(api: VersionControlApi, operationId: string, onUpdate?: (operation: Operation) => void) {
++  for (let attempt = 0; attempt < 30; attempt += 1) {
++    const operation = await api.operation(operationId)
++    onUpdate?.(operation)
++    if (!['requested', 'preimage_captured', 'apply_attempted', 'compensation_attempted'].includes(operation.status) || attempt === 29) return operation
++    await new Promise(resolve => setTimeout(resolve, 1000))
++  }
++  throw new Error('Operation polling exhausted')
++}
++export async function submitRestore(api: VersionControlApi, bindingId: string, command: RestoreCommand, confirmed: boolean, key: string, onUpdate?: (operation: Operation) => void) {
++  if (!confirmed || !command.approval_id.trim()) throw new Error('Confirm the reviewed version and supply a fresh approval reference.')
++  try {
++    const handle = await api.restore(bindingId, command, key)
++    return await pollOperation(api, handle.operation_id, onUpdate)
++  } catch (error) {
++    if (error instanceof VersionControlError && error.operation_id) return pollOperation(api, error.operation_id, onUpdate)
++    throw error
++  }
++}
++export function RestorePanel({ api, bindingId, command, disabled, onComplete }: { api: VersionControlApi; bindingId: string; command: Omit<RestoreCommand, 'approval_id'>; disabled: boolean; onComplete: () => void }) {
++  const [approvalId, setApprovalId] = useState('')
++  const [confirmed, setConfirmed] = useState(false)
++  const [busy, setBusy] = useState(false)
++  const [operation, setOperation] = useState<Operation | null>(null)
++  const [error, setError] = useState('')
++  const [intent] = useState(createMutationIntent)
++  const submit = async () => {
++    if (disabled || busy) return
++    setBusy(true)
++    setError('')
++    const body = { ...command, approval_id: approvalId }
++    try { setOperation(await submitRestore(api, bindingId, body, confirmed, intent.key({ bindingId, body }), setOperation)); onComplete() }
++    catch (error) { setError(String(error)) }
++    finally { setBusy(false) }
++  }
++  return <section aria-label="Restore or roll forward">
++    <h3>Restore / roll forward</h3>
++    <p>Use historical content as a new reviewed write; history is never rewound.</p>
++    <p>Version {command.version_id} · Reviewed revision {command.binding_revision}</p>
++    <pre>{JSON.stringify(command.expected_base, null, 2)}</pre>
++    <label>Restore approval reference<input value={approvalId} onChange={event => setApprovalId(event.target.value)} /></label>
++    <label><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />Confirm reviewed version and base</label>
++    <button disabled={disabled || busy || !confirmed || !approvalId.trim() || Boolean(error) || Boolean(operation)} onClick={() => void submit()}>Submit restore / roll forward</button>
++    {busy && <p role="status">Operation pending — polling status, not replaying the command.</p>}
++    {operation && <OperationStatusView operation={operation} onVerify={() => { void api.operation(operation.operation_id).then(setOperation).catch(error => setError(String(error))) }} />}
++    {error && <p role="alert">{error} Command outcome unresolved; do not blindly retry.</p>}
++  </section>
++}
+diff --git a/frontend/src/components/version-control/version-control-tab.test.tsx b/frontend/src/components/version-control/version-control-tab.test.tsx
+new file mode 100644
+index 0000000..0e4a2e6
+--- /dev/null
++++ b/frontend/src/components/version-control/version-control-tab.test.tsx
+@@ -0,0 +1,99 @@
++import { expect, it, vi } from 'vitest'
++import { createVersionControlStore, canMutate } from '@/hooks/use-version-control'
++import { VersionControlApi } from '@/lib/version-control-api'
++import { approvalInputsFixture, bindingFixture, versionFixture } from './fixtures'
++import { renderToStaticMarkup } from 'react-dom/server'
++import { VersionControlView } from './version-control-tab'
++import { RestorePanel } from './restore'
++import { PromotionPanel } from './promotion'
++import { VersionControlWorkbench } from '@/pages/VersionControlWorkbench'
++import { createDemoTransport } from './demo-api'
++
++it('open_waits_for_capture_before_showing_reconcile_choices', async () => {
++  let completeCapture!: (response: Response) => void
++  const transport = vi.fn(async (url: RequestInfo | URL) => {
++    if (String(url).endsWith('/observe')) return new Promise<Response>(resolve => { completeCapture = resolve })
++    return new Response(JSON.stringify({ items: [versionFixture], next_cursor: null }))
++  })
++  const store = createVersionControlStore(new VersionControlApi(transport))
++  const opening = store.open('demo-binding', 'open')
++  expect(canMutate(store.getSnapshot(), 'adopt')).toBe(false)
++  expect(store.getSnapshot().loading).toBe(true)
++  completeCapture(new Response(JSON.stringify({ status: bindingFixture, captured_version: versionFixture, busy: false })))
++  await opening
++  expect(store.getSnapshot().history.items).toEqual([versionFixture])
++  expect(canMutate(store.getSnapshot(), 'adopt')).toBe(true)
++  expect(store.getSnapshot().status?.heads).toEqual(bindingFixture.heads)
++  const returning = store.open('demo-binding', 'return')
++  expect(canMutate(store.getSnapshot(), 'adopt')).toBe(false)
++  completeCapture(new Response(JSON.stringify({ status: bindingFixture, captured_version: versionFixture, busy: false })))
++  await returning
++  expect(JSON.parse(String(transport.mock.calls.filter(([url]) => String(url).endsWith('/observe')).length))).toBe(2)
++})
++
++it('version_control_actions_are_keyboard_accessible_and_errors_announced', () => {
++  const state = { bindingId: 'demo-binding', loading: false, captured: false, busy: false, stale: true, status: bindingFixture, history: { items: [versionFixture], next_cursor: null }, error: 'Evidence unavailable' }
++  const html = renderToStaticMarkup(<VersionControlView state={state} />)
++  expect(html).toContain('aria-live="polite"')
++  expect(html).toContain('role="alert"')
++  expect(html).toContain('Evidence unavailable')
++  const api = new VersionControlApi(vi.fn())
++  const controls = renderToStaticMarkup(<><RestorePanel api={api} bindingId="demo-binding" command={{ version_id: 'version-1', expected_base: versionFixture.fingerprints, binding_revision: 3 }} disabled onComplete={vi.fn()} /><PromotionPanel api={api} bindingId="demo-binding" sourceVersionId="version-1" inputs={approvalInputsFixture} disabled /></>)
++  expect(controls).toContain('<label>Restore approval reference<input')
++  expect(controls).toContain('type="checkbox"')
++  expect(controls).toContain('<label>Target binding<input')
++  expect(controls).toContain('<button disabled=""')
++  expect(controls).not.toMatch(/tabindex="-1"|<div[^>]*role="button"/)
++})
++
++it('workbench_exposes_an_explicit_api_faked_entry_point', () => {
++  const html = renderToStaticMarkup(<VersionControlWorkbench />)
++  expect(html).toContain('VC/1.0 API-faked foundation')
++  expect(html).toContain('No real endpoints')
++  expect(html).toContain('Version Control overview')
++})
++
++it('fake_api_supports_approval_restore_promotion_and_receipt_without_network', async () => {
++  const network = vi.fn(() => { throw new Error('Real network forbidden') })
++  vi.stubGlobal('fetch', network)
++  try {
++    const api = new VersionControlApi(createDemoTransport())
++    const page = await api.overview()
++    expect(page.next_cursor).not.toBeNull()
++    const observation = await api.observe('demo-binding', 'open', 'observe-1')
++    expect(observation.status.heads).toEqual(bindingFixture.heads)
++    const inputs = { ...approvalInputsFixture, expires_at: new Date(Date.now() + 3600000).toISOString() }
++    const request = await api.requestApproval(inputs, 'request-1')
++    const approval = await api.vote(request.approval_id, 'approve', 'vote-1')
++    expect(approval.valid).toBe(true)
++    const restore = await api.restore('demo-binding', { version_id: 'approved-2', expected_base: versionFixture.fingerprints, binding_revision: 3, approval_id: approval.approval_id }, 'restore-1')
++    expect((await api.operation(restore.operation_id)).status).toBe('confirmed')
++    const release = await api.release({ source_binding: 'demo-binding', source_version_id: 'external-3', target_binding: 'demo-target', mapping_digest: 'mapping-1', policy: 'production' }, 'release-1')
++    expect(await api.receipt(release.release_id)).toHaveProperty('status', 'requested')
++    const preflight = await api.validate(release.release_id, 'validate-1')
++    expect((await api.operation(preflight.operation_id)).status).toBe('confirmed')
++    const promotionApproval = await api.requestApproval({ ...inputs, operation_type: 'promotion', target_binding: 'demo-target', mapping_digest: 'mapping-1' }, 'promotion-request')
++    await api.vote(promotionApproval.approval_id, 'approve', 'promotion-vote')
++    await api.promote(release.release_id, { approval_id: promotionApproval.approval_id }, 'promote-1')
++    expect(await api.receipt(release.release_id)).toHaveProperty('post_version_id')
++    await expect(api.restore('demo-quarantined', { version_id: 'approved-2', expected_base: versionFixture.fingerprints, binding_revision: 3, approval_id: approval.approval_id }, 'blocked')).rejects.toMatchObject({ status: 423 })
++    expect(network).not.toHaveBeenCalled()
++  } finally { vi.unstubAllGlobals() }
++})
++
++it('capture_failure_shows_stale_history_and_disables_mutating_actions', async () => {
++  const transport = vi.fn(async (url: RequestInfo | URL) => String(url).endsWith('/observe')
++    ? new Response(JSON.stringify({ code: 'PERSISTENCE_UNAVAILABLE', message: 'Snapshot persistence failed', stale: true, retryable: false }), { status: 503 })
++    : new Response(JSON.stringify({ items: [versionFixture], next_cursor: null })))
++  const store = createVersionControlStore(new VersionControlApi(transport))
++  await store.open('demo-binding')
++  const state = store.getSnapshot()
++  expect(state.stale).toBe(true)
++  expect(state.history.items).toEqual([versionFixture])
++  for (const action of bindingFixture.allowed_actions) expect(canMutate(state, action)).toBe(false)
++  const html = renderToStaticMarkup(<VersionControlView state={state} />)
++  expect(html).toContain('Stale history')
++  expect(html).toContain('Snapshot persistence failed')
++  expect(html).toContain('external-3')
++  expect(html).not.toContain('Request adoption approval')
++})
+diff --git a/frontend/src/components/version-control/version-control-tab.tsx b/frontend/src/components/version-control/version-control-tab.tsx
+new file mode 100644
+index 0000000..b12b4b2
+--- /dev/null
++++ b/frontend/src/components/version-control/version-control-tab.tsx
+@@ -0,0 +1,61 @@
++import { useVersionControl, canMutate } from '@/hooks/use-version-control'
++import type { VersionControlState } from '@/hooks/use-version-control'
++import type { VersionControlApi } from '@/lib/version-control-api'
++import { OverviewBadge } from './overview-badge'
++import { useState } from 'react'
++import type { ApprovalRecord, SemanticDiff, VersionSummary } from '@/types/version-control'
++import { History } from './history'
++import { SemanticDiffView } from './diff'
++import { demoApi } from './demo-api'
++import { RestorePanel } from './restore'
++import { ReconcilePanel } from './reconcile'
++import { ApprovalsPanel } from './approvals'
++import { approvalInputsFixture } from './fixtures'
++import { PromotionPanel } from './promotion'
++
++export function VersionControlView({ state }: { state: VersionControlState }) {
++  return <section aria-label="Version Control and Promotion" aria-live="polite" className="space-y-4">
++    <h2>Version Control and Promotion</h2>
++    {state.loading && <p role="status">Capturing external history…</p>}
++    {state.stale && <p role="alert">Stale history — mutating actions disabled. {state.error}</p>}
++    {state.busy && <p role="status">Capture busy — wait for verification. No mutation retry.</p>}
++    {!state.loading && !state.history.items.length && <p>No captured versions available.</p>}
++    {state.status && <OverviewBadge status={state.status} />}
++    <ul>{state.history.items.map(version => <li key={version.version_id}>{version.version_id} · {version.origin}</li>)}</ul>
++    {canMutate(state, 'adopt') && <p>Reconciliation choices are available for the captured base.</p>}
++  </section>
++}
++export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: string; api?: VersionControlApi }) {
++  const state = useVersionControl(bindingId, api)
++  const [selected, setSelected] = useState<VersionSummary | null>(null)
++  const [diff, setDiff] = useState<SemanticDiff | null>(null)
++  const [comparing, setComparing] = useState(false)
++  const [error, setError] = useState('')
++  const [approvalId, setApprovalId] = useState('')
++  const [approval, setApproval] = useState<ApprovalRecord | null>(null)
++  const base = state.history.items.find(version => version.version_id === state.status?.heads.observed)
++  const inputs = { ...approvalInputsFixture, target_binding: bindingId, source_version_id: base?.version_id ?? '', expected_base_fingerprints: base?.fingerprints ?? approvalInputsFixture.expected_base_fingerprints }
++  const compare = async (left: string, right: string) => {
++    setComparing(true)
++    setError('')
++    try { setDiff(await api.diff(bindingId, left, right)) }
++    catch (error) { setError(String(error)); setDiff({ comparison: 'unknown', items: [] }) }
++    finally { setComparing(false) }
++  }
++  return <div className="space-y-6">
++    <VersionControlView state={state} />
++    <button disabled={state.loading} onClick={() => void state.refresh('history')}>Refresh captured history</button>
++    <History page={state.history} loading={state.loading} onNext={() => void state.nextPage()} onSelect={setSelected} onCompare={(left, right) => void compare(left, right)} />
++    {selected && <p>Selected historical version: {selected.version_id}</p>}
++    {selected && state.status && state.history.items.find(version => version.version_id === state.status?.heads.observed) && <RestorePanel
++      key={`${bindingId}-${selected.version_id}-${state.status.binding_revision}`} api={api} bindingId={bindingId}
++      command={{ version_id: selected.version_id, binding_revision: state.status.binding_revision, expected_base: state.history.items.find(version => version.version_id === state.status?.heads.observed)!.fingerprints }}
++      disabled={!canMutate(state, 'restore')} onComplete={() => void state.refresh()} />}
++    {comparing && <p role="status">Loading comparison…</p>}
++    {error && <p role="alert">{error}</p>}
++    {diff && <SemanticDiffView diff={diff} />}
++    {base && <ReconcilePanel api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
++    <ApprovalsPanel api={api} approvalId={approvalId} inputs={inputs} disabled={!canMutate(state, 'adopt')} onApproval={setApprovalId} onRecord={setApproval} />
++    <PromotionPanel key={`${bindingId}-${selected?.version_id ?? ''}-${state.status?.binding_revision}`} api={api} bindingId={bindingId} sourceVersionId={selected?.version_id ?? ''} inputs={inputs} disabled={!canMutate(state, 'promote')} />
++  </div>
++}
+diff --git a/frontend/src/hooks/use-version-control.test.ts b/frontend/src/hooks/use-version-control.test.ts
+new file mode 100644
+index 0000000..3623525
+--- /dev/null
++++ b/frontend/src/hooks/use-version-control.test.ts
+@@ -0,0 +1,24 @@
++import { expect, it, vi } from 'vitest'
++import { createVersionControlStore } from './use-version-control'
++import { VersionControlApi } from '@/lib/version-control-api'
++import { bindingFixture, versionFixture } from '@/components/version-control/fixtures'
++
++it('late_response_for_previous_binding_cannot_replace_current_heads', async () => {
++  let resolveOld!: (response: Response) => void
++  const transport = vi.fn(async (input: RequestInfo | URL) => {
++    const url = String(input)
++    if (url.includes('/old/observe')) return new Promise<Response>(resolve => { resolveOld = resolve })
++    if (url.endsWith('/observe')) return new Response(JSON.stringify({ status: { ...bindingFixture, binding_id: 'current', heads: { observed: 'current-head', approved: null, deployed: null } }, captured_version: null, busy: false }))
++    return new Response(JSON.stringify({ items: [{ ...versionFixture, binding_id: url.includes('/old/') ? 'old' : 'current' }], next_cursor: null }))
++  })
++  const store = createVersionControlStore(new VersionControlApi(transport))
++  const old = store.open('old')
++  await store.open('current')
++  resolveOld(new Response(JSON.stringify({ status: { ...bindingFixture, binding_id: 'old' }, captured_version: versionFixture, busy: false })))
++  await old
++  expect(store.getSnapshot().status?.binding_id).toBe('current')
++  expect(store.getSnapshot().status?.heads.observed).toBe('current-head')
++  expect(store.getSnapshot().history.items[0].binding_id).toBe('current')
++  await store.invalidate()
++  expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/current/observe'))).toHaveLength(2)
++})
+diff --git a/frontend/src/hooks/use-version-control.ts b/frontend/src/hooks/use-version-control.ts
+new file mode 100644
+index 0000000..da3f4da
+--- /dev/null
++++ b/frontend/src/hooks/use-version-control.ts
+@@ -0,0 +1,71 @@
++import { useEffect, useMemo, useSyncExternalStore } from 'react'
++import type { VersionControlApi } from '@/lib/version-control-api'
++import { VersionControlError } from '@/lib/version-control-api'
++import type { BindingStatus, VersionPage } from '@/types/version-control'
++import { demoApi } from '@/components/version-control/demo-api'
++
++export interface VersionControlState {
++  bindingId: string; loading: boolean; captured: boolean; busy: boolean; stale: boolean
++  status: BindingStatus | null; history: VersionPage; error: string
++}
++const initialState = (): VersionControlState => ({ bindingId: '', loading: false, captured: false, busy: false, stale: false, status: null, history: { items: [], next_cursor: null }, error: '' })
++export function canMutate(state: VersionControlState, action: string) {
++  return Boolean(state.captured && !state.loading && !state.busy && !state.stale && state.status && !state.status.stale && !state.status.quarantined && !state.status.unresolved_operation_id && !['unknown', 'unreachable', 'applied_unverified', 'conflicted'].includes(state.status.drift) && state.status.allowed_actions.includes(action))
++}
++export function createVersionControlStore(api: VersionControlApi) {
++  let state = initialState()
++  let generation = 0
++  let controller = new AbortController()
++  const listeners = new Set<() => void>()
++  const update = (changes: Partial<VersionControlState>) => { state = { ...state, ...changes }; listeners.forEach(listener => listener()) }
++  const open = async (bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return' = 'open') => {
++    generation += 1
++    const current = generation
++    controller.abort()
++    controller = new AbortController()
++    const signal = controller.signal
++    const updateCurrent = (changes: Partial<VersionControlState>) => { if (current === generation && !signal.aborted) update(changes) }
++    if (state.bindingId !== bindingId) state = initialState()
++    updateCurrent({ bindingId, loading: true, captured: false, error: '' })
++    try {
++      const observation = await api.observe(bindingId, reason, crypto.randomUUID())
++      updateCurrent({ status: observation.status, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale })
++    } catch (error) {
++      const label = error instanceof VersionControlError ? error.status === 423 ? 'Quarantined / unresolved: ' : error.status === 409 ? 'Conflicted; preserved history: ' : error.status === 503 ? 'Evidence unreachable: ' : '' : ''
++      updateCurrent({ captured: false, stale: true, error: label + (error instanceof Error ? error.message : 'Capture unavailable') })
++    }
++    if (current !== generation || signal.aborted) return
++    try { updateCurrent({ history: await api.versions(bindingId, undefined, signal) }) }
++    catch (error) { updateCurrent({ stale: true, captured: false, error: `${state.error} History unavailable: ${String(error)}` }) }
++    finally { updateCurrent({ loading: false }) }
++  }
++  return {
++    getSnapshot: () => state,
++    subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
++    async nextPage() {
++      if (!state.history.next_cursor || state.loading) return
++      const current = generation
++      const signal = controller.signal
++      update({ loading: true })
++      try {
++        const page = await api.versions(state.bindingId, state.history.next_cursor, signal)
++        if (current === generation && !signal.aborted) update({ history: { items: [...state.history.items, ...page.items], next_cursor: page.next_cursor } })
++      } catch (error) { if (current === generation && !signal.aborted) update({ error: String(error), stale: true }) }
++      finally { if (current === generation && !signal.aborted) update({ loading: false }) }
++    },
++    open,
++    invalidate: () => open(state.bindingId, 'refresh'),
++    dispose: () => { generation += 1; controller.abort() },
++  }
++}
++export function useVersionControl(bindingId: string, api: VersionControlApi = demoApi) {
++  const store = useMemo(() => createVersionControlStore(api), [api, bindingId])
++  const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
++  useEffect(() => { void store.open(bindingId); return () => store.dispose() }, [store, bindingId])
++  useEffect(() => {
++    const onReturn = () => { void store.open(bindingId, 'return') }
++    window.addEventListener('focus', onReturn)
++    return () => window.removeEventListener('focus', onReturn)
++  }, [store, bindingId])
++  return { ...state, nextPage: store.nextPage, refresh: (reason: 'history' | 'refresh' = 'refresh') => store.open(bindingId, reason) }
++}
+diff --git a/frontend/src/lib/version-control-api.test.ts b/frontend/src/lib/version-control-api.test.ts
+new file mode 100644
+index 0000000..fcd6390
+--- /dev/null
++++ b/frontend/src/lib/version-control-api.test.ts
+@@ -0,0 +1,43 @@
++import { expect, it, vi } from 'vitest'
++import { createMutationIntent, VersionControlApi } from './version-control-api'
++import { fingerprints } from '@/components/version-control/fixtures'
++
++it('loads_vc_contract_fixtures_without_type_or_nullability_drift', async () => {
++  const fixture = {
++    items: [{ binding_id: 'binding/1', binding_revision: 7,
++      heads: { observed: 'external-3', approved: 'approved-2', deployed: null },
++      drift: 'external_ahead', quarantined: false, unresolved_operation_id: null,
++      observed_at: null, projection_as_of: '2026-09-07T00:00:00Z', stale: true,
++      allowed_actions: [], reasons: ['Evidence unavailable'] }], next_cursor: null,
++  }
++  const transport = vi.fn(async () => new Response(JSON.stringify(fixture)))
++  const api = new VersionControlApi(transport)
++  expect(await api.overview()).toEqual(fixture)
++  expect(transport.mock.calls[0]).toEqual(['/api/version-control/overview?limit=25', { signal: undefined }])
++  await api.observe('binding/1', 'open', 'intent-1')
++  expect(transport.mock.calls[1]).toEqual(['/api/version-control/bindings/binding%2F1/observe', {
++    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'intent-1' },
++    body: JSON.stringify({ reason: 'open' }),
++  }])
++})
++
++it('double_click_or_network_loss_does_not_generate_new_mutation_key', async () => {
++  const intent = createMutationIntent()
++  const body = { version_id: 'version-1', expected_base: fingerprints, binding_revision: 3, approval_id: 'approval-1' }
++  const key = intent.key({ bindingId: 'binding-1', body })
++  expect(intent.key({ bindingId: 'binding-1', body })).toBe(key)
++  const transport = vi.fn().mockRejectedValue(new Error('Network lost after admission'))
++  const api = new VersionControlApi(transport)
++  const first = api.restore('binding-1', body, key)
++  const second = api.restore('binding-1', body, key)
++  await expect(first).rejects.toThrow('Network lost')
++  await expect(second).rejects.toThrow('Network lost')
++  await expect(api.restore('binding-1', body, key)).rejects.toThrow('Network lost')
++  expect(transport).toHaveBeenCalledTimes(1)
++  const changed = { ...body, version_id: 'version-2' }
++  const newKey = intent.key({ bindingId: 'binding-1', body: changed })
++  expect(newKey).not.toBe(key)
++  await expect(api.restore('binding-1', changed, key)).rejects.toThrow('different intent')
++  await expect(api.restore('binding-1', changed, newKey)).rejects.toThrow('Network lost')
++  expect(transport).toHaveBeenCalledTimes(2)
++})
+diff --git a/frontend/src/lib/version-control-api.ts b/frontend/src/lib/version-control-api.ts
+new file mode 100644
+index 0000000..dd6ebac
+--- /dev/null
++++ b/frontend/src/lib/version-control-api.ts
+@@ -0,0 +1,73 @@
++import type { ApiError, ApprovalInputs, ApprovalRecord, ApprovalRequest, BindingStatus, DeploymentReceipt, ObservationResult, Operation, OperationHandle, OverviewPage, ReconcileCommand, ReleaseCommand, ReleaseHandle, RestoreCommand, SemanticDiff, VersionDetail, VersionPage } from '@/types/version-control'
++
++export class VersionControlError extends Error implements ApiError {
++  code: string
++  operation_id?: string
++  retryable: boolean
++  stale: boolean
++  status: number
++  constructor(status: number, error: ApiError) {
++    super(error.message)
++    this.status = status
++    this.code = error.code
++    this.operation_id = error.operation_id
++    this.retryable = error.retryable
++    this.stale = error.stale
++  }
++}
++
++const bindingPath = (bindingId: string) => `/bindings/${encodeURIComponent(bindingId)}`
++export function createMutationIntent() {
++  let previous = ''
++  let key = ''
++  return { key: (body: unknown) => {
++    const serialized = JSON.stringify(body)
++    if (!key || serialized !== previous) { previous = serialized; key = crypto.randomUUID() }
++    return key
++  } }
++}
++const pageQuery = (cursor?: string, limit = 25) => {
++  const query = new URLSearchParams({ limit: String(Math.min(100, Math.max(1, limit))) })
++  if (cursor) query.set('cursor', cursor)
++  return query.toString()
++}
++
++export class VersionControlApi {
++  private transport: typeof fetch
++  private commands = new Map<string, { intent: string; result: Promise<unknown> }>()
++  constructor(transport: typeof fetch) { this.transport = transport }
++  private async request<Result>(path: string, init: RequestInit): Promise<Result> {
++    const response = await this.transport(`/api/version-control${path}`, init)
++    const payload = await response.json()
++    if (!response.ok) throw new VersionControlError(response.status, payload)
++    return payload as Result
++  }
++  private get<Result>(path: string, signal?: AbortSignal) { return this.request<Result>(path, { signal }) }
++  private post<Result>(path: string, body: unknown, key: string) {
++    const intent = JSON.stringify({ path, body })
++    const prior = this.commands.get(key)
++    if (prior) {
++      if (prior.intent !== intent) return Promise.reject(new VersionControlError(409, { code: 'IDEMPOTENCY_MISMATCH', message: 'Key belongs to a different intent; conflict preserved.', stale: true, retryable: false }))
++      return prior.result as Promise<Result>
++    }
++    const result = this.request<Result>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) })
++    this.commands.set(key, { intent, result })
++    return result
++  }
++  overview(cursor?: string, signal?: AbortSignal) { return this.get<OverviewPage>(`/overview?${pageQuery(cursor)}`, signal) }
++  status(bindingId: string, signal?: AbortSignal) { return this.get<BindingStatus>(`${bindingPath(bindingId)}/status`, signal) }
++  versions(bindingId: string, cursor?: string, signal?: AbortSignal) { return this.get<VersionPage>(`${bindingPath(bindingId)}/versions?${pageQuery(cursor)}`, signal) }
++  version(bindingId: string, versionId: string) { return this.get<VersionDetail>(`${bindingPath(bindingId)}/versions/${encodeURIComponent(versionId)}`) }
++  diff(bindingId: string, left: string, right: string) { return this.get<SemanticDiff>(`${bindingPath(bindingId)}/diff?${new URLSearchParams({ left, right })}`) }
++  observe(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return', key: string) { return this.post<ObservationResult>(`${bindingPath(bindingId)}/observe`, { reason }, key) }
++  restore(bindingId: string, body: RestoreCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/restore`, body, key) }
++  reconcile(bindingId: string, body: ReconcileCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/reconcile`, body, key) }
++  requestApproval(body: ApprovalInputs, key: string) { return this.post<ApprovalRequest>('/approvals', body, key) }
++  vote(approvalId: string, decision: 'approve' | 'reject', key: string) { return this.post<ApprovalRecord>(`/approvals/${encodeURIComponent(approvalId)}/votes`, { decision }, key) }
++  approval(approvalId: string) { return this.get<ApprovalRecord>(`/approvals/${encodeURIComponent(approvalId)}`) }
++  operation(operationId: string) { return this.get<Operation>(`/operations/${encodeURIComponent(operationId)}`) }
++  release(body: ReleaseCommand, key: string) { return this.post<ReleaseHandle>('/releases', body, key) }
++  validate(releaseId: string, key: string) { return this.post<OperationHandle>(`/releases/${encodeURIComponent(releaseId)}/validate`, {}, key) }
++  promote(releaseId: string, body: { approval_id: string }, key: string) { return this.post<OperationHandle>(`/releases/${encodeURIComponent(releaseId)}/promote`, body, key) }
++  receipt(releaseId: string) { return this.get<DeploymentReceipt | OperationHandle>(`/releases/${encodeURIComponent(releaseId)}/receipt`) }
++}
+diff --git a/frontend/src/pages/VersionControlWorkbench.tsx b/frontend/src/pages/VersionControlWorkbench.tsx
+new file mode 100644
+index 0000000..f1dc281
+--- /dev/null
++++ b/frontend/src/pages/VersionControlWorkbench.tsx
+@@ -0,0 +1,24 @@
++import { useEffect, useRef, useState } from 'react'
++import { VersionControlOverview } from '@/components/version-control/overview'
++import { VersionControlTab } from '@/components/version-control/version-control-tab'
++import { demoApi } from '@/components/version-control/demo-api'
++
++export function VersionControlWorkbench() {
++  const [bindingId, setBindingId] = useState(() => typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('binding') ?? '')
++  const heading = useRef<HTMLHeadingElement>(null)
++  useEffect(() => { if (bindingId) heading.current?.focus() }, [bindingId])
++  return <main className="min-h-screen bg-background text-primary p-6 mx-auto max-w-6xl space-y-6 [&_button]:rounded [&_button]:border [&_button]:border-border [&_button]:px-3 [&_button]:py-2 [&_button]:m-1 [&_button:disabled]:opacity-50 [&_input]:border [&_input]:border-border [&_input]:rounded [&_input]:p-2 [&_input]:m-2 [&_select]:border [&_select]:p-2 [&_pre]:overflow-auto [&_pre]:text-xs [&_h3]:font-semibold [&_section]:space-y-3">
++    <header className="space-y-2">
++      <h1 className="text-2xl font-bold">VC/1.0 API-faked foundation</h1>
++      <p role="note">No real endpoints. All history, identities, votes, jobs and receipts are local fixtures; nothing is deployed.</p>
++      <p>Demo approvals include a seeded first reviewer; voting acts as the second fixture reviewer, never as a supplied identity.</p>
++      <p>Promotion example: target <code>demo-target</code>, mapping <code>mapping-1</code>, policy <code>production</code>.</p>
++      <a href="?view=list">Leave demo and return to Agents</a>
++    </header>
++    {bindingId ? <>
++      <button onClick={() => setBindingId('')}>Back to version overview</button>
++      <h2 ref={heading} tabIndex={-1}>Agent binding: {bindingId}</h2>
++      <VersionControlTab key={bindingId} bindingId={bindingId} api={demoApi} />
++    </> : <VersionControlOverview api={demoApi} onSelect={setBindingId} />}
++  </main>
++}
+diff --git a/frontend/src/types/version-control.ts b/frontend/src/types/version-control.ts
+new file mode 100644
+index 0000000..ce2fda9
+--- /dev/null
++++ b/frontend/src/types/version-control.ts
+@@ -0,0 +1,62 @@
++export type DriftState = 'clean' | 'external_ahead' | 'desired_ahead' | 'diverged' | 'unknown' | 'unreachable' | 'applied_unverified' | 'conflicted'
++export type OperationStatus = 'requested' | 'preimage_captured' | 'apply_attempted' | 'applied_unverified' | 'applied_partial' | 'confirmed' | 'conflicted' | 'quarantined' | 'failed' | 'compensation_attempted' | 'compensated' | 'noop'
++export type Origin = 'workbench' | 'external' | 'optimizer' | 'restore' | 'promotion' | 'unknown'
++export interface Heads { observed: string | null; approved: string | null; deployed: string | null }
++export interface Fingerprints { config: string; benchmark: string; metadata: string; canonicalizer_version: string }
++export interface BindingStatus {
++  binding_id: string; binding_revision: number; heads: Heads; drift: DriftState
++  quarantined: boolean; unresolved_operation_id: string | null
++  observed_at: string | null; projection_as_of: string; stale: boolean
++  allowed_actions: string[]; reasons: string[]
++}
++export interface VersionSummary {
++  version_id: string; binding_id: string; observed_at: string; origin: Origin; observed_by: string
++  parent_version_id: string | null; restored_from_version_id: string | null
++  fingerprints: Fingerprints; optimizer_run_id: string | null; champion_id: string | null
++}
++export interface Page<Item> { items: Item[]; next_cursor: string | null }
++export type VersionPage = Page<VersionSummary>
++export type OverviewPage = Page<BindingStatus>
++export interface VersionDetail extends VersionSummary { snapshot?: unknown }
++export interface OperationHandle { operation_id: string; status: OperationStatus; job_run_id: string | null }
++export interface Operation extends OperationHandle { checkpoints: string[]; audit: string[]; receipt_references: string[] }
++export interface DiffItem {
++  category: 'sources' | 'columns' | 'instructions' | 'joins' | 'filters' | 'parameters' | 'sql' | 'benchmarks' | 'questions' | 'metadata' | 'bindings'
++  path: string; change: 'added' | 'removed' | 'modified'; before: unknown; after: unknown; review_required: boolean
++}
++export interface SemanticDiff { items: DiffItem[]; comparison: 'known' | 'unknown' }
++export interface ObservationResult { status: BindingStatus; captured_version: VersionSummary | null; busy: boolean }
++export interface ApiError { code: string; message: string; operation_id?: string; retryable: boolean; stale: boolean }
++export interface ReviewedCommand { binding_revision: number; expected_base: Fingerprints; approval_id: string }
++export interface RestoreCommand extends ReviewedCommand { version_id: string }
++export interface ReconcileCommand extends ReviewedCommand { action: 'adopt' | 'reapply' | 'acknowledge'; policy_inputs: Record<string, unknown> }
++export interface ApprovalInputs {
++  schema_version: string; operation_id: string; operation_type: string; source_version_id: string
++  raw_source_digest: string; source_fingerprints: Fingerprints; artifact_digest?: string; mapping_digest?: string
++  rendered_target_digest: string; transformer_version?: string; canonicalizer_version: string
++  target_binding: string; expected_base_fingerprints: Fingerprints; permission_policy_digest?: string
++  validation_policy_digest: string; benchmark_policy_digest: string; preflight_evidence_digest: string
++  thresholds: Record<string, number>; requester_id: string; recovery_policy: string; expires_at: string
++}
++export interface ApprovalRequest { approval_id: string; inputs: ApprovalInputs }
++export interface ApprovalRecord extends ApprovalRequest {
++  approval_digest: string | null; valid: boolean; invalidation_reasons: string[]; allowed_actions: string[]
++  votes: { actor_id: string; decision: 'approve' | 'reject'; recorded_at: string; target_group_eligible: boolean }[]
++}
++export interface PackageManifest {
++  schema_version: string; space_key: string; source_version_id: string; raw_source_digest: string
++  source_fingerprints: Fingerprints; artifact_digest: string; mapping_digest: string; transformer_version: string
++  required_sources: string[]; validation_policy_digest: string; benchmark_policy_digest: string
++  ownership: Record<string, string>; file_digests: Record<string, string>; package_digest: string
++}
++export interface DeploymentReceipt {
++  schema_version: string; release_id: string; operation_id: string; target_binding: string; attempt_id: string
++  generation: number; coordination_backend: 'delta'; approval_id: string; approval_digest: string
++  source_version_id: string; package_digest: string; mapping_digest: string
++  intended_fingerprints: Fingerprints; rendered_fingerprints: Fingerprints; observed_fingerprints: Fingerprints
++  pre_version_id: string; post_version_id?: string | null; transformer_version: string; canonicalizer_version: string
++  executor_id: string; job_run_id: string; validation_evidence_digest: string; benchmark_evidence_digest: string
++  status: OperationStatus; compensation_operation_id?: string | null; recorded_at: string
++}
++export interface ReleaseCommand { source_binding: string; source_version_id: string; target_binding: string; mapping_digest: string; policy: string }
++export interface ReleaseHandle extends OperationHandle { release_id: string }

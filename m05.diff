@@ -1,0 +1,1613 @@
+diff --git a/backend/jobs/vc_reconcile.py b/backend/jobs/vc_reconcile.py
+new file mode 100644
+index 0000000..8228654
+--- /dev/null
++++ b/backend/jobs/vc_reconcile.py
+@@ -0,0 +1,59 @@
++"""Target-local scheduled observation; no mutation implementation or fallback."""
++
++import argparse
++from uuid import UUID
++
++from backend.services.version_control import contracts as vc
++
++
++def run_scan(workspace_id, cursor, *, service, executor):
++    if (executor.workspace_id != workspace_id or executor.actor_kind != "service"
++            or not executor.execution_ref.startswith("job/") or service.executor != executor):
++        raise PermissionError("Reconciliation scan requires its target-local Job executor")
++    if service.identity is None:
++        raise PermissionError("Job run_as verifier unavailable")
++    service.identity.verify_run_as(executor.execution_ref, executor.principal_id)
++    return service.scan(workspace_id, cursor)
++
++
++def run_reapply(operation_id, *, facts, gate, identity, executor, enabled=False):
++    if enabled is not True:
++        raise PermissionError("VC reapply Job writes disabled")
++    if str(UUID(operation_id)) != operation_id:
++        raise ValueError("Canonical operation ID required")
++    if executor.actor_kind != "service" or not executor.execution_ref.startswith("job/"):
++        raise PermissionError("Reapply requires a target-local Job executor")
++    identity.verify_run_as(executor.execution_ref, executor.principal_id)
++    operation = facts.get_request(operation_id)
++    request, approval = operation.request, operation.approval
++    if (not isinstance(request, vc.MutationRequest) or request.operation_type != "reapply"
++            or request.identity.operation_id != operation_id or request.binding.workspace_id != executor.workspace_id
++            or approval is None or approval.status != vc.FactStatus.APPROVED or approval.approval_digest is None):
++        raise PermissionError("Reapply requires a fresh approved immutable operation")
++    inputs = approval.request.inputs
++    if (inputs.operation_id != operation_id or inputs.operation_type != "reapply"
++            or inputs.target_binding != request.binding or request.approval_id != approval.request.approval_id
++            or inputs.expected_base_fingerprints.state_digest != request.expected_base
++            or inputs.source_version_id != request.source_version_id):
++        raise PermissionError("Reapply approval does not bind the new operation and base")
++    return gate.execute(request, executor)
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser()
++    selection = parser.add_mutually_exclusive_group(required=True)
++    selection.add_argument("--workspace-id")
++    selection.add_argument("--operation-id")
++    parser.add_argument("--cursor")
++    args = parser.parse_args(argv)
++    from backend.jobs import build_vc_runtime
++    runtime = build_vc_runtime("reconcile")
++    if args.operation_id:
++        return run_reapply(args.operation_id, facts=runtime.facts, gate=runtime.gate,
++                           identity=runtime.identity, executor=runtime.executor,
++                           enabled=runtime.flags.enabled("vc_reapply_enabled"))
++    return run_scan(args.workspace_id, args.cursor, service=runtime.service, executor=runtime.executor)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/backend/routers/vc_reconcile.py b/backend/routers/vc_reconcile.py
+new file mode 100644
+index 0000000..3a3effa
+--- /dev/null
++++ b/backend/routers/vc_reconcile.py
+@@ -0,0 +1,93 @@
++"""M05 authenticated projection and command routes; M08 owns mounting."""
++
++from typing import Annotated, Literal
++from uuid import NAMESPACE_URL, UUID, uuid5
++
++from fastapi import APIRouter, Header, HTTPException, Query, Request
++from pydantic import BaseModel, ConfigDict, Field
++
++from backend.services.version_control import contracts as vc
++from backend.services.version_control.drift.errors import ReconcileError
++
++
++class ReconcileBody(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    action: Literal["adopt", "reapply", "acknowledge"]
++    binding_revision: int = Field(gt=0)
++    expected_base: str = Field(pattern=r"^[0-9a-f]{64}$")
++    approval_id: UUID | None = None
++    policy_inputs: dict = Field(default_factory=dict)
++
++
++def _invoke(call):
++    try:
++        return vc.to_wire(call())
++    except HTTPException:
++        raise
++    except ReconcileError as error:
++        raise HTTPException(error.http_status, detail=vc.to_wire(error.error)) from error
++    except PermissionError as error:
++        code, status, stale = "scope_denied", 403, False
++        message = str(error)
++    except LookupError:
++        code, status, stale = "resource_not_found", 404, False
++        message = "Scoped resource not found"
++    except (ValueError, TypeError) as error:
++        code, status, stale = "request_conflict", 409, False
++        message = str(error)
++    except Exception:
++        code, status, stale = "evidence_unavailable", 503, True
++        message = "Evidence unavailable; do not replay mutation"
++    raise HTTPException(status, detail=vc.to_wire(vc.ApiError(
++        code=code, message=message, retryable=False, stale=stale)))
++
++
++def build_router(*, service, identity, registry, authorize_history):
++    router = APIRouter(prefix="/api/version-control")
++
++    def actor_for(request):
++        authentication = getattr(request.state, "vc_auth", None)
++        if authentication is None:
++            raise HTTPException(401, detail=vc.to_wire(vc.ApiError(
++                code="authentication_required", message="Authentication required", retryable=False, stale=False)))
++        return identity.actor(authentication)
++
++    def scope(request, binding_id):
++        actor = actor_for(request)
++        binding = registry.resolve(str(binding_id))
++        if (binding.binding_id != str(binding_id) or actor.workspace_id != binding.workspace_id
++                or authorize_history(actor, binding) is not True):
++            raise PermissionError("Binding history scope denied")
++        return actor, binding
++
++    @router.get("/overview")
++    def overview(request: Request, cursor: str | None = None,
++                 limit: Annotated[int, Query(ge=1, le=100)] = 100):
++        return _invoke(lambda: service.overview(actor_for(request), cursor, limit))
++
++    @router.get("/bindings/{binding_id}/status")
++    def status(binding_id: UUID, request: Request):
++        def read():
++            actor, binding = scope(request, binding_id)
++            return service.status(binding, actor)
++        return _invoke(read)
++
++    @router.post("/bindings/{binding_id}/reconcile", status_code=202)
++    def reconcile(binding_id: UUID, body: ReconcileBody, request: Request,
++                  idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)]):
++        def submit():
++            actor, binding = scope(request, binding_id)
++            payload = body.model_dump(mode="json")
++            digest = vc.canonical_json_hash("vc-reconcile-request/1", {
++                "binding": vc.to_wire(binding), "actor": vc.to_wire(actor), "body": payload})
++            key = vc.canonical_json_hash("vc-reconcile-key/1", {
++                "workspace_id": actor.workspace_id, "binding_id": binding.binding_id,
++                "actor": actor.subject_id, "key": idempotency_key})
++            operation_id = str(uuid5(NAMESPACE_URL, key))
++            action = vc.ReconcileRequest(vc.RequestIdentity(operation_id, idempotency_key, digest),
++                                         body.action, body.binding_revision, body.expected_base,
++                                         str(body.approval_id) if body.approval_id else None, body.policy_inputs)
++            return service.reconcile(binding, action, actor)
++        return _invoke(submit)
++
++    return router
+diff --git a/backend/services/version_control/drift/__init__.py b/backend/services/version_control/drift/__init__.py
+new file mode 100644
+index 0000000..78df563
+--- /dev/null
++++ b/backend/services/version_control/drift/__init__.py
+@@ -0,0 +1,5 @@
++"""Policy-relative drift and preserve-before-choice reconciliation."""
++
++from .service import DriftService
++
++__all__ = ["DriftService"]
+diff --git a/backend/services/version_control/drift/errors.py b/backend/services/version_control/drift/errors.py
+new file mode 100644
+index 0000000..011f6d8
+--- /dev/null
++++ b/backend/services/version_control/drift/errors.py
+@@ -0,0 +1,11 @@
++"""Fail-closed command errors; an operation ID is for polling, never replay."""
++
++from backend.services.version_control import contracts as vc
++
++
++class ReconcileError(RuntimeError):
++    def __init__(self, code, message, *, http_status=503, operation_id=None, stale=True):
++        super().__init__(message)
++        self.http_status = http_status
++        self.error = vc.ApiError(code=code, message=message, operation_id=operation_id,
++                                 retryable=False, stale=stale)
+diff --git a/backend/services/version_control/drift/ports.py b/backend/services/version_control/drift/ports.py
+new file mode 100644
+index 0000000..f64dca6
+--- /dev/null
++++ b/backend/services/version_control/drift/ports.py
+@@ -0,0 +1,79 @@
++"""M05 composition seams using VC/1.0 values; no local policy authority."""
++
++from typing import Protocol
++from dataclasses import dataclass
++from datetime import datetime
++
++from backend.services.version_control import contracts as vc
++
++
++class ReconcilePolicy(Protocol):
++    def inputs(self, binding: vc.BindingRef, request: vc.ReconcileRequest,
++               source: vc.Version, base: vc.Version, actor: vc.ActorContext) -> vc.ApprovalInputs: ...
++
++    def authorize_acknowledgement(self, inputs: vc.ApprovalInputs, actor: vc.ActorContext) -> bool: ...
++
++
++class CoordinationReadiness(Protocol):
++    def assert_available(self, binding: vc.BindingRef) -> None:
++        """Require authoritative coordination/evidence; never a memory or Lakebase fallback."""
++        ...
++
++
++@dataclass(frozen=True)
++class ScanEntry(vc.WireValue):
++    binding: vc.BindingRef
++    status: vc.BindingStatus
++    api_update_time: datetime | None
++    previous_update_time: datetime | None
++    last_full_fetch_at: datetime | None
++    governed_by: str = "workbench"
++
++
++@dataclass(frozen=True)
++class BundleResource(vc.WireValue):
++    workspace_id: str
++    space_id: str | None
++    bundle: str
++    resource_path: str
++    manages_content: bool
++    audit_actor: str | None
++
++
++@dataclass(frozen=True)
++class BundleSnapshot(vc.WireValue):
++    resources: tuple[BundleResource, ...]
++    complete: bool
++
++
++class BundleInventory(Protocol):
++    def for_binding(self, binding: vc.BindingRef) -> BundleSnapshot: ...
++
++
++@dataclass(frozen=True)
++class ApprovedTarget(vc.WireValue):
++    head_id: str
++    approval: vc.ApprovalRecord
++    rendered: vc.Snapshot
++    preflight: vc.PreflightEvidence
++
++
++class ApprovedTargets(Protocol):
++    def resolve(self, binding: vc.BindingRef, head_id: str) -> ApprovedTarget: ...
++
++
++class BindingInventory(Protocol):
++    def page(self, workspace_id: str, cursor: str | None, limit: int) -> vc.Page[ScanEntry]: ...
++
++    def matches(self, binding: vc.BindingRef) -> tuple[vc.BindingRef, ...]:
++        """All physical/logical identity matches across pages, including duplicate rows."""
++        ...
++
++
++class Projections(Protocol):
++    def page(self, actor: vc.ActorContext, cursor: str | None, limit: int) -> vc.OverviewPage: ...
++
++    def get(self, binding: vc.BindingRef, actor: vc.ActorContext) -> vc.BindingStatus: ...
++
++    def publish(self, binding: vc.BindingRef, status: vc.BindingStatus,
++                full_fetch_at: datetime | None, api_update_time: datetime | None) -> None: ...
+diff --git a/backend/services/version_control/drift/service.py b/backend/services/version_control/drift/service.py
+new file mode 100644
+index 0000000..2607853
+--- /dev/null
++++ b/backend/services/version_control/drift/service.py
+@@ -0,0 +1,431 @@
++"""VC/1.0 orchestration; dependencies are injected domain ports."""
++
++from dataclasses import dataclass, replace
++from datetime import datetime, timedelta, timezone
++from uuid import NAMESPACE_URL, uuid5
++
++from backend.services.version_control import contracts as vc
++
++from .errors import ReconcileError
++from .ports import ApprovedTargets, BindingInventory, BundleInventory, CoordinationReadiness, Projections, ReconcilePolicy
++
++
++@dataclass(frozen=True)
++class Classification(vc.DriftResult):
++    common_base: str | None = None
++    policy_target: str | None = None
++    allowed_actions: tuple[str, ...] = ()
++    quarantined: bool = False
++    unresolved_operation_id: str | None = None
++    conflicted: bool = False
++
++
++class DriftService:
++    def __init__(self, *, canonicalizer: vc.Canonicalizer, observer: vc.Observer | None = None,
++                 executor: vc.ExecutorContext | None = None, ledger: vc.VersionLedger | None = None,
++                 policy: ReconcilePolicy | None = None, approvals: vc.ApprovalService | None = None,
++                 identity: vc.IdentityProvider | None = None, reconcile_enabled=False,
++                 clock=None, dispatcher: vc.JobDispatcher | None = None,
++                 facts: vc.OperationFacts | None = None, dispatch_enabled=False,
++                 inventory: BindingInventory | None = None, projections: Projections | None = None,
++                 scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30),
++                 bundles: BundleInventory | None = None, coordination: vc.Coordination | None = None,
++                 registry: vc.Registry | None = None, authorize_history=None,
++                 stale_after=timedelta(minutes=30), approved_targets: ApprovedTargets | None = None,
++                 readiness: CoordinationReadiness | None = None):
++        if not 1 <= batch_size <= 100 or full_fetch_interval <= timedelta(0):
++            raise ValueError("Invalid scan bounds or full-fetch interval")
++        self.canonicalizer = canonicalizer
++        self.observer = observer
++        self.executor = executor
++        self.ledger = ledger
++        self.policy = policy
++        self.approvals = approvals
++        self.identity = identity
++        self.reconcile_enabled = reconcile_enabled
++        self.clock = clock or (lambda: datetime.now(timezone.utc))
++        self.dispatcher = dispatcher
++        self.facts = facts
++        self.dispatch_enabled = dispatch_enabled
++        self.inventory = inventory
++        self.projections = projections
++        self.scan_enabled = scan_enabled
++        self.batch_size = batch_size
++        self.full_fetch_interval = full_fetch_interval
++        self.bundles = bundles
++        self.coordination = coordination
++        self.registry = registry
++        self.authorize_history = authorize_history
++        self.stale_after = stale_after
++        self.approved_targets = approved_targets
++        self.readiness = readiness
++
++    def overview(self, actor: vc.ActorContext, cursor: str | None = None, limit: int = 100) -> vc.OverviewPage:
++        if not 1 <= limit <= 100:
++            raise ValueError("Overview limit must be between 1 and 100")
++        if self.projections is None or self.registry is None:
++            raise RuntimeError("Projection reader unavailable")
++        page = self.projections.page(actor, cursor, limit)
++        if len(page.items) > limit:
++            raise ValueError("Projection page exceeded requested bound")
++        items = []
++        for status in page.items:
++            binding = self.registry.resolve(status.binding_id)
++            self._history_scope(binding, actor)
++            items.append(self._projected_status(binding, status))
++        return vc.OverviewPage(tuple(items), page.next_cursor)
++
++    def status(self, binding: vc.BindingRef, actor: vc.ActorContext) -> vc.BindingStatus:
++        self._history_scope(binding, actor)
++        if self.projections is None:
++            raise RuntimeError("Projection reader unavailable")
++        return self._projected_status(binding, self.projections.get(binding, actor))
++
++    def history(self, binding: vc.BindingRef, actor: vc.ActorContext,
++                cursor: str | None = None, limit: int = 100) -> vc.VersionPage:
++        self._history_scope(binding, actor)
++        if not 1 <= limit <= 100:
++            raise ValueError("History limit must be between 1 and 100")
++        if self.ledger is None:
++            raise RuntimeError("History reader unavailable")
++        page = self.ledger.history(binding, cursor, limit)
++        if len(page.items) > limit or any(item.binding_id != binding.binding_id for item in page.items):
++            raise PermissionError("History page scope or bound mismatch")
++        return page
++
++    def _history_scope(self, binding, actor):
++        if (binding.workspace_id != actor.workspace_id or self.authorize_history is None
++                or self.authorize_history(actor, binding) is not True):
++            raise PermissionError("Binding history scope denied")
++
++    def _projected_status(self, binding, status):
++        if status.binding_id != binding.binding_id or status.binding_revision != binding.binding_revision:
++            raise PermissionError("Projection binding scope mismatch")
++        try:
++            self._require_coordination(binding)
++        except Exception:
++            status = replace(status, stale=True, allowed_actions=(),
++                             reasons=(*status.reasons, "Coordination unavailable; history remains read-only"))
++        stale = (status.stale or status.projection_as_of > self.clock()
++                 or self.clock() - status.projection_as_of >= self.stale_after
++                 or status.observed_at is None or status.observed_at > self.clock()
++                 or self.clock() - status.observed_at >= self.stale_after)
++        blocked = stale or status.quarantined or status.unresolved_operation_id or status.drift in (
++            vc.DriftState.UNKNOWN, vc.DriftState.UNREACHABLE, vc.DriftState.APPLIED_UNVERIFIED, vc.DriftState.CONFLICTED)
++        actions = () if blocked else tuple(action for action in status.allowed_actions
++            if action == "compare" or (self.reconcile_enabled is True
++                and action in ("adopt", "acknowledge", "reapply")
++                and (action != "reapply" or self.dispatch_enabled is True)))
++        return replace(status, stale=stale, allowed_actions=actions,
++                       reasons=(*status.reasons, "Projection stale; refresh via observer") if stale else status.reasons)
++
++    def scan(self, workspace_id: str, cursor: str | None) -> vc.ReconcileBatch:
++        if self.scan_enabled is not True:
++            raise PermissionError("VC scheduled observation disabled")
++        if self.executor is None or self.executor.workspace_id != workspace_id:
++            raise PermissionError("Scan executor workspace mismatch")
++        if self.inventory is None or self.projections is None or self.observer is None:
++            raise RuntimeError("Scan inventory, projection or observer unavailable")
++        page = self.inventory.page(workspace_id, cursor, self.batch_size)
++        if len(page.items) > self.batch_size:
++            raise ValueError("Inventory exceeded scan bound")
++        results = []
++        for entry in page.items:
++            status = entry.status
++            full_fetch_at = entry.last_full_fetch_at
++            try:
++                if (entry.binding.workspace_id != workspace_id
++                        or status.binding_id != entry.binding.binding_id
++                        or status.binding_revision != entry.binding.binding_revision):
++                    raise PermissionError("Inventory binding scope mismatch")
++                matches = self.inventory.matches(entry.binding)
++                if len(matches) != 1 or matches[0] != entry.binding:
++                    reason = "Ambiguous binding inventory; audited manual identity resolution required"
++                    status = replace(status, drift=vc.DriftState.UNKNOWN, quarantined=True,
++                                     allowed_actions=(), reasons=(*status.reasons, reason))
++                    if self.coordination is None:
++                        raise RuntimeError("Identity quarantine coordinator unavailable")
++                    lease = self.coordination.observe_exclusively(entry.binding, self.executor)
++                    if (lease.fence.binding_id != entry.binding.binding_id
++                            or lease.fence.binding_revision != entry.binding.binding_revision):
++                        raise PermissionError("Identity quarantine fence mismatch")
++                    self.coordination.quarantine(lease.fence, reason)
++                    self.projections.publish(entry.binding, status, entry.last_full_fetch_at,
++                                             entry.previous_update_time)
++                    results.append(status)
++                    continue
++                conflicts = ()
++                if entry.governed_by == "workbench":
++                    status = replace(status, drift=vc.DriftState.UNKNOWN, allowed_actions=())
++                    if self.bundles is None:
++                        raise RuntimeError("Sanctioned bundle inventory unavailable")
++                    bundle_snapshot = self.bundles.for_binding(entry.binding)
++                    if not bundle_snapshot.complete:
++                        raise RuntimeError("Sanctioned bundle inventory incomplete")
++                    conflicts = tuple(resource for resource in bundle_snapshot.resources
++                                      if resource.workspace_id == workspace_id
++                                      and resource.space_id == entry.binding.space_id
++                                      and resource.manages_content
++                                      and resource.resource_path.startswith("resources.genie_spaces."))
++                    status = self._bundle_status(entry.status, conflicts)
++                due = (conflicts or status.stale or full_fetch_at is None or full_fetch_at > self.clock()
++                       or self.clock() - full_fetch_at >= self.full_fetch_interval
++                       or entry.api_update_time is None or entry.api_update_time != entry.previous_update_time)
++                if due:
++                    captured = self.observer.capture(entry.binding, "scheduled_reconcile", self.executor)
++                    status = captured.status
++                    if (status.binding_id != entry.binding.binding_id
++                            or status.binding_revision != entry.binding.binding_revision):
++                        status = entry.status
++                        raise PermissionError("Observation binding scope mismatch")
++                    if captured.busy or status.stale:
++                        status = self._bundle_status(status, conflicts)
++                        raise RuntimeError("Observation busy or unavailable")
++                    status = self._observed_status(entry.binding, status)
++                    status = self._bundle_status(status, conflicts)
++                    full_fetch_at = self.clock()
++                self.projections.publish(entry.binding, status, full_fetch_at, entry.api_update_time)
++            except Exception:
++                status = replace(status, stale=True, allowed_actions=(),
++                                 reasons=(*status.reasons, "Reconciliation evidence unavailable; no mutation replay"))
++                if full_fetch_at == entry.last_full_fetch_at:
++                    try:
++                        self.projections.publish(entry.binding, status, entry.last_full_fetch_at,
++                                                 entry.previous_update_time)
++                    except Exception:
++                        pass
++            results.append(status)
++        return vc.ReconcileBatch(tuple(results), page.next_cursor)
++
++    def _bundle_status(self, status, conflicts):
++        if not conflicts:
++            return status
++        reasons = tuple(f"Dual authority: {resource.bundle} {resource.resource_path}; "
++                        f"actor={resource.audit_actor or 'unknown'}" for resource in conflicts)
++        return replace(status, drift=vc.DriftState.CONFLICTED, allowed_actions=(),
++                       reasons=(*status.reasons, *reasons))
++
++    def reconcile(self, binding: vc.BindingRef, action: vc.ReconcileRequest,
++                  actor: vc.ActorContext) -> vc.OperationHandle:
++        try:
++            return self._reconcile(binding, action, actor)
++        except ReconcileError as error:
++            if error.error.operation_id is None:
++                error.error = replace(error.error, operation_id=action.identity.operation_id)
++            raise
++        except (ValueError, TypeError) as error:
++            raise ReconcileError("request_conflict", str(error), http_status=409,
++                                 operation_id=action.identity.operation_id) from error
++        except PermissionError:
++            raise
++        except Exception as error:
++            raise ReconcileError("evidence_unavailable", "Coordination or evidence unavailable; poll operation, do not replay",
++                                 operation_id=action.identity.operation_id) from error
++
++    def _require_coordination(self, binding):
++        if self.readiness is None:
++            raise RuntimeError("Authoritative coordination readiness unavailable")
++        self.readiness.assert_available(binding)
++
++    def _reconcile(self, binding, action, actor):
++        if self.reconcile_enabled is not True:
++            raise PermissionError("VC reconciliation writes disabled")
++        if (self.identity is None or actor.workspace_id != binding.workspace_id
++                or self.identity.can_edit(actor.subject_id, binding) is not True):
++            raise PermissionError("Reconciliation requires target edit permission")
++        if action.binding_revision != binding.binding_revision:
++            raise ValueError("Binding revision changed")
++        if {"automatic_merge", "merged_payload", "serialized_space", "sql"} & action.policy_inputs.keys():
++            raise ValueError("Manual merge requires a reviewed new payload through the gated edit flow")
++        if action.action not in ("adopt", "reapply", "acknowledge"):
++            raise ValueError("Unsupported reconciliation action")
++        if action.action == "reapply" and (self.dispatch_enabled is not True or self.dispatcher is None):
++            raise PermissionError("VC reconciliation Job dispatch disabled")
++        if self.ledger is None or self.policy is None or self.approvals is None:
++            raise RuntimeError("Reconciliation policy/evidence unavailable")
++        self._require_coordination(binding)
++        captured = self.prepare_choice(binding)
++        base = self.ledger.get_version(binding, captured.status.heads.observed)
++        if (base.context.binding != binding or base.version_id != captured.status.heads.observed
++                or base.snapshot.state_digest != action.expected_base):
++            raise ValueError("Captured base changed; review the preserved observation")
++        source = base
++        if action.action in ("reapply", "acknowledge"):
++            source = self.ledger.get_version(binding, captured.status.heads.approved)
++            if source.context.binding != binding or source.version_id != captured.status.heads.approved:
++                raise PermissionError("Policy target is not target-local")
++        inputs = self.policy.inputs(binding, replace(action, approval_id=None), source, base, actor)
++        if (inputs.target_binding != binding or inputs.operation_id != action.identity.operation_id
++                or inputs.operation_type != action.action or inputs.requester_id != actor.subject_id
++                or inputs.source_version_id != source.version_id
++                or inputs.raw_source_digest != source.snapshot.raw_state_digest
++                or inputs.source_fingerprints != source.snapshot.fingerprints
++                or inputs.expected_base_fingerprints != base.snapshot.fingerprints
++                or inputs.rendered_target_digest != source.snapshot.state_digest
++                or inputs.canonicalizer_version != source.snapshot.fingerprints.canonicalizer_version
++                or inputs.expires_at <= self.clock()):
++            raise PermissionError("Policy inputs do not bind the captured target and source")
++        if action.action == "acknowledge":
++            reason = action.policy_inputs.get("reason")
++            if not isinstance(reason, str) or not reason.strip():
++                raise ValueError("Acknowledgement requires an explicit reason")
++            inputs = replace(inputs, recovery_policy={**inputs.recovery_policy,
++                             "acknowledged_heads": vc.to_wire(captured.status.heads), "reason": reason})
++            if self.policy.authorize_acknowledgement(inputs, actor) is not True:
++                raise PermissionError("Acknowledgement denied by policy")
++            if self.facts is None:
++                raise RuntimeError("Acknowledgement facts unavailable")
++            self.facts.append(self._fact(binding, action, actor, inputs, base,
++                                         vc.FactKind.ACKNOWLEDGEMENT, vc.FactStatus.ACKNOWLEDGED))
++            return vc.OperationHandle(action.identity.operation_id, vc.OperationStatus.CONFIRMED, None)
++        if action.action == "reapply" and action.approval_id:
++            if self.facts is None:
++                raise RuntimeError("Approval invalidation evidence unavailable")
++            usage = self.facts.approval_use(binding, action.approval_id)
++            if usage.ambiguous or usage.binding != binding or usage.approval_id != action.approval_id:
++                raise PermissionError("Stale approval scope is ambiguous")
++            self.facts.append(self._fact(binding, action, actor, inputs, base,
++                                         vc.FactKind.APPROVAL_INVALIDATED, vc.FactStatus.INVALIDATED))
++        self.approvals.request(inputs, actor)
++        if action.action == "reapply":
++            return self.dispatcher.submit_local(action.identity.operation_id, "reconcile")
++        return vc.OperationHandle(action.identity.operation_id, vc.OperationStatus.REQUESTED, None)
++
++    def compare(self, binding: vc.BindingRef, left: str, right: str,
++                actor: vc.ActorContext) -> vc.SemanticDiff:
++        if (self.identity is None or actor.workspace_id != binding.workspace_id
++                or self.identity.can_edit(actor.subject_id, binding) is not True):
++            raise PermissionError("Comparison scope denied")
++        if self.ledger is None:
++            raise RuntimeError("History unavailable")
++        versions = [self.ledger.get_version(binding, reference) for reference in (left, right)]
++        if any(version.context.binding != binding or version.version_id != reference
++               for version, reference in zip(versions, (left, right))):
++            raise PermissionError("Comparison history binding mismatch")
++        before, after = (version.snapshot for version in versions)
++        comparison = self.canonicalizer.compare(before, after)
++        if comparison == vc.Comparison.UNKNOWN:
++            return vc.SemanticDiff(comparison, ())
++        items = self.canonicalizer.semantic_diff(before, after)
++        return vc.SemanticDiff(comparison, tuple(replace(item, review_required=True)
++                                                if item.category == vc.DiffCategory.SQL else item for item in items))
++
++    def with_acknowledgement(self, status: vc.BindingStatus, fact: vc.OperationFact) -> vc.BindingStatus:
++        evidence = fact.evidence
++        if (fact.fact_kind != vc.FactKind.ACKNOWLEDGEMENT or fact.status != vc.FactStatus.ACKNOWLEDGED
++                or fact.binding.binding_id != status.binding_id
++                or fact.binding.binding_revision != status.binding_revision
++                or not isinstance(evidence, vc.ApprovalInputs) or evidence.expires_at <= self.clock()
++                or evidence.recovery_policy.get("acknowledged_heads") != vc.to_wire(status.heads)):
++            return status
++        return replace(status, reasons=(*status.reasons, "Acknowledged divergence; policy heads remain unchanged"),
++                       allowed_actions=tuple(action for action in status.allowed_actions if action != "acknowledge"))
++
++    def _fact(self, binding, action, actor, inputs, base, kind, status):
++        key = f"{action.identity.operation_id}:{kind.value}"
++        return vc.OperationFact(str(uuid5(NAMESPACE_URL, key)), kind, action.identity.operation_id,
++                                0, key, binding, action.identity, action.action, actor.subject_id,
++                                actor, status, inputs, self.clock(),
++                                expected_base_fingerprint=base.snapshot.state_digest,
++                                pre_version_id=base.version_id, approval_id=action.approval_id)
++
++    def prepare_choice(self, binding: vc.BindingRef) -> vc.ObservationResult:
++        if self.observer is None or self.executor is None or self.executor.workspace_id != binding.workspace_id:
++            raise RuntimeError("Target-local observer unavailable")
++        captured = self.observer.capture(binding, "reconcile", self.executor)
++        status = captured.status
++        if (status.quarantined or status.unresolved_operation_id
++                or status.drift == vc.DriftState.APPLIED_UNVERIFIED):
++            raise ReconcileError("binding_locked", "Quarantine or unresolved operation requires authorized recovery", http_status=423)
++        if not captured.busy and not status.stale:
++            status = self._observed_status(binding, status)
++            captured = replace(captured, status=status)
++        if (captured.busy or status.stale or status.quarantined or status.unresolved_operation_id
++                or status.binding_id != binding.binding_id
++                or status.binding_revision != binding.binding_revision
++                or status.heads.observed is None
++                or status.drift in (vc.DriftState.UNKNOWN, vc.DriftState.UNREACHABLE,
++                                    vc.DriftState.APPLIED_UNVERIFIED, vc.DriftState.CONFLICTED)):
++            raise RuntimeError("Fresh durable observation unavailable or binding blocked")
++        return captured
++
++    def _observed_status(self, binding, status):
++        if (self.ledger is None or status.drift in (vc.DriftState.UNREACHABLE, vc.DriftState.CONFLICTED,
++                                                   vc.DriftState.APPLIED_UNVERIFIED)):
++            return status
++
++        class BoundVersions:
++            def get(inner, reference):
++                version = self.ledger.get_version(binding, reference)
++                if version.context.binding != binding or version.version_id != reference:
++                    raise PermissionError("History binding mismatch")
++                return version.snapshot
++
++        result = self.classify(status.heads, BoundVersions(), "reachable", quarantined=status.quarantined,
++                               unresolved_operation_id=status.unresolved_operation_id, target_binding=binding)
++        return replace(status, drift=result.state, reasons=result.reasons, allowed_actions=result.allowed_actions)
++
++    def classify(self, heads: vc.Heads, versions: vc.VersionLookup, reachability: str, *,
++                 unresolved_operation_id=None, quarantined=False, conflicted=False, target_binding=None):
++        reasons = []
++        state = None
++        if quarantined:
++            state = vc.DriftState.UNKNOWN
++            reasons.append("Binding quarantined; manual identity/recovery resolution required")
++        if conflicted:
++            state = vc.DriftState.CONFLICTED
++            reasons.append("Conflicting policy authority")
++        if unresolved_operation_id:
++            state = vc.DriftState.APPLIED_UNVERIFIED
++            reasons.append("Unresolved operation; application not verified")
++        if reachability != "reachable":
++            state = vc.DriftState.UNREACHABLE if reachability == "unreachable" else vc.DriftState.UNKNOWN
++            reasons.append("Live state unreachable" if reachability == "unreachable" else "Reachability unknown")
++        if state is not None:
++            return Classification(state, tuple(reasons), quarantined=quarantined,
++                                  unresolved_operation_id=unresolved_operation_id, conflicted=conflicted)
++        if None in (heads.observed, heads.approved, heads.deployed):
++            return Classification(vc.DriftState.UNKNOWN, ("Missing policy or observation head",))
++        try:
++            observed, approved, deployed = (versions.get(reference) for reference in
++                                            (heads.observed, heads.approved, heads.deployed))
++        except (LookupError, PermissionError):
++            return Classification(vc.DriftState.UNKNOWN, ("Required history unavailable",))
++        if self.approved_targets is not None:
++            try:
++                if target_binding is None:
++                    raise ValueError("Target binding required for rendered approval")
++                target = self.approved_targets.resolve(target_binding, heads.approved)
++                inputs = target.approval.request.inputs
++                preflight = target.preflight
++                if (target.head_id != heads.approved or target.approval.status != vc.FactStatus.APPROVED
++                        or target.approval.approval_digest is None or inputs.target_binding != target_binding
++                        or inputs.source_fingerprints != approved.fingerprints
++                        or inputs.raw_source_digest != approved.raw_state_digest
++                        or inputs.rendered_target_digest != target.rendered.state_digest
++                        or target.rendered.state_digest != target.rendered.fingerprints.state_digest
++                        or inputs.canonicalizer_version != target.rendered.fingerprints.canonicalizer_version
++                        or preflight.target_binding != target_binding or preflight.operation_id != inputs.operation_id
++                        or preflight.rendered_fingerprints != target.rendered.fingerprints
++                        or preflight.expected_base_fingerprints != inputs.expected_base_fingerprints
++                        or preflight.preflight_evidence_digest != inputs.preflight_evidence_digest):
++                    raise ValueError("Rendered target approval evidence mismatch")
++                approved = target.rendered
++            except (LookupError, PermissionError, ValueError, RuntimeError):
++                return Classification(vc.DriftState.UNKNOWN, ("Target-local rendered approval evidence unavailable or invalid",))
++        observed_approved = self.canonicalizer.compare(observed, approved)
++        approved_deployed = self.canonicalizer.compare(approved, deployed)
++        observed_deployed = self.canonicalizer.compare(observed, deployed)
++        if vc.Comparison.UNKNOWN in (observed_approved, approved_deployed, observed_deployed):
++            return Classification(vc.DriftState.UNKNOWN, ("Incompatible canonicalizer evidence",))
++        if observed_approved == approved_deployed == vc.Comparison.EQUAL:
++            state = vc.DriftState.CLEAN
++        elif approved_deployed == vc.Comparison.EQUAL:
++            state = vc.DriftState.EXTERNAL_AHEAD
++        elif vc.Comparison.EQUAL in (observed_deployed, observed_approved):
++            state = vc.DriftState.DESIRED_AHEAD
++        else:
++            state = vc.DriftState.DIVERGED
++        common = heads.deployed if heads.deployed in (heads.observed, heads.approved) else None
++        return Classification(state, ("Compared observed against approved and deployed policy",),
++                              common, heads.approved, ("compare", "adopt", "reapply", "acknowledge"))
+diff --git a/backend/tests/test_vc_drift.py b/backend/tests/test_vc_drift.py
+new file mode 100644
+index 0000000..4afe7ed
+--- /dev/null
++++ b/backend/tests/test_vc_drift.py
+@@ -0,0 +1,267 @@
++from dataclasses import replace
++from datetime import datetime, timezone
++from unittest.mock import Mock
++from uuid import UUID
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++
++
++def version_id(number):
++    return str(UUID(int=number))
++
++
++def snapshot(description):
++    return FakeCanonicalizer().observe({"serialized_space": {}, "description": description})
++
++
++def lookup(states):
++    port = Mock(spec=vc.VersionLookup)
++    port.get.side_effect = states.__getitem__
++    return port
++
++
++@pytest.mark.parametrize("observed,approved,deployed,expected", [
++    (1, 1, 1, "clean"), (2, 1, 1, "external_ahead"),
++    (1, 2, 1, "desired_ahead"), (2, 3, 1, "diverged"),
++    (2, 2, 1, "desired_ahead"),
++])
++def test_three_heads_classify_clean_external_desired_diverged(observed, approved, deployed, expected):
++    from backend.services.version_control.drift import DriftService
++
++    versions = lookup({version_id(number): snapshot(str(number)) for number in (1, 2, 3)})
++    result = DriftService(canonicalizer=FakeCanonicalizer()).classify(
++        vc.Heads(*(version_id(number) for number in (observed, approved, deployed))), versions, "reachable")
++    assert result.state.value == expected
++    assert result.policy_target == version_id(approved)
++    assert result.common_base == (version_id(1) if observed == 1 or approved == 1 else None)
++    assert result.reasons
++
++
++@pytest.mark.parametrize("case", ["missing_head", "missing_history", "unsupported", "mixed"])
++def test_missing_history_or_incompatible_canonicalizer_is_unknown(case):
++    from backend.services.version_control.drift import DriftService
++
++    original = snapshot("one")
++    unsupported = replace(original, fingerprints=replace(original.fingerprints, canonicalizer_version="future/9"))
++    states = {version_id(1): original, version_id(2): original}
++    heads = vc.Heads(version_id(1), version_id(2), version_id(1))
++    if case == "missing_head":
++        heads = replace(heads, approved=None)
++    elif case == "missing_history":
++        del states[version_id(2)]
++    elif case == "unsupported":
++        states = dict.fromkeys(states, unsupported)
++    else:
++        states[version_id(2)] = unsupported
++    result = DriftService(canonicalizer=FakeCanonicalizer()).classify(heads, lookup(states), "reachable")
++    assert result.state == vc.DriftState.UNKNOWN
++    assert result.allowed_actions == ()
++    assert result.reasons
++
++
++@pytest.mark.parametrize("change", ["metadata", "array_order"])
++def test_meaningful_changes_are_not_clean(change):
++    from backend.services.version_control.drift import DriftService
++
++    canonicalizer = FakeCanonicalizer()
++    before = canonicalizer.observe({"serialized_space": {"queries": ["first", "second"]}, "description": "old"})
++    after = canonicalizer.observe({"serialized_space": {"queries": ["second", "first"] if change == "array_order"
++                                                    else ["first", "second"]}, "description": "new"})
++    result = DriftService(canonicalizer=canonicalizer).classify(
++        vc.Heads(version_id(2), version_id(1), version_id(1)),
++        lookup({version_id(1): before, version_id(2): after}), "reachable")
++    assert result.state == vc.DriftState.EXTERNAL_AHEAD
++
++
++@pytest.mark.parametrize("reachability,unresolved,quarantined,conflicted,expected", [
++    ("unreachable", None, False, False, "unreachable"),
++    ("reachable", version_id(9), False, False, "applied_unverified"),
++    ("reachable", None, True, False, "unknown"),
++    ("reachable", None, False, True, "conflicted"),
++    ("unreachable", version_id(9), True, True, "unreachable"),
++    ("unknown", None, False, False, "unknown"),
++])
++def test_unreachable_and_unverified_override_ordinary_badges(
++        reachability, unresolved, quarantined, conflicted, expected):
++    from backend.services.version_control.drift import DriftService
++
++    versions = lookup({version_id(1): snapshot("same")})
++    result = DriftService(canonicalizer=FakeCanonicalizer()).classify(
++        vc.Heads(*(version_id(1),) * 3), versions, reachability,
++        unresolved_operation_id=unresolved, quarantined=quarantined, conflicted=conflicted)
++    assert result.state.value == expected
++    assert result.quarantined is quarantined
++    assert result.unresolved_operation_id == unresolved
++    assert result.conflicted is conflicted
++    assert result.allowed_actions == ()
++    assert result.reasons
++    versions.get.assert_not_called()
++
++
++def projection_setup():
++    from backend.services.version_control.drift import DriftService
++    from backend.services.version_control.drift.ports import CoordinationReadiness, Projections
++    from backend.tests.test_vc_reconcile import NOW, observed_result
++    from backend.tests.vc_fakes.fixtures import binding_fixture
++
++    projections = Mock(spec=Projections)
++    projections.page.return_value = vc.OverviewPage((observed_result().status,), "next")
++    projections.get.return_value = observed_result().status
++    observer = Mock(spec=vc.Observer)
++    registry = Mock(spec=vc.Registry)
++    registry.resolve.return_value = binding_fixture()
++    authorize = Mock(return_value=True)
++    service = DriftService(canonicalizer=FakeCanonicalizer(), projections=projections, observer=observer,
++                           registry=registry, authorize_history=authorize, clock=lambda: NOW,
++                           readiness=Mock(spec=CoordinationReadiness))
++    return service, projections, observer, registry, authorize
++
++
++def test_overview_uses_projection_without_per_row_genie_calls():
++    from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
++
++    service, projections, observer, registry, authorize = projection_setup()
++    page = service.overview(actor_fixture(), "cursor", 2)
++    projections.page.assert_called_once_with(actor_fixture(), "cursor", 2)
++    assert page.next_cursor == "next"
++    assert page.items[0].projection_as_of == projections.page.return_value.items[0].projection_as_of
++    assert page.items[0].allowed_actions == ("compare",)
++    assert page.items[0].drift == vc.DriftState.EXTERNAL_AHEAD
++    assert service.status(binding_fixture(), actor_fixture()) == page.items[0]
++    observer.capture.assert_not_called()
++    observer.capture_on_open.assert_not_called()
++    service.reconcile_enabled = True
++    assert "adopt" in service.overview(actor_fixture()).items[0].allowed_actions
++    assert "reapply" not in service.overview(actor_fixture()).items[0].allowed_actions
++
++
++@pytest.mark.parametrize("case", ["stale", "denied", "wrong_workspace", "oversized", "limit"])
++def test_projection_paging_freshness_and_scope_are_fail_closed(case):
++    from datetime import timedelta
++    from backend.tests.test_vc_reconcile import NOW
++    from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
++
++    service, projections, observer, registry, authorize = projection_setup()
++    if case == "stale":
++        service.clock = lambda: NOW + timedelta(hours=1)
++        status = service.overview(actor_fixture()).items[0]
++        assert status.stale and status.allowed_actions == ()
++        assert status.observed_at == NOW
++    elif case == "denied":
++        authorize.return_value = False
++        with pytest.raises(PermissionError):
++            service.overview(actor_fixture())
++    elif case == "wrong_workspace":
++        registry.resolve.return_value = replace(binding_fixture(), workspace_id="other")
++        with pytest.raises(PermissionError):
++            service.overview(actor_fixture())
++    elif case == "oversized":
++        projections.page.return_value = replace(projections.page.return_value,
++                                                items=projections.page.return_value.items * 3)
++        with pytest.raises(ValueError):
++            service.overview(actor_fixture(), limit=2)
++    else:
++        with pytest.raises(ValueError):
++            service.overview(actor_fixture(), limit=101)
++    observer.capture.assert_not_called()
++
++
++def test_projection_routes_auth_paging_status_and_observer_refresh_boundary():
++    from fastapi import FastAPI
++    from fastapi.testclient import TestClient
++    from backend.routers.vc_reconcile import build_router
++    from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
++
++    service, projections, observer, registry, authorize = projection_setup()
++    identity = Mock(spec=vc.IdentityProvider)
++    identity.actor.return_value = actor_fixture()
++    app = FastAPI()
++    authenticated = [False]
++    @app.middleware("http")
++    async def authenticate(request, call_next):
++        if authenticated[0]:
++            request.state.vc_auth = vc.AuthenticatedRequest("test", "123")
++        return await call_next(request)
++    app.include_router(build_router(service=service, identity=identity, registry=registry,
++                                    authorize_history=authorize))
++    client = TestClient(app)
++    assert client.get("/api/version-control/overview").status_code == 401
++    authenticated[0] = True
++    response = client.get("/api/version-control/overview?limit=2&cursor=opaque")
++    assert response.status_code == 200
++    assert response.json()["next_cursor"] == "next"
++    assert response.json()["items"][0]["projection_as_of"].endswith("Z")
++    path = f"/api/version-control/bindings/{binding_fixture().binding_id}"
++    assert client.get(path + "/status").status_code == 200
++    assert client.get("/api/version-control/overview?limit=101").status_code == 422
++    assert path + "/observe" not in {route.path for route in app.routes}
++    observer.capture.assert_not_called()
++
++
++def rendered_setup():
++    from backend.services.version_control.drift import DriftService
++    from backend.services.version_control.drift.ports import ApprovedTarget, ApprovedTargets
++    from backend.tests.test_vc_reconcile import NOW, reconcile_setup, reconcile_request
++    from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
++
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    source = ledger.get_version(binding_fixture(), version_id(1))
++    base = ledger.get_version(binding_fixture(), version_id(2))
++    rendered = snapshot("target-environment")
++    inputs = replace(policy.inputs(binding_fixture(), reconcile_request("reapply"), source, base, actor_fixture()),
++                     rendered_target_digest=rendered.state_digest, mapping_digest="e" * 64,
++                     transformer_version="map/1")
++    record = vc.ApprovalRecord(vc.ApprovalRequest(version_id(20), inputs, NOW), (), vc.FactStatus.APPROVED, "f" * 64)
++    preflight = vc.PreflightEvidence("VC/1.0", inputs.operation_id, binding_fixture(),
++                                     base.snapshot.fingerprints, rendered.fingerprints, None,
++                                     "b" * 64, "c" * 64, inputs.preflight_evidence_digest, NOW)
++    targets = Mock(spec=ApprovedTargets)
++    targets.resolve.return_value = ApprovedTarget(version_id(1), record, rendered, preflight)
++    service = DriftService(canonicalizer=FakeCanonicalizer(), approved_targets=targets)
++    versions = lookup({version_id(1): source.snapshot, version_id(2): rendered})
++    return service, targets, versions
++
++
++def test_target_approval_uses_rendered_fingerprint_not_source_environment_hash():
++    from backend.tests.vc_fakes.fixtures import binding_fixture
++
++    service, targets, versions = rendered_setup()
++    result = service.classify(vc.Heads(version_id(2), version_id(1), version_id(2)), versions,
++                              "reachable", target_binding=binding_fixture())
++    assert result.state == vc.DriftState.CLEAN
++    assert result.policy_target == version_id(1)
++    targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
++    assert versions.get(version_id(1)).fingerprints != targets.resolve.return_value.rendered.fingerprints
++
++
++@pytest.mark.parametrize("failure", ["missing", "wrong_binding", "not_approved", "wrong_digest",
++                                    "wrong_preflight", "wrong_head", "incompatible", "no_target"])
++def test_rendered_target_requires_bound_approved_evidence(failure):
++    from backend.tests.vc_fakes.fixtures import binding_fixture
++
++    service, targets, versions = rendered_setup()
++    evidence = targets.resolve.return_value
++    if failure == "missing":
++        targets.resolve.side_effect = LookupError("missing target evidence")
++    elif failure == "wrong_binding":
++        inputs = replace(evidence.approval.request.inputs, target_binding=replace(binding_fixture(), space_id="other"))
++        evidence = replace(evidence, approval=replace(evidence.approval, request=replace(evidence.approval.request, inputs=inputs)))
++    elif failure == "not_approved":
++        evidence = replace(evidence, approval=replace(evidence.approval, status=vc.FactStatus.REQUESTED))
++    elif failure == "wrong_digest":
++        evidence = replace(evidence, rendered=snapshot("tampered"))
++    elif failure == "wrong_preflight":
++        evidence = replace(evidence, preflight=replace(evidence.preflight, preflight_evidence_digest="0" * 64))
++    elif failure == "wrong_head":
++        evidence = replace(evidence, head_id=version_id(99))
++    elif failure == "incompatible":
++        evidence = replace(evidence, rendered=replace(evidence.rendered, fingerprints=replace(
++            evidence.rendered.fingerprints, canonicalizer_version="future/9")))
++    targets.resolve.return_value = evidence
++    result = service.classify(vc.Heads(version_id(2), version_id(1), version_id(2)), versions,
++                              "reachable", target_binding=None if failure == "no_target" else binding_fixture())
++    assert result.state == vc.DriftState.UNKNOWN
++    assert result.allowed_actions == ()
+diff --git a/backend/tests/test_vc_dual_authority.py b/backend/tests/test_vc_dual_authority.py
+new file mode 100644
+index 0000000..4ba2f96
+--- /dev/null
++++ b/backend/tests/test_vc_dual_authority.py
+@@ -0,0 +1,106 @@
++from dataclasses import replace
++from unittest.mock import Mock
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.tests.test_vc_reconcile import NOW, observed_result, scan_entry, scan_setup
++from backend.tests.test_vc_drift import version_id
++
++
++def bundle_setup(entry=None, **options):
++    from backend.services.version_control.drift.ports import BundleInventory, BundleResource, BundleSnapshot
++
++    entry = entry or scan_entry(last_full_fetch_at=NOW)
++    bundles = Mock(spec=BundleInventory)
++    bundles.for_binding.return_value = BundleSnapshot((BundleResource(
++        entry.binding.workspace_id, entry.binding.space_id, "sanctioned/deploy",
++        "resources.genie_spaces.sales", True, None),), True)
++    service, observer, inventory, projections = scan_setup([entry], bundles=bundles, **options)
++    observer.capture.return_value = observed_result(entry.binding)
++    return service, observer, inventory, projections, bundles, entry
++
++
++def test_governed_bundle_content_is_flagged_within_one_cycle():
++    service, observer, inventory, projections, bundles, entry = bundle_setup()
++    batch = service.scan("123", None)
++    observer.capture.assert_called_once()
++    bundles.for_binding.assert_called_once_with(entry.binding)
++    status = batch.items[0]
++    assert status.drift == vc.DriftState.CONFLICTED
++    assert status.heads == observed_result(entry.binding).status.heads
++    assert status.allowed_actions == ()
++    assert not status.quarantined
++    assert "resources.genie_spaces.sales" in " ".join(status.reasons)
++    assert "actor=unknown" in " ".join(status.reasons)
++    assert "sanctioned/deploy" in " ".join(status.reasons)
++    assert projections.publish.call_args.args[1] == status
++    assert entry.governed_by == "workbench"
++
++
++@pytest.mark.parametrize("case", ["other_workspace", "other_space", "infrastructure", "ungoverned"])
++def test_bundle_detection_joins_physical_identity_and_content_ownership(case):
++    from backend.services.version_control.drift.ports import BundleSnapshot
++
++    entry = scan_entry(governed_by="external") if case == "ungoverned" else scan_entry()
++    service, observer, inventory, projections, bundles, entry = bundle_setup(entry)
++    resource = bundles.for_binding.return_value.resources[0]
++    changes = {"other_workspace": {"workspace_id": "other"}, "other_space": {"space_id": "other"},
++               "infrastructure": {"manages_content": False}, "ungoverned": {}}
++    bundles.for_binding.return_value = BundleSnapshot((replace(resource, **changes[case]),), True)
++    assert service.scan("123", None).items[0].drift != vc.DriftState.CONFLICTED
++
++
++@pytest.mark.parametrize("failure", ["incomplete", "unavailable", "capture"])
++def test_bundle_uncertainty_is_not_clear_or_inferred_actor(failure):
++    service, observer, inventory, projections, bundles, entry = bundle_setup()
++    if failure == "incomplete":
++        bundles.for_binding.return_value = replace(bundles.for_binding.return_value, complete=False)
++    if failure == "unavailable":
++        bundles.for_binding.side_effect = RuntimeError("unavailable")
++    if failure == "capture":
++        observer.capture.side_effect = RuntimeError("cannot observe")
++    status = service.scan("123", None).items[0]
++    assert status.drift == (vc.DriftState.CONFLICTED if failure == "capture" else vc.DriftState.UNKNOWN)
++    assert status.allowed_actions == ()
++    assert status.stale
++
++
++@pytest.mark.parametrize("duplicate", ["physical", "logical", "same_id", "other_page"])
++def test_duplicate_binding_inventory_quarantines_not_name_rebinds(duplicate):
++    coordination = Mock(spec=vc.Coordination)
++    fence = vc.FenceToken(version_id(1), 1, version_id(50), 1, 1)
++    coordination.observe_exclusively.return_value = vc.ObservationLease(fence, 0, NOW)
++    service, observer, inventory, projections, bundles, entry = bundle_setup(coordination=coordination)
++    other = replace(entry.binding, binding_id=version_id(3))
++    if duplicate == "logical":
++        other = replace(other, space_id="replacement-space")
++    if duplicate == "same_id":
++        other = entry.binding
++    inventory.matches.return_value = (entry.binding, other)
++    inventory.matches.side_effect = None
++    status = service.scan("123", None).items[0]
++    assert status.quarantined
++    assert status.drift == vc.DriftState.UNKNOWN
++    assert status.allowed_actions == ()
++    assert "audited manual identity resolution" in " ".join(status.reasons)
++    coordination.quarantine.assert_called_once()
++    assert coordination.quarantine.call_args.args[0] == fence
++    assert "identity" in coordination.quarantine.call_args.args[1]
++    coordination.advance_heads.assert_not_called()
++    coordination.recover.assert_not_called()
++    observer.capture.assert_not_called()
++    bundles.for_binding.assert_not_called()
++    assert entry.binding.space_id == "space-1"
++
++
++def test_duplicate_quarantine_failure_keeps_blocked_stale_projection():
++    coordination = Mock(spec=vc.Coordination)
++    coordination.observe_exclusively.side_effect = RuntimeError("duplicate coordination rows")
++    service, observer, inventory, projections, bundles, entry = bundle_setup(coordination=coordination)
++    inventory.matches.side_effect = lambda binding: (binding, binding)
++    status = service.scan("123", None).items[0]
++    assert status.quarantined and status.stale
++    assert status.allowed_actions == ()
++    coordination.quarantine.assert_not_called()
++    observer.capture.assert_not_called()
+diff --git a/backend/tests/test_vc_reconcile.py b/backend/tests/test_vc_reconcile.py
+new file mode 100644
+index 0000000..d05de5e
+--- /dev/null
++++ b/backend/tests/test_vc_reconcile.py
+@@ -0,0 +1,508 @@
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++from unittest.mock import Mock
++
++import pytest
++
++from backend.services.version_control import contracts as vc
++from backend.tests.vc_fakes.fixtures import (
++    FakeCanonicalizer, actor_fixture, binding_fixture, executor_fixture,
++)
++from backend.tests.test_vc_drift import lookup, snapshot, version_id
++
++
++NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
++
++
++def observed_result(binding=None):
++    binding = binding or binding_fixture()
++    summary = vc.VersionSummary(version_id(2), binding.binding_id, NOW, vc.Origin.EXTERNAL,
++                                "unknown", version_id(1), None, snapshot("external").fingerprints,
++                                None, None)
++    status = vc.BindingStatus(binding.binding_id, binding.binding_revision,
++                              vc.Heads(version_id(2), version_id(1), version_id(1)),
++                              vc.DriftState.EXTERNAL_AHEAD, False, None, NOW, NOW, False,
++                              ("compare", "adopt", "reapply", "acknowledge"), ("Policy differs",))
++    return vc.ObservationResult(status, summary, False)
++
++
++def setup_service(**options):
++    from backend.services.version_control.drift import DriftService
++
++    observer = Mock(spec=vc.Observer)
++    observer.capture.return_value = observed_result()
++    service = DriftService(canonicalizer=FakeCanonicalizer(), observer=observer,
++                           executor=executor_fixture(), **options)
++    return service, observer
++
++
++def test_capture_advances_observed_but_drift_remains_until_policy_resolution():
++    service, observer = setup_service()
++    captured = service.prepare_choice(binding_fixture())
++    observer.capture.assert_called_once_with(binding_fixture(), "reconcile", executor_fixture())
++    assert captured.status.heads == vc.Heads(version_id(2), version_id(1), version_id(1))
++    result = service.classify(captured.status.heads,
++                             lookup({version_id(1): snapshot("policy"),
++                                     version_id(2): snapshot("external")}), "reachable")
++    assert result.state == vc.DriftState.EXTERNAL_AHEAD
++    assert captured.captured_version.version_id == version_id(2)
++
++
++@pytest.mark.parametrize("failure", ["busy", "stale", "unresolved", "quarantined", "wrong_binding"])
++def test_capture_failure_never_offers_reconciliation(failure):
++    service, observer = setup_service()
++    captured = observed_result()
++    if failure == "busy":
++        captured = replace(captured, busy=True)
++    else:
++        changes = {"stale": {"stale": True}, "unresolved": {"unresolved_operation_id": version_id(7)},
++                   "quarantined": {"quarantined": True}, "wrong_binding": {"binding_id": version_id(99)}}
++        captured = replace(captured, status=replace(captured.status, **changes[failure]))
++    observer.capture.return_value = captured
++    with pytest.raises(RuntimeError):
++        service.prepare_choice(binding_fixture())
++
++
++def reconcile_request(action="adopt", **changes):
++    request = vc.ReconcileRequest(vc.RequestIdentity(version_id(10), "reconcile-10", "a" * 64),
++                                  action, 1, snapshot("external").state_digest, None, {})
++    return replace(request, **changes)
++
++
++def reconcile_setup(**options):
++    from backend.services.version_control.drift.ports import CoordinationReadiness, ReconcilePolicy
++
++    ledger = Mock(spec=vc.VersionLedger)
++    def get_version(binding, reference):
++        state = snapshot("external" if reference == version_id(2) else "policy")
++        context = vc.CaptureContext(binding, reference, NOW, "reconcile", actor_fixture(), vc.Origin.EXTERNAL)
++        return vc.Version(reference, state, context)
++    ledger.get_version.side_effect = get_version
++    policy = Mock(spec=ReconcilePolicy)
++    def inputs(binding, request, source, base, actor):
++        return vc.ApprovalInputs("VC/1.0", request.identity.operation_id, request.action,
++                                 source.version_id, source.snapshot.raw_state_digest,
++                                 source.snapshot.fingerprints, None, None, source.snapshot.state_digest,
++                                 None, source.snapshot.fingerprints.canonicalizer_version, binding,
++                                 base.snapshot.fingerprints, None, "b" * 64, "c" * 64, "d" * 64,
++                                 {}, actor.subject_id, {}, NOW + timedelta(hours=1))
++    policy.inputs.side_effect = inputs
++    approvals = Mock(spec=vc.ApprovalService)
++    approvals.request.side_effect = lambda inputs, actor: vc.ApprovalRequest(version_id(20), inputs, NOW)
++    identity = Mock(spec=vc.IdentityProvider)
++    identity.can_edit.return_value = True
++    dependencies = dict(ledger=ledger, policy=policy, approvals=approvals, identity=identity,
++                        reconcile_enabled=True, clock=lambda: NOW, readiness=Mock(spec=CoordinationReadiness))
++    dependencies.update(options)
++    service, observer = setup_service(**dependencies)
++    return service, observer, ledger, policy, approvals, identity
++
++
++def test_adopt_creates_approval_request_not_automatic_approved_head():
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    events = []
++    observer.capture.side_effect = lambda *args: events.append("capture") or observed_result()
++    policy.inputs.side_effect = (lambda original: lambda *args: events.append("policy") or original(*args))(
++        policy.inputs.side_effect)
++    handle = service.reconcile(binding_fixture(), reconcile_request(), actor_fixture())
++    assert events == ["capture", "policy"]
++    inputs, actor = approvals.request.call_args.args
++    assert inputs.source_version_id == version_id(2)
++    assert inputs.expected_base_fingerprints == snapshot("external").fingerprints
++    assert inputs.requester_id == actor_fixture().subject_id
++    assert inputs.operation_type == "adopt"
++    assert actor == actor_fixture()
++    assert handle == vc.OperationHandle(version_id(10), vc.OperationStatus.REQUESTED, None)
++    approvals.authorize.assert_not_called()
++    ledger.append_observation.assert_not_called()
++    assert observer.capture.return_value.status.heads.approved == version_id(1)
++
++
++@pytest.mark.parametrize("failure", ["disabled", "denied", "workspace", "revision", "base", "policy_binding"])
++def test_adopt_fails_closed_without_approval(failure):
++    service, observer, ledger, policy, approvals, identity = reconcile_setup(
++        reconcile_enabled=failure != "disabled")
++    actor = actor_fixture()
++    request = reconcile_request()
++    if failure == "denied":
++        identity.can_edit.return_value = False
++    if failure == "workspace":
++        actor = replace(actor, workspace_id="other")
++    if failure == "revision":
++        request = replace(request, binding_revision=2)
++    if failure == "base":
++        request = replace(request, expected_base="f" * 64)
++    if failure == "policy_binding":
++        original = policy.inputs.side_effect
++        policy.inputs.side_effect = lambda *args: replace(original(*args), target_binding=replace(binding_fixture(), space_id="wrong"))
++    with pytest.raises((PermissionError, ValueError, RuntimeError)):
++        service.reconcile(binding_fixture(), request, actor)
++    approvals.request.assert_not_called()
++    if failure in ("disabled", "denied", "workspace", "revision"):
++        observer.capture.assert_not_called()
++
++
++def test_reapply_requires_fresh_approval_for_new_base():
++    dispatcher = Mock(spec=vc.JobDispatcher)
++    dispatcher.submit_local.return_value = vc.OperationHandle(version_id(10), vc.OperationStatus.REQUESTED, "job/1")
++    facts = Mock(spec=vc.OperationFacts)
++    facts.approval_use.return_value = vc.ApprovalUse(binding_fixture(), version_id(19), (), (), False)
++    service, observer, ledger, policy, approvals, identity = reconcile_setup(
++        dispatcher=dispatcher, facts=facts, dispatch_enabled=True)
++    captured = observed_result()
++    observer.capture.return_value = replace(captured, status=replace(captured.status, drift=vc.DriftState.UNKNOWN))
++    request = reconcile_request("reapply", approval_id=version_id(19))
++    handle = service.reconcile(binding_fixture(), request, actor_fixture())
++    inputs = approvals.request.call_args.args[0]
++    assert inputs.source_version_id == version_id(1)
++    assert inputs.expected_base_fingerprints == snapshot("external").fingerprints
++    assert policy.inputs.call_args.args[1].approval_id is None
++    invalidation = facts.append.call_args.args[0]
++    assert invalidation.fact_kind == vc.FactKind.APPROVAL_INVALIDATED
++    assert invalidation.approval_id == version_id(19)
++    assert invalidation.pre_version_id == version_id(2)
++    assert invalidation.status == vc.FactStatus.INVALIDATED
++    dispatcher.submit_local.assert_called_once_with(version_id(10), "reconcile")
++    assert handle.job_run_id == "job/1"
++    approvals.authorize.assert_not_called()
++
++
++def test_reapply_dispatch_is_default_off_and_capture_failure_never_dispatches():
++    dispatcher = Mock(spec=vc.JobDispatcher)
++    service, observer, ledger, policy, approvals, identity = reconcile_setup(dispatcher=dispatcher)
++    with pytest.raises(PermissionError, match="dispatch"):
++        service.reconcile(binding_fixture(), reconcile_request("reapply"), actor_fixture())
++    observer.capture.assert_not_called()
++    approvals.request.assert_not_called()
++    dispatcher.submit_local.assert_not_called()
++    service.dispatch_enabled = True
++    observer.capture.side_effect = RuntimeError("capture failed")
++    with pytest.raises(RuntimeError):
++        service.reconcile(binding_fixture(), reconcile_request("reapply"), actor_fixture())
++    dispatcher.submit_local.assert_not_called()
++
++
++def test_reapply_invalidation_failure_stops_new_request_and_job():
++    dispatcher = Mock(spec=vc.JobDispatcher)
++    facts = Mock(spec=vc.OperationFacts)
++    facts.approval_use.return_value = vc.ApprovalUse(binding_fixture(), version_id(19), (), (), False)
++    facts.append.side_effect = RuntimeError("facts unavailable")
++    service, observer, ledger, policy, approvals, identity = reconcile_setup(
++        dispatcher=dispatcher, dispatch_enabled=True, facts=facts)
++    with pytest.raises(RuntimeError):
++        service.reconcile(binding_fixture(), reconcile_request("reapply", approval_id=version_id(19)), actor_fixture())
++    approvals.request.assert_not_called()
++    dispatcher.submit_local.assert_not_called()
++
++
++def test_acknowledge_records_scoped_divergence_without_fabricating_clean_heads():
++    facts = Mock(spec=vc.OperationFacts)
++    service, observer, ledger, policy, approvals, identity = reconcile_setup(facts=facts)
++    policy.authorize_acknowledgement.return_value = True
++    request = reconcile_request("acknowledge", policy_inputs={"reason": "Accepted temporary divergence"})
++    handle = service.reconcile(binding_fixture(), request, actor_fixture())
++    fact = facts.append.call_args.args[0]
++    assert fact.fact_kind == vc.FactKind.ACKNOWLEDGEMENT
++    assert fact.status == vc.FactStatus.ACKNOWLEDGED
++    assert fact.binding == binding_fixture()
++    assert fact.pre_version_id == version_id(2)
++    assert fact.evidence.source_version_id == version_id(1)
++    assert fact.actor == actor_fixture()
++    assert handle.status == vc.OperationStatus.CONFIRMED
++    status = service.with_acknowledgement(observed_result().status, fact)
++    assert status.heads == observed_result().status.heads
++    assert status.drift == vc.DriftState.EXTERNAL_AHEAD
++    assert "Acknowledged divergence" in status.reasons[-1]
++    assert "acknowledge" not in status.allowed_actions
++    approvals.request.assert_not_called()
++    for changed in (replace(status, heads=replace(status.heads, observed=version_id(3))),
++                    replace(status, heads=replace(status.heads, deployed=version_id(3))),
++                    replace(status, binding_revision=2)):
++        assert service.with_acknowledgement(changed, fact) == changed
++    service.clock = lambda: NOW + timedelta(hours=2)
++    assert service.with_acknowledgement(observed_result().status, fact) == observed_result().status
++
++
++@pytest.mark.parametrize("failure", ["policy_denial", "missing_reason", "facts_unavailable"])
++def test_acknowledgement_requires_policy_reason_and_durable_fact(failure):
++    facts = Mock(spec=vc.OperationFacts)
++    service, observer, ledger, policy, approvals, identity = reconcile_setup(facts=facts)
++    policy.authorize_acknowledgement.return_value = failure != "policy_denial"
++    request = reconcile_request("acknowledge", policy_inputs={} if failure == "missing_reason" else {"reason": "accepted"})
++    if failure == "facts_unavailable":
++        facts.append.side_effect = RuntimeError("unavailable")
++    with pytest.raises((PermissionError, ValueError, RuntimeError)):
++        service.reconcile(binding_fixture(), request, actor_fixture())
++    approvals.request.assert_not_called()
++
++
++def test_manual_merge_sql_changes_require_reviewed_new_payload():
++    from backend.services.version_control.drift.errors import ReconcileError
++
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    service.canonicalizer = Mock(spec=vc.Canonicalizer)
++    service.canonicalizer.compare.return_value = vc.Comparison.DIFFERENT
++    service.canonicalizer.semantic_diff.return_value = [
++        vc.DiffItem(vc.DiffCategory.SQL, "/instructions/sql", vc.DiffChange.MODIFIED,
++                    "SELECT old", "SELECT new", False)]
++    result = service.compare(binding_fixture(), version_id(1), version_id(2), actor_fixture())
++    assert result.comparison == vc.Comparison.DIFFERENT
++    assert result.items[0].review_required is True
++    assert result.items[0].before == "SELECT old"
++    observer.capture.assert_not_called()
++    for payload in ({"automatic_merge": True}, {"merged_payload": {"sql": "SELECT merged"}},
++                    {"serialized_space": {}}, {"sql": "SELECT new"}):
++        with pytest.raises(ReconcileError, match="reviewed new payload"):
++            service.reconcile(binding_fixture(), reconcile_request(policy_inputs=payload), actor_fixture())
++    approvals.request.assert_not_called()
++    ledger.append_observation.assert_not_called()
++
++
++@pytest.mark.parametrize("failure", ["denied", "scope", "incompatible"])
++def test_comparison_is_scoped_and_incompatible_is_unknown(failure):
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    if failure == "denied":
++        identity.can_edit.return_value = False
++    if failure == "scope":
++        original = ledger.get_version.side_effect
++        ledger.get_version.side_effect = lambda *args: replace(original(*args), context=replace(
++            original(*args).context, binding=replace(binding_fixture(), space_id="other")))
++    if failure == "incompatible":
++        service.canonicalizer = Mock(spec=vc.Canonicalizer)
++        service.canonicalizer.compare.return_value = vc.Comparison.UNKNOWN
++        assert service.compare(binding_fixture(), version_id(1), version_id(2), actor_fixture()) == vc.SemanticDiff(vc.Comparison.UNKNOWN, ())
++        service.canonicalizer.semantic_diff.assert_not_called()
++    else:
++        with pytest.raises(PermissionError):
++            service.compare(binding_fixture(), version_id(1), version_id(2), actor_fixture())
++
++
++def scan_setup(entries, **options):
++    from backend.services.version_control.drift.ports import BindingInventory, BundleInventory, BundleSnapshot, Projections
++
++    inventory = Mock(spec=BindingInventory)
++    inventory.page.return_value = vc.Page(tuple(entries), "next")
++    inventory.matches.side_effect = lambda binding: (binding,)
++    projections = Mock(spec=Projections)
++    bundles = Mock(spec=BundleInventory)
++    bundles.for_binding.return_value = BundleSnapshot((), True)
++    dependencies = dict(inventory=inventory, projections=projections, scan_enabled=True,
++                        batch_size=2, full_fetch_interval=timedelta(minutes=30), clock=lambda: NOW, bundles=bundles)
++    dependencies.update(options)
++    service, observer = setup_service(**dependencies)
++    return service, observer, inventory, projections
++
++
++def scan_entry(number=1, **changes):
++    from backend.services.version_control.drift.ports import ScanEntry
++
++    binding = replace(binding_fixture(), binding_id=version_id(number), space_id=f"space-{number}")
++    status = observed_result(binding).status
++    return replace(ScanEntry(binding, status, NOW, NOW, NOW - timedelta(hours=1)), **changes)
++
++
++def test_reconcile_scan_paginates_isolates_failures_and_periodically_full_fetches():
++    first, second = scan_entry(), scan_entry(2)
++    service, observer, inventory, projections = scan_setup([first, second])
++    observer.capture.side_effect = [RuntimeError("binding failed"), observed_result(second.binding)]
++    batch = service.scan("123", "cursor")
++    inventory.page.assert_called_once_with("123", "cursor", 2)
++    assert batch.next_cursor == "next"
++    assert len(batch.items) == 2
++    assert batch.items[0].stale and batch.items[0].allowed_actions == ()
++    assert batch.items[1].heads.observed == version_id(2)
++    assert batch.items[1].drift == vc.DriftState.EXTERNAL_AHEAD
++    assert observer.capture.call_count == 2
++    assert projections.publish.call_count == 2
++    fresh = replace(first, last_full_fetch_at=NOW)
++    inventory.page.return_value = vc.Page((fresh,), None)
++    observer.capture.reset_mock(side_effect=True)
++    batch = service.scan("123", "next")
++    observer.capture.assert_not_called()
++    assert batch.next_cursor is None
++    inventory.page.return_value = vc.Page((replace(fresh, api_update_time=NOW + timedelta(seconds=1)),), None)
++    observer.capture.return_value = observed_result(first.binding)
++    service.scan("123", None)
++    observer.capture.assert_called_once()
++    observer.capture.reset_mock()
++    inventory.page.return_value = vc.Page((fresh,), None)
++    service.clock = lambda: NOW + timedelta(minutes=31)
++    service.scan("123", None)
++    observer.capture.assert_called_once()
++
++
++def test_scan_default_off_bounds_scope_and_job_executor():
++    from backend.jobs.vc_reconcile import run_scan
++
++    service, observer, inventory, projections = scan_setup([], scan_enabled=False)
++    with pytest.raises(PermissionError):
++        service.scan("123", None)
++    inventory.page.assert_not_called()
++    service.scan_enabled = True
++    with pytest.raises(PermissionError):
++        service.scan("other", None)
++    inventory.page.return_value = vc.Page((scan_entry(), scan_entry(2), scan_entry(3)), None)
++    with pytest.raises(ValueError, match="bound"):
++        service.scan("123", None)
++    observer.capture.assert_not_called()
++    with pytest.raises(PermissionError):
++        run_scan("123", None, service=service, executor=replace(executor_fixture(), execution_ref="app/1"))
++
++
++def test_scan_projection_failure_isolated_without_advancing_full_fetch_watermark():
++    first, second = scan_entry(), scan_entry(2)
++    service, observer, inventory, projections = scan_setup([first, second])
++    observer.capture.side_effect = [observed_result(first.binding), observed_result(second.binding)]
++    projections.publish.side_effect = [RuntimeError("projection unavailable"), None]
++    batch = service.scan("123", None)
++    assert batch.items[0].stale
++    assert batch.items[0].heads == observed_result(first.binding).status.heads
++    assert not batch.items[1].stale
++    assert observer.capture.call_count == 2
++
++
++def test_reconcile_coordination_failure_disables_actions_but_keeps_available_history():
++    from backend.services.version_control.drift.errors import ReconcileError
++    from backend.tests.test_vc_drift import projection_setup
++
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    service.readiness.assert_available.side_effect = RuntimeError("coordination offline")
++    with pytest.raises(ReconcileError) as caught:
++        service.reconcile(binding_fixture(), reconcile_request(), actor_fixture())
++    assert caught.value.http_status == 503
++    assert caught.value.error.stale is True
++    assert caught.value.error.retryable is False
++    assert caught.value.error.operation_id == version_id(10)
++    observer.capture.assert_not_called()
++    approvals.request.assert_not_called()
++    projected, projections, unused_observer, registry, authorize = projection_setup()
++    projected.readiness = service.readiness
++    projected.ledger = ledger
++    status = projected.status(binding_fixture(), actor_fixture())
++    assert status.stale and status.allowed_actions == ()
++    assert status.heads == observed_result().status.heads
++    assert "coordination" in " ".join(status.reasons).lower()
++    ledger.history.return_value = vc.VersionPage((observed_result().captured_version,), None)
++    assert projected.history(binding_fixture(), actor_fixture(), None, 10).items[0].version_id == version_id(2)
++    assert projected.overview(actor_fixture()).items[0].stale
++
++
++@pytest.mark.parametrize("failure", ["missing_readiness", "capture", "history", "approval", "dispatch", "quarantine", "unresolved", "base"])
++def test_reconcile_typed_errors_preserve_operation_id_and_never_offer_replay(failure):
++    from backend.services.version_control.drift.errors import ReconcileError
++
++    dispatcher = Mock(spec=vc.JobDispatcher)
++    service, observer, ledger, policy, approvals, identity = reconcile_setup(dispatcher=dispatcher, dispatch_enabled=True)
++    action = reconcile_request("reapply" if failure == "dispatch" else "adopt")
++    if failure == "missing_readiness":
++        service.readiness = None
++    elif failure == "capture":
++        observer.capture.side_effect = RuntimeError("observer failed")
++    elif failure == "history":
++        ledger.get_version.side_effect = RuntimeError("history unavailable")
++    elif failure == "approval":
++        approvals.request.side_effect = RuntimeError("approval commit uncertain")
++    elif failure == "dispatch":
++        dispatcher.submit_local.side_effect = RuntimeError("job submission uncertain")
++    elif failure in ("quarantine", "unresolved"):
++        status = observed_result().status
++        status = replace(status, **({"quarantined": True} if failure == "quarantine" else {"unresolved_operation_id": version_id(8)}))
++        observer.capture.return_value = replace(observed_result(), status=status)
++    else:
++        action = replace(action, expected_base="f" * 64)
++    with pytest.raises(ReconcileError) as caught:
++        service.reconcile(binding_fixture(), action, actor_fixture())
++    error = caught.value
++    assert error.http_status == (423 if failure in ("quarantine", "unresolved") else 409 if failure == "base" else 503)
++    assert error.error.operation_id == version_id(10)
++    assert error.error.retryable is False
++    assert error.error.stale
++    if failure != "dispatch":
++        dispatcher.submit_local.assert_not_called()
++
++
++def test_observer_clean_label_cannot_erase_policy_drift_and_missing_bundle_inventory_blocks_scan():
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    observed = observed_result()
++    observer.capture.return_value = replace(observed, status=replace(observed.status, drift=vc.DriftState.CLEAN))
++    assert service.prepare_choice(binding_fixture()).status.drift == vc.DriftState.EXTERNAL_AHEAD
++    scanner, observer, inventory, projections = scan_setup([scan_entry()], bundles=None)
++    status = scanner.scan("123", None).items[0]
++    assert status.drift == vc.DriftState.UNKNOWN
++    assert status.stale and status.allowed_actions == ()
++    observer.capture.assert_not_called()
++
++
++def test_reconcile_route_binds_authenticated_actor_and_returns_typed_outage():
++    from fastapi import FastAPI
++    from fastapi.testclient import TestClient
++    from backend.routers.vc_reconcile import build_router
++
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    registry = Mock(spec=vc.Registry)
++    registry.resolve.return_value = binding_fixture()
++    identity.actor.return_value = actor_fixture()
++    app = FastAPI()
++    @app.middleware("http")
++    async def authenticate(request, call_next):
++        request.state.vc_auth = vc.AuthenticatedRequest("real-auth-context", "123")
++        return await call_next(request)
++    app.include_router(build_router(service=service, identity=identity, registry=registry,
++                                    authorize_history=lambda *args: True))
++    client = TestClient(app)
++    path = f"/api/version-control/bindings/{binding_fixture().binding_id}/reconcile"
++    body = {"action": "adopt", "binding_revision": 1, "expected_base": snapshot("external").state_digest}
++    response = client.post(path, json=body, headers={"Idempotency-Key": "command-1"})
++    assert response.status_code == 202
++    operation_id = response.json()["operation_id"]
++    assert approvals.request.call_args.args[0].requester_id == actor_fixture().subject_id
++    assert client.post(path, json={**body, "actor": "forged"}, headers={"Idempotency-Key": "x"}).status_code == 422
++    assert client.post(path, json=body).status_code == 422
++    service.readiness.assert_available.side_effect = RuntimeError("coordination down")
++    response = client.post(path, json=body, headers={"Idempotency-Key": "command-1"})
++    assert response.status_code == 503
++    assert response.json()["detail"]["operation_id"] == operation_id
++    assert response.json()["detail"]["stale"] is True
++    assert response.json()["detail"]["retryable"] is False
++
++
++def test_reapply_job_requires_new_bound_approval_and_default_off():
++    from backend.jobs.vc_reconcile import run_reapply
++
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    source = ledger.get_version(binding_fixture(), version_id(1))
++    base = ledger.get_version(binding_fixture(), version_id(2))
++    action = reconcile_request("reapply")
++    inputs = policy.inputs(binding_fixture(), action, source, base, actor_fixture())
++    approval = vc.ApprovalRecord(vc.ApprovalRequest(version_id(20), inputs, NOW), (), vc.FactStatus.APPROVED, "a" * 64)
++    request = vc.MutationRequest(action.identity, binding_fixture(), "reapply", version_id(1),
++                                 base.snapshot.state_digest, source.snapshot.serialized_space,
++                                 source.snapshot.restorable_metadata.get("description"), version_id(20))
++    facts = Mock(spec=vc.OperationFacts)
++    facts.get_request.return_value = vc.ApprovedOperation(request, approval)
++    gate = Mock(spec=vc.MutationGate)
++    arguments = dict(facts=facts, gate=gate, identity=identity, executor=executor_fixture())
++    with pytest.raises(PermissionError):
++        run_reapply(version_id(10), **arguments)
++    facts.get_request.assert_not_called()
++    arguments["enabled"] = True
++    for invalid in (replace(approval, status=vc.FactStatus.REQUESTED), replace(approval, request=replace(
++            approval.request, inputs=replace(inputs, operation_id=version_id(99)))), None):
++        facts.get_request.return_value = vc.ApprovedOperation(request, invalid)
++        with pytest.raises(PermissionError):
++            run_reapply(version_id(10), **arguments)
++    gate.execute.assert_not_called()
++    facts.get_request.return_value = vc.ApprovedOperation(request, approval)
++    run_reapply(version_id(10), **arguments)
++    gate.execute.assert_called_once_with(request, executor_fixture())
++    identity.verify_run_as.assert_called_with("job/456", "target-service")
++
++
++def test_scan_cannot_publish_observer_clean_badge_for_differing_policy_heads():
++    service, observer, ledger, policy, approvals, identity = reconcile_setup()
++    scanner, observer, inventory, projections = scan_setup([scan_entry()], ledger=ledger)
++    captured = observed_result(scan_entry().binding)
++    observer.capture.return_value = replace(captured, status=replace(captured.status, drift=vc.DriftState.CLEAN))
++    status = scanner.scan("123", None).items[0]
++    assert status.drift == vc.DriftState.EXTERNAL_AHEAD
++    assert status.heads.approved == version_id(1)

@@ -1,0 +1,1927 @@
+diff --git a/frontend/M09_FIX_VERIFICATION.md b/frontend/M09_FIX_VERIFICATION.md
+new file mode 100644
+index 0000000..a7ec5c6
+--- /dev/null
++++ b/frontend/M09_FIX_VERIFICATION.md
+@@ -0,0 +1,12 @@
++# M09 review fix verification
++
++## M02 fixture requests (read-only consumer; no backend edits)
++
++Please add shared paged-overview examples for clean, external_ahead and desired_ahead,
++and an ambiguous-create operation/evidence example. Existing M02 binding_status.json
++covers all eight drift enums; the frontend consumes that file directly rather than
++inventing a shared fixture. No shared fixture was authored or modified by M09.
++
++Approval projections and validate evidence are optional server response seams. If a real
++backend does not supply them, the browser displays evidence unavailable and blocks the
++approval request. Demo-only projections are supplied by the injected fake server.
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 0ad9d55..ff73db0 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -35,6 +35,7 @@
+         "eslint-plugin-react-hooks": "7.0.1",
+         "eslint-plugin-react-refresh": "0.4.26",
+         "globals": "16.5.0",
++        "jsdom": "26.1.0",
+         "tailwindcss": "4.2.1",
+         "typescript": "5.9.3",
+         "typescript-eslint": "8.56.1",
+@@ -42,6 +43,25 @@
+         "vitest": "4.1.4"
+       }
+     },
++    "node_modules/@asamuzakjp/css-color": {
++      "version": "3.2.0",
++      "integrity": "sha512-K1A6z8tS3XsmCMM86xoWdn7Fkdn9m6RSVtocUrJYIwZnFVkng/PvkEoWtOWmP+Scc6saYWHWZYbndEEXxl24jw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@csstools/css-calc": "^2.1.3",
++        "@csstools/css-color-parser": "^3.0.9",
++        "@csstools/css-parser-algorithms": "^3.0.4",
++        "@csstools/css-tokenizer": "^3.0.3",
++        "lru-cache": "^10.4.3"
++      }
++    },
++    "node_modules/@asamuzakjp/css-color/node_modules/lru-cache": {
++      "version": "10.4.3",
++      "integrity": "sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==",
++      "dev": true,
++      "license": "ISC"
++    },
+     "node_modules/@babel/code-frame": {
+       "version": "7.29.0",
+       "integrity": "sha512-9NhCeYjq9+3uxgdtp20LSiJXJvN0FeCtNGpJxuMFZ1Kv3cWUNb6DOhJwUvcVCzKGR66cw4njwM6hrJLqgOwbcw==",
+@@ -303,6 +323,116 @@
+         "node": ">=6.9.0"
+       }
+     },
++    "node_modules/@csstools/color-helpers": {
++      "version": "5.1.0",
++      "integrity": "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT-0",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@csstools/css-calc": {
++      "version": "2.1.4",
++      "integrity": "sha512-3N8oaj+0juUw/1H3YwmDDJXCgTB1gKU6Hc/bB502u9zR0q2vd786XJH9QfrKIEgFlZmhZiq6epXl4rHqhzsIgQ==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@csstools/css-parser-algorithms": "^3.0.5",
++        "@csstools/css-tokenizer": "^3.0.4"
++      }
++    },
++    "node_modules/@csstools/css-color-parser": {
++      "version": "3.1.0",
++      "integrity": "sha512-nbtKwh3a6xNVIp/VRuXV64yTKnb1IjTAEEh3irzS+HkKjAOYLTGNb9pmVNntZ8iVBHcWDA2Dof0QtPgFI1BaTA==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@csstools/color-helpers": "^5.1.0",
++        "@csstools/css-calc": "^2.1.4"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@csstools/css-parser-algorithms": "^3.0.5",
++        "@csstools/css-tokenizer": "^3.0.4"
++      }
++    },
++    "node_modules/@csstools/css-parser-algorithms": {
++      "version": "3.0.5",
++      "integrity": "sha512-DaDeUkXZKjdGhgYaHNJTV9pV7Y9B3b644jCLs9Upc3VeNGg6LWARAT6O+Q+/COo+2gg/bM5rhpMAtf70WqfBdQ==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@csstools/css-tokenizer": "^3.0.4"
++      }
++    },
++    "node_modules/@csstools/css-tokenizer": {
++      "version": "3.0.4",
++      "integrity": "sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/csstools"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/csstools"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/@databricks/aibi-client": {
+       "version": "1.0.3-alpha.0",
+       "integrity": "sha512-gk6MivcO9exu8YCy6h2WZBnHyGPAyrk7P0aErM2Mxgj2H1cntUV3xXd4BFdRd3mhepU4V4raALrHq+IpsFVb5A==",
+@@ -2366,6 +2496,15 @@
+         "acorn": "^6.0.0 || ^7.0.0 || ^8.0.0"
+       }
+     },
++    "node_modules/agent-base": {
++      "version": "7.1.4",
++      "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 14"
++      }
++    },
+     "node_modules/ajv": {
+       "version": "6.14.0",
+       "integrity": "sha512-IWrosm/yrn43eiKqkfkHis7QioDleaXQHdDVPKg0FSwwd/DuvyX79TZnFOnYpB7dcsFAMmtFztZuXPDvSePkFw==",
+@@ -2710,6 +2849,19 @@
+         "node": ">= 8"
+       }
+     },
++    "node_modules/cssstyle": {
++      "version": "4.6.0",
++      "integrity": "sha512-2z+rWdzbbSZv6/rhtvzvqeZQHrBaqgogqt85sqFNbabZOuFbCVFb8kPeEtZjiKkbrm395irpNKiYeFeLiQnFPg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@asamuzakjp/css-color": "^3.2.0",
++        "rrweb-cssom": "^0.8.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/csstype": {
+       "version": "3.2.3",
+       "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
+@@ -2931,6 +3083,19 @@
+         "node": ">=12"
+       }
+     },
++    "node_modules/data-urls": {
++      "version": "5.0.0",
++      "integrity": "sha512-ZYP5VBHshaDAiVZxjbRVcFJpc+4xGgT0bK3vzy1HLN8jTO975HEbuYzZJcHoQEY5K1a0z8YayJkyVETa08eNTg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "whatwg-mimetype": "^4.0.0",
++        "whatwg-url": "^14.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/debug": {
+       "version": "4.4.3",
+       "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+@@ -2947,6 +3112,12 @@
+         }
+       }
+     },
++    "node_modules/decimal.js": {
++      "version": "10.6.0",
++      "integrity": "sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/decimal.js-light": {
+       "version": "2.5.1",
+       "integrity": "sha512-qIMFpTMZmny+MMIitAB6D7iVPEorVw6YQRWkvarTkT4tBeSLLiHzcwj6q0MmYSFCiVpiqPJTJEYIrpcPzVEIvg==",
+@@ -3031,6 +3202,18 @@
+         "node": ">=10.13.0"
+       }
+     },
++    "node_modules/entities": {
++      "version": "6.0.1",
++      "integrity": "sha512-aN97NXWF6AWBTahfVOIrB/NShkzi5H7F9r1s9mD3cDj4Ko5f2qhhVoYMibXF7GlLveb/D2ioWay8lxI97Ven3g==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=0.12"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/entities?sponsor=1"
++      }
++    },
+     "node_modules/error-ex": {
+       "version": "1.3.4",
+       "integrity": "sha512-sqQamAnR14VgCr1A618A3sGrygcpK+HEbenA/HiEAkkUwcZIIB/tgWqHFxWgOyDh4nB4JCRimh79dR5Ywc9MDQ==",
+@@ -3591,6 +3774,18 @@
+         "hermes-estree": "0.25.1"
+       }
+     },
++    "node_modules/html-encoding-sniffer": {
++      "version": "4.0.0",
++      "integrity": "sha512-Y22oTqIU4uuPgEemfz7NDJz6OeKf12Lsu+QC+s3BVpda64lTiMYCyGwg5ki4vFxkMwQdeZDl2adZoqUgdFuTgQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "whatwg-encoding": "^3.1.1"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/html-url-attributes": {
+       "version": "3.0.1",
+       "integrity": "sha512-ol6UPyBWqsrO6EJySPz2O7ZSr856WDrEzM5zMqp+FJJLGMW35cLYmmZnl0vztAZxRUoNZJFTCohfjuIJ8I4QBQ==",
+@@ -3600,6 +3795,44 @@
+         "url": "https://opencollective.com/unified"
+       }
+     },
++    "node_modules/http-proxy-agent": {
++      "version": "7.0.2",
++      "integrity": "sha512-T1gkAiYYDWYx3V5Bmyu7HcfcvL7mUrTWiM6yOfa3PIphViJ/gFPbvidQ+veqSOHci/PxBcDabeUNCzpOODJZig==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "agent-base": "^7.1.0",
++        "debug": "^4.3.4"
++      },
++      "engines": {
++        "node": ">= 14"
++      }
++    },
++    "node_modules/https-proxy-agent": {
++      "version": "7.0.6",
++      "integrity": "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "agent-base": "^7.1.2",
++        "debug": "4"
++      },
++      "engines": {
++        "node": ">= 14"
++      }
++    },
++    "node_modules/iconv-lite": {
++      "version": "0.6.3",
++      "integrity": "sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "safer-buffer": ">= 2.1.2 < 3.0.0"
++      },
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
+     "node_modules/ignore": {
+       "version": "5.3.2",
+       "integrity": "sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==",
+@@ -3754,6 +3987,12 @@
+         "url": "https://github.com/sponsors/sindresorhus"
+       }
+     },
++    "node_modules/is-potential-custom-element-name": {
++      "version": "1.0.1",
++      "integrity": "sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/isexe": {
+       "version": "2.0.0",
+       "integrity": "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==",
+@@ -3794,6 +4033,45 @@
+         "js-yaml": "bin/js-yaml.js"
+       }
+     },
++    "node_modules/jsdom": {
++      "version": "26.1.0",
++      "integrity": "sha512-Cvc9WUhxSMEo4McES3P7oK3QaXldCfNWp7pl2NNeiIFlCoLr3kfq9kb1fxftiwk1FLV7CvpvDfonxtzUDeSOPg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "cssstyle": "^4.2.1",
++        "data-urls": "^5.0.0",
++        "decimal.js": "^10.5.0",
++        "html-encoding-sniffer": "^4.0.0",
++        "http-proxy-agent": "^7.0.2",
++        "https-proxy-agent": "^7.0.6",
++        "is-potential-custom-element-name": "^1.0.1",
++        "nwsapi": "^2.2.16",
++        "parse5": "^7.2.1",
++        "rrweb-cssom": "^0.8.0",
++        "saxes": "^6.0.0",
++        "symbol-tree": "^3.2.4",
++        "tough-cookie": "^5.1.1",
++        "w3c-xmlserializer": "^5.0.0",
++        "webidl-conversions": "^7.0.0",
++        "whatwg-encoding": "^3.1.1",
++        "whatwg-mimetype": "^4.0.0",
++        "whatwg-url": "^14.1.1",
++        "ws": "^8.18.0",
++        "xml-name-validator": "^5.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "canvas": "^3.0.0"
++      },
++      "peerDependenciesMeta": {
++        "canvas": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/jsesc": {
+       "version": "3.1.0",
+       "integrity": "sha512-/sM3dO2FOzXjKQhJuo0Q173wf2KOo8t4I8vHy6lF9poUp7bKT0/NHE8fPX23PwfhnykfqnC2xRxOnVw5XuGIaA==",
+@@ -5096,6 +5374,12 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/nwsapi": {
++      "version": "2.2.27",
++      "integrity": "sha512-gQPNF78qebCQ6tvVFBYrvJdBNOrYZm90ZlXgpIFm06p6qHDHq/XC4TnJftN6OMbxVE0UTBAoRgcsDeJBBooITw==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/object-assign": {
+       "version": "4.1.1",
+       "integrity": "sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg==",
+@@ -5212,6 +5496,18 @@
+         "url": "https://github.com/sponsors/sindresorhus"
+       }
+     },
++    "node_modules/parse5": {
++      "version": "7.3.0",
++      "integrity": "sha512-IInvU7fabl34qmi9gY8XOVxhYyMyuH2xUNpb2q8/Y+7552KlejkRvqvD19nMoUW/uQGGbqNpA6Tufu5FL5BZgw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "entities": "^6.0.0"
++      },
++      "funding": {
++        "url": "https://github.com/inikulin/parse5?sponsor=1"
++      }
++    },
+     "node_modules/path-exists": {
+       "version": "4.0.0",
+       "integrity": "sha512-ak9Qy5Q7jYb2Wwcey5Fpvg2KoAc/ZIhLSLOSBmRmygPsGwkVVt0fZa0qrtMz+m6tJTAHfZQ8FnmB4MG4LWy7/w==",
+@@ -5687,6 +5983,30 @@
+         "fsevents": "~2.3.2"
+       }
+     },
++    "node_modules/rrweb-cssom": {
++      "version": "0.8.0",
++      "integrity": "sha512-guoltQEx+9aMf2gDZ0s62EcV8lsXR+0w8915TC3ITdn2YueuNjdAYh/levpU9nFaoChh9RUS5ZdQMrKfVEN9tw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/safer-buffer": {
++      "version": "2.1.2",
++      "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/saxes": {
++      "version": "6.0.0",
++      "integrity": "sha512-xAg7SOnEhrm5zI3puOOKyy1OMcMlIJZYNJY7xLBwSze0UjhPLnWfj2GF2EpT0jmzaJKIWKHLsaSSajf35bcYnA==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "xmlchars": "^2.2.0"
++      },
++      "engines": {
++        "node": ">=v12.22.7"
++      }
++    },
+     "node_modules/scheduler": {
+       "version": "0.27.0",
+       "integrity": "sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q==",
+@@ -5861,6 +6181,12 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/symbol-tree": {
++      "version": "3.2.4",
++      "integrity": "sha512-9QNk5KwDF+Bvz+PyObkmSYjI5ksVUYtjW7AU22r2NKcfLJcXp96hkDWU3+XndOsUb+AQ9QhfzfCT2O+CNWT5Tw==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/tailwind-merge": {
+       "version": "3.6.0",
+       "integrity": "sha512-uxL7qAVQriqRQPAyK3pj66VqskWqoZ37PW94jwOTwNfq/z9oyu1V+eqrZqtR2+fCiXdYOZe/Modt8GtvqNzu+w==",
+@@ -5939,6 +6265,24 @@
+         "node": ">=14.0.0"
+       }
+     },
++    "node_modules/tldts": {
++      "version": "6.1.86",
++      "integrity": "sha512-WMi/OQ2axVTf/ykqCQgXiIct+mSQDFdH2fkwhPwgEwvJ1kSzZRiinb0zF2Xb8u4+OqPChmyI6MEu4EezNJz+FQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "tldts-core": "^6.1.86"
++      },
++      "bin": {
++        "tldts": "bin/cli.js"
++      }
++    },
++    "node_modules/tldts-core": {
++      "version": "6.1.86",
++      "integrity": "sha512-Je6p7pkk+KMzMv2XXKmAE3McmolOQFdxkKw0R8EYNr7sELW46JqnNeTX8ybPiQgvg1ymCoF8LXs5fzFaZvJPTA==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/totalist": {
+       "version": "3.0.1",
+       "integrity": "sha512-sf4i37nQ2LBx4m3wB74y+ubopq6W/dIzXg0FDGjsYnZHVa1Da8FH853wlL2gtUhg+xJXjfk3kUZS3BRoQeoQBQ==",
+@@ -5948,6 +6292,30 @@
+         "node": ">=6"
+       }
+     },
++    "node_modules/tough-cookie": {
++      "version": "5.1.2",
++      "integrity": "sha512-FVDYdxtnj0G6Qm/DhNPSb8Ju59ULcup3tuJxkFb5K8Bv2pUXILbf0xZWU8PX8Ov19OXljbUyveOFwRMwkXzO+A==",
++      "dev": true,
++      "license": "BSD-3-Clause",
++      "dependencies": {
++        "tldts": "^6.1.32"
++      },
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/tr46": {
++      "version": "5.1.1",
++      "integrity": "sha512-hdF5ZgjTqgAntKkklYw0R03MG2x/bSzTtkxmIRw/sTNV8YXsCJ1tfLAX23lhxhHJlEf3CRCOCGGWw3vI3GaSPw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "punycode": "^2.3.1"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/trim-lines": {
+       "version": "3.0.1",
+       "integrity": "sha512-kRj8B+YHZCc9kQYdWfJB2/oUl9rA99qbowYYBtr4ui4mZyAQ2JpvVBd/6U2YloATfqBhBTSMhTpgBHtU0Mf3Rg==",
+@@ -6375,6 +6743,62 @@
+         }
+       }
+     },
++    "node_modules/w3c-xmlserializer": {
++      "version": "5.0.0",
++      "integrity": "sha512-o8qghlI8NZHU1lLPrpi2+Uq7abh4GGPpYANlalzWxyWteJOCsr/P+oPBA49TOLu5FTZO4d3F9MnWJfiMo4BkmA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "xml-name-validator": "^5.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/webidl-conversions": {
++      "version": "7.0.0",
++      "integrity": "sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/whatwg-encoding": {
++      "version": "3.1.1",
++      "integrity": "sha512-6qN4hJdMwfYBtE3YBTTHhoeuUrDBPZmbQaxWAqSALV/MeEnR5z1xd8UKud2RAkFoPkmB+hli1TZSnyi84xz1vQ==",
++      "deprecated": "Use @exodus/bytes instead for a more spec-conformant and faster implementation",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "iconv-lite": "0.6.3"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/whatwg-mimetype": {
++      "version": "4.0.0",
++      "integrity": "sha512-QaKxh0eNIi2mE9p2vEdzfagOKHCcj1pJ56EEHGQOVxp8r9/iszLUUV7v89x9O1p/T+NlTM5W7jW6+cz4Fq1YVg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/whatwg-url": {
++      "version": "14.2.0",
++      "integrity": "sha512-De72GdQZzNTUBBChsXueQUnPKDkg/5A5zp7pFDuQAj5UFoENpiACU0wlCvzpAGnTkj++ihpKwKyYewn/XNUbKw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "tr46": "^5.1.0",
++        "webidl-conversions": "^7.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/which": {
+       "version": "2.0.2",
+       "integrity": "sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==",
+@@ -6415,6 +6839,42 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/ws": {
++      "version": "8.21.3",
++      "integrity": "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=10.0.0"
++      },
++      "peerDependencies": {
++        "bufferutil": "^4.0.1",
++        "utf-8-validate": ">=5.0.2"
++      },
++      "peerDependenciesMeta": {
++        "bufferutil": {
++          "optional": true
++        },
++        "utf-8-validate": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/xml-name-validator": {
++      "version": "5.0.0",
++      "integrity": "sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/xmlchars": {
++      "version": "2.2.0",
++      "integrity": "sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/yallist": {
+       "version": "3.1.1",
+       "integrity": "sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==",
+diff --git a/frontend/package.json b/frontend/package.json
+index fff02c4..3f3c35f 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -39,6 +39,7 @@
+     "eslint-plugin-react-hooks": "7.0.1",
+     "eslint-plugin-react-refresh": "0.4.26",
+     "globals": "16.5.0",
++    "jsdom": "26.1.0",
+     "tailwindcss": "4.2.1",
+     "typescript": "5.9.3",
+     "typescript-eslint": "8.56.1",
+diff --git a/frontend/src/components/version-control/approvals.test.tsx b/frontend/src/components/version-control/approvals.test.tsx
+index 0efe697..baf89c7 100644
+--- a/frontend/src/components/version-control/approvals.test.tsx
++++ b/frontend/src/components/version-control/approvals.test.tsx
+@@ -6,9 +6,9 @@ import { VersionControlApi } from '@/lib/version-control-api'
+ 
+ it('approval_ui_shows_bound_digests_distinct_approvers_and_expiry', async () => {
+   const vote = { actor_id: 'human-1', decision: 'approve' as const, recorded_at: '2026-09-07T01:00:00Z', target_group_eligible: true }
+-  const record = { ...approvalFixture, votes: [vote, vote, { ...vote, actor_id: 'demo-requester' }] }
++  const record = { ...approvalFixture, votes: [vote, vote, { ...vote, actor_id: approvalFixture.inputs.requester_id! }] }
+   const html = renderToStaticMarkup(<ApprovalDetails record={record} />)
+-  for (const text of ['raw-3', 'rendered-3', 'validation-1', 'benchmark-policy-1', 'preflight-1', '1 distinct', '2026-09-07T23:00:00Z', 'Base changed after capture', 'neither requester nor deployer', 'Server authorization']) expect(html).toContain(text)
++  for (const text of [approvalFixture.inputs.raw_source_digest, approvalFixture.inputs.rendered_target_digest, approvalFixture.inputs.validation_policy_digest, approvalFixture.inputs.benchmark_policy_digest, approvalFixture.inputs.preflight_evidence_digest, '1 distinct', approvalFixture.inputs.expires_at, 'Base changed after capture', 'neither requester nor deployer', 'Server authorization']) expect(html).toContain(text)
+   const transport = vi.fn(async () => new Response(JSON.stringify(record)))
+   await voteApproval(new VersionControlApi(transport), record, 'approve', 'vote-intent')
+   expect(transport.mock.calls[0][0]).toBe('/api/version-control/approvals/demo-approval/votes')
+@@ -16,3 +16,14 @@ it('approval_ui_shows_bound_digests_distinct_approvers_and_expiry', async () =>
+   await expect(voteApproval(new VersionControlApi(transport), { ...record, allowed_actions: [] }, 'approve', 'denied')).rejects.toThrow('not allowed')
+   expect(transport).toHaveBeenCalledTimes(1)
+ })
++
++it('approval_request_body_carries_server_derived_preflight_and_no_client_requester_identity', async () => {
++  const inputs = { ...approvalFixture.inputs, raw_source_digest: 'server-raw', rendered_target_digest: 'server-rendered', validation_policy_digest: 'server-policy', preflight_evidence_digest: 'server-preflight' }
++  const transport = vi.fn(async () => new Response(JSON.stringify(approvalFixture)))
++  await new VersionControlApi(transport).requestApproval(inputs, 'derived-request')
++  const body = JSON.parse(String(transport.mock.calls[0][1]?.body))
++  expect(body).not.toHaveProperty('requester_id')
++  expect(body).not.toHaveProperty('operation_id')
++  expect(body.preflight_evidence_digest).toBe('server-preflight')
++  for (const fabricated of ['preflight-1', 'validation-1', 'raw-3', 'rendered-3']) expect(Object.values(body)).not.toContain(fabricated)
++})
+diff --git a/frontend/src/components/version-control/approvals.tsx b/frontend/src/components/version-control/approvals.tsx
+index 1c741e6..f1aca7e 100644
+--- a/frontend/src/components/version-control/approvals.tsx
++++ b/frontend/src/components/version-control/approvals.tsx
+@@ -1,7 +1,7 @@
+ import { useEffect, useState } from 'react'
+ import type { VersionControlApi } from '@/lib/version-control-api'
+ import { createMutationIntent } from '@/lib/version-control-api'
+-import type { ApprovalInputs, ApprovalRecord } from '@/types/version-control'
++import type { ApprovalRequestInputs, ApprovalRecord } from '@/types/version-control'
+ 
+ export function ApprovalDetails({ record }: { record: ApprovalRecord }) {
+   const approvers = new Set(record.votes.filter(vote => vote.decision === 'approve' && vote.actor_id !== record.inputs.requester_id).map(vote => vote.actor_id))
+@@ -21,7 +21,7 @@ export function voteApproval(api: VersionControlApi, record: ApprovalRecord, dec
+   return api.vote(record.approval_id, decision, key)
+ }
+ export function ApprovalsPanel({ api, approvalId, inputs, disabled, onApproval, onRecord }: {
+-  api: VersionControlApi; approvalId: string; inputs: ApprovalInputs; disabled: boolean
++  api: VersionControlApi; approvalId: string; inputs: ApprovalRequestInputs | null; disabled: boolean
+   onApproval: (approvalId: string) => void; onRecord: (record: ApprovalRecord) => void
+ }) {
+   const [record, setRecord] = useState<ApprovalRecord | null>(null)
+@@ -39,7 +39,7 @@ export function ApprovalsPanel({ api, approvalId, inputs, disabled, onApproval,
+     return () => { active = false }
+   }, [api, approvalId, onRecord])
+   const request = async () => {
+-    if (busy || disabled) return
++    if (busy || disabled || !inputs) return
+     setBusy(true)
+     try { const result = await api.requestApproval(inputs, intent.key({ action: 'request', inputs })); onApproval(result.approval_id) }
+     catch (error) { setError(String(error)) }
+@@ -54,8 +54,9 @@ export function ApprovalsPanel({ api, approvalId, inputs, disabled, onApproval,
+   }
+   return <section aria-label="Approvals and audit">
+     <h3>Approvals and audit</h3>
++    {!inputs && <p role="status">Server approval evidence unavailable; request blocked.</p>}
+     {!record && <p>No approval loaded. Request a new approval bound to the reviewed inputs.</p>}
+-    <button disabled={disabled || busy || Boolean(error)} onClick={() => void request()}>Request fresh approval</button>
++    <button disabled={disabled || busy || !inputs || Boolean(error)} onClick={() => void request()}>Request fresh approval</button>
+     {record && <ApprovalDetails record={record} />}
+     <button disabled={disabled || busy || !record?.allowed_actions.includes('vote') || Boolean(error)} onClick={() => void vote('approve')}>Approve as authenticated user</button>
+     <button disabled={disabled || busy || !record?.allowed_actions.includes('vote') || Boolean(error)} onClick={() => void vote('reject')}>Reject as authenticated user</button>
+diff --git a/frontend/src/components/version-control/demo-api.ts b/frontend/src/components/version-control/demo-api.ts
+index c1d22cb..98648c5 100644
+--- a/frontend/src/components/version-control/demo-api.ts
++++ b/frontend/src/components/version-control/demo-api.ts
+@@ -1,6 +1,6 @@
+ import { VersionControlApi } from '@/lib/version-control-api'
+ import type { ApprovalInputs, ApprovalRecord, BindingStatus, DeploymentReceipt, Operation, OperationStatus, ReleaseCommand, VersionSummary } from '@/types/version-control'
+-import { approvalFixture, bindingFixture, receiptFixture, versionFixture } from './fixtures'
++import { approvalFixture, approvalInputsFixture, bindingFixture, receiptFixture, versionFixture } from './fixtures'
+ 
+ const statuses: BindingStatus[] = [
+   bindingFixture,
+@@ -21,13 +21,13 @@ export function createDemoTransport(): typeof fetch {
+   const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
+   const failure = (status: number, message: string) => json({ code: `DEMO_${status}`, message, stale: true, retryable: false }, status)
+   const operation = (status: OperationStatus, evidence: string) => {
+-    const result: Operation = { operation_id: `demo-operation-${operations.size + 1}`, status, job_run_id: 'demo-job', checkpoints: ['Preimage persisted', evidence], audit: ['Fixture target executor; no real workspace execution.'], receipt_references: [] }
++    const result: Operation = { operation_id: `demo-operation-${operations.size + 1}`, status, job_run_id: 'demo-job', evidence_digest: `demo-evidence-${operations.size + 1}`, checkpoints: ['Preimage persisted', evidence], audit: ['Fixture target executor; no real workspace execution.'], receipt_references: [] }
+     operations.set(result.operation_id, result)
+     return { ...result, status: 'requested' }
+   }
+   const approved = (id: string, bindingId: string) => {
+     const record = approvals.get(id)
+-    return record?.valid && record.inputs.target_binding === bindingId && Date.parse(record.inputs.expires_at) > Date.now() ? record : null
++    return record?.valid && record.inputs.target_binding.binding_id === bindingId && Date.parse(record.inputs.expires_at) > Date.now() ? record : null
+   }
+   return async (input, init) => {
+     init?.signal?.throwIfAborted()
+@@ -53,7 +53,8 @@ export function createDemoTransport(): typeof fetch {
+     if (path.endsWith('/status')) return json(status)
+     if (path.endsWith('/observe') && isCommand) {
+       if (status?.stale) return failure(503, 'Snapshot persistence unavailable; retained history is stale.')
+-      return json({ status, captured_version: status?.heads.observed ? history[0] : null, busy: bindingId === 'demo-busy' })
++      const approval_inputs = { ...approvalInputsFixture, expires_at: new Date(Date.now() + 3600000).toISOString() }
++      return json({ status: { ...status, approval_inputs }, captured_version: status?.heads.observed ? history[0] : null, busy: bindingId === 'demo-busy' })
+     }
+     if (path.endsWith('/versions')) {
+       if (bindingId === 'demo-history-unreachable') return failure(503, 'History storage unreachable.')
+@@ -64,7 +65,7 @@ export function createDemoTransport(): typeof fetch {
+       const version = history.find(version => version.version_id === decodeURIComponent(path.split('/').at(-1) ?? ''))
+       return version ? json(version) : failure(404, 'Version unavailable.')
+     }
+-    if (path.endsWith('/diff')) return json({ comparison: status?.stale ? 'unknown' : 'known', items: status?.stale ? [] : [{ category: 'sql', path: 'example_queries/1', change: 'modified', before: 'SELECT old_column FROM sales', after: 'SELECT new_column FROM sales', review_required: true }] })
++    if (path.endsWith('/diff')) return json({ comparison: status?.stale ? 'unknown' : url.searchParams.get('left') === url.searchParams.get('right') ? 'equal' : 'different', items: status?.stale || url.searchParams.get('left') === url.searchParams.get('right') ? [] : [{ category: 'sql', path: 'example_queries/1', change: 'modified', before: 'SELECT old_column FROM sales', after: 'SELECT new_column FROM sales', review_required: true }] })
+     if ((path.endsWith('/restore') || path.endsWith('/reconcile')) && isCommand) {
+       if (status?.quarantined || status?.unresolved_operation_id) return failure(423, 'Quarantined / unresolved operation. Inspect evidence; no replay.')
+       if (status?.stale) return failure(503, 'Coordination unavailable.')
+@@ -102,12 +103,17 @@ export function createDemoTransport(): typeof fetch {
+       const releaseId = decodeURIComponent(path.split('/')[2])
+       const release = releases.get(releaseId)
+       if (!release) return failure(404, 'Release unavailable.')
+-      if (path.endsWith('/validate') && isCommand) { release.validated = true; return json(operation('confirmed', 'Mapping and preflight evidence validated'), 202) }
++      if (path.endsWith('/validate') && isCommand) {
++        release.validated = true
++        const handle = operation('confirmed', 'Mapping and preflight evidence validated')
++        operations.get(handle.operation_id)!.approval_inputs = { ...approvalInputsFixture, operation_type: 'promotion', target_binding: { ...approvalInputsFixture.target_binding, binding_id: release.selection.target_binding }, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, preflight_evidence_digest: handle.evidence_digest!, expires_at: new Date(Date.now() + 3600000).toISOString() }
++        return json(handle, 202)
++      }
+       if (path.endsWith('/promote') && isCommand) {
+         const approval = approved(String(body.approval_id), release.selection.target_binding)
+         if (!release.validated || !approval || approval.inputs.mapping_digest !== release.selection.mapping_digest || approval.inputs.source_version_id !== release.selection.source_version_id) return failure(409, 'Release requires validated mapping and matching target-local approval.')
+         const handle = operation('confirmed', 'Rendered target read-back verified')
+-        release.receipt = { ...receiptFixture, release_id: releaseId, operation_id: handle.operation_id, target_binding: release.selection.target_binding, approval_id: approval.approval_id, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, status: 'confirmed', observed_fingerprints: receiptFixture.rendered_fingerprints, post_version_id: 'demo-target-after', compensation_operation_id: null }
++        release.receipt = { ...receiptFixture, release_id: releaseId, operation_id: handle.operation_id, target_binding: { ...approvalInputsFixture.target_binding, binding_id: release.selection.target_binding }, approval_id: approval.approval_id, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, status: 'confirmed', observed_fingerprints: receiptFixture.rendered_fingerprints, post_version_id: 'demo-target-after', compensation_operation_id: null }
+         return json(handle, 202)
+       }
+       if (path.endsWith('/receipt')) return release.receipt ? json(release.receipt) : json({ operation_id: releaseId, status: 'requested', job_run_id: null }, 202)
+diff --git a/frontend/src/components/version-control/diff.test.tsx b/frontend/src/components/version-control/diff.test.tsx
+index 4c99baa..6c49426 100644
+--- a/frontend/src/components/version-control/diff.test.tsx
++++ b/frontend/src/components/version-control/diff.test.tsx
+@@ -3,7 +3,7 @@ import { expect, it } from 'vitest'
+ import { SemanticDiffView } from './diff'
+ 
+ it('semantic_diff_groups_changes_and_flags_manual_sql_review', () => {
+-  const html = renderToStaticMarkup(<SemanticDiffView diff={{ comparison: 'known', items: [
++  const html = renderToStaticMarkup(<SemanticDiffView diff={{ comparison: 'different', items: [
+     { category: 'sql', path: 'queries/1', change: 'modified', before: 'select 1', after: 'select 2', review_required: true },
+     { category: 'columns', path: 'sales/id', change: 'added', before: null, after: 'id', review_required: false },
+   ] }} />)
+@@ -12,3 +12,12 @@ it('semantic_diff_groups_changes_and_flags_manual_sql_review', () => {
+   expect(unknown).toContain('Unknown comparison')
+   expect(unknown).not.toContain('No changes')
+ })
++
++it('diff_never_infers_equality_from_an_empty_item_list', () => {
++  const render = (comparison: 'equal' | 'different' | 'unknown') => renderToStaticMarkup(<SemanticDiffView diff={{ comparison, items: [] }} />)
++  expect(render('different')).not.toContain('No changes')
++  expect(render('different')).toContain('Comparison incomplete')
++  expect(render('equal')).toContain('No changes')
++  expect(render('unknown')).toContain('Unknown comparison')
++  expect(render('unknown')).not.toContain('No changes')
++})
+diff --git a/frontend/src/components/version-control/diff.tsx b/frontend/src/components/version-control/diff.tsx
+index f5c6326..6a9b4df 100644
+--- a/frontend/src/components/version-control/diff.tsx
++++ b/frontend/src/components/version-control/diff.tsx
+@@ -4,7 +4,8 @@ export function SemanticDiffView({ diff }: { diff: SemanticDiff }) {
+   const categories = [...new Set(diff.items.map(item => item.category))]
+   return <section aria-label="Semantic diff">
+     <h3>Semantic diff</h3>
+-    {!diff.items.length && <p>No changes in this comparison.</p>}
++    {diff.comparison === 'different' && !diff.items.length && <p role="status">Comparison incomplete — differences reported but no items returned.</p>}
++    {diff.comparison === 'equal' && <p>No changes in this comparison.</p>}
+     {categories.map(category => <section key={category} aria-label={category}>
+       <h4>{category}</h4>
+       {diff.items.filter(item => item.category === category).map((item, index) => <article key={`${item.path}-${index}`}>
+diff --git a/frontend/src/components/version-control/fixtures.ts b/frontend/src/components/version-control/fixtures.ts
+index c3b4057..b792da8 100644
+--- a/frontend/src/components/version-control/fixtures.ts
++++ b/frontend/src/components/version-control/fixtures.ts
+@@ -1,36 +1,32 @@
++// Thin M02 contract views. Only demo routing/lineage and scenario overlays live here.
++// Real UI modules must never import this fake-server/test adapter.
+ import type { ApprovalInputs, ApprovalRecord, BindingStatus, DeploymentReceipt, Fingerprints, VersionSummary } from '@/types/version-control'
++import binding from '../../../../backend/tests/fixtures/vc_contracts/binding_status.json'
++import version from '../../../../backend/tests/fixtures/vc_contracts/version_summary.json'
++import approval from '../../../../backend/tests/fixtures/vc_contracts/approval_inputs.json'
++import receipt from '../../../../backend/tests/fixtures/vc_contracts/deployment_receipt.json'
++import fingerprint from '../../../../backend/tests/fixtures/vc_contracts/fingerprints.json'
+ 
+-export const fingerprints: Fingerprints = { config: 'config-3', benchmark: 'benchmark-1', metadata: 'metadata-2', canonicalizer_version: 'VC/1.0' }
++export const fingerprints: Fingerprints = fingerprint.examples[0]
+ export const bindingFixture: BindingStatus = {
+-  binding_id: 'demo-binding', binding_revision: 3,
+-  heads: { observed: 'external-3', approved: 'approved-2', deployed: 'deployed-1' },
+-  drift: 'diverged', quarantined: false, unresolved_operation_id: null,
+-  observed_at: '2026-09-07T00:00:00Z', projection_as_of: '2026-09-07T00:00:00Z', stale: false,
++  ...binding.examples[3], drift: 'diverged', binding_id: 'demo-binding', binding_revision: 3,
++  heads: { observed: 'external-3', approved: 'approved-2', deployed: 'deployed-1' }, stale: false,
+   allowed_actions: ['restore', 'adopt', 'reapply', 'acknowledge', 'promote'], reasons: ['External changes captured; approval required'],
+ }
+ export const versionFixture: VersionSummary = {
+-  version_id: 'external-3', binding_id: 'demo-binding', observed_at: '2026-09-07T00:00:00Z', origin: 'external',
+-  observed_by: 'capturing-user', parent_version_id: 'approved-2', restored_from_version_id: null,
+-  fingerprints, optimizer_run_id: null, champion_id: null,
++  ...version.examples[1], origin: 'external', version_id: 'external-3', binding_id: 'demo-binding', parent_version_id: 'approved-2',
+ }
+ export const approvalInputsFixture: ApprovalInputs = {
+-  schema_version: 'VC/1.0', operation_id: 'demo-operation', operation_type: 'adopt', source_version_id: 'external-3',
+-  raw_source_digest: 'raw-3', source_fingerprints: fingerprints, rendered_target_digest: 'rendered-3',
+-  canonicalizer_version: 'VC/1.0', target_binding: 'demo-binding', expected_base_fingerprints: fingerprints,
+-  validation_policy_digest: 'validation-1', benchmark_policy_digest: 'benchmark-policy-1', preflight_evidence_digest: 'preflight-1',
+-  thresholds: { minimum_accuracy: 0.9 }, requester_id: 'demo-requester', recovery_policy: 'quarantine', expires_at: '2026-09-07T23:00:00Z',
++  ...approval.examples[0], operation_type: 'adopt', source_version_id: versionFixture.version_id,
++  target_binding: { ...approval.examples[0].target_binding, binding_id: bindingFixture.binding_id, binding_revision: bindingFixture.binding_revision },
+ }
+ export const approvalFixture: ApprovalRecord = {
+   approval_id: 'demo-approval', inputs: approvalInputsFixture, approval_digest: 'approval-digest-1', valid: false,
+   invalidation_reasons: ['Base changed after capture'], allowed_actions: ['vote'], votes: [],
+ }
+ export const receiptFixture: DeploymentReceipt = {
+-  schema_version: 'VC/1.0', release_id: 'demo-release', operation_id: 'demo-promotion', target_binding: 'demo-target',
+-  attempt_id: 'attempt-1', generation: 1, coordination_backend: 'delta', approval_id: 'demo-approval', approval_digest: 'approval-digest-1',
+-  source_version_id: 'external-3', package_digest: 'package-1', mapping_digest: 'mapping-1',
+-  intended_fingerprints: fingerprints, rendered_fingerprints: { ...fingerprints, config: 'rendered-config' },
+-  observed_fingerprints: { ...fingerprints, config: 'partial-config' }, pre_version_id: 'target-before', post_version_id: null,
+-  transformer_version: 'transformer-1', canonicalizer_version: 'VC/1.0', executor_id: 'target-executor', job_run_id: 'target-job',
+-  validation_evidence_digest: 'validation-evidence', benchmark_evidence_digest: 'benchmark-evidence', status: 'applied_partial',
+-  compensation_operation_id: 'compensation-1', recorded_at: '2026-09-07T01:00:00Z',
++  ...receipt.examples[0], coordination_backend: 'delta', status: 'applied_partial',
++  target_binding: { ...receipt.examples[0].target_binding, binding_id: 'demo-target' },
++  rendered_fingerprints: { ...fingerprints, config: fingerprints.benchmark },
++  observed_fingerprints: { ...fingerprints, config: fingerprints.metadata },
+ }
+diff --git a/frontend/src/components/version-control/history.test.tsx b/frontend/src/components/version-control/history.test.tsx
+index f39c687..39b7b31 100644
+--- a/frontend/src/components/version-control/history.test.tsx
++++ b/frontend/src/components/version-control/history.test.tsx
+@@ -5,6 +5,6 @@ import { versionFixture } from './fixtures'
+ 
+ it('history_shows_origin_actor_lineage_and_optimizer_drillthrough', () => {
+   const html = renderToStaticMarkup(<History page={{ items: [{ ...versionFixture, origin: 'optimizer', optimizer_run_id: 'run/42', champion_id: 'champion-7', restored_from_version_id: 'original-1' }], next_cursor: 'next' }} onNext={vi.fn()} onSelect={vi.fn()} onCompare={vi.fn()} />)
+-  for (const text of ['optimizer', 'capturing-user', 'approved-2', 'original-1', 'champion-7', 'run%2F42', 'Compare versions', 'Next history page', 'external-3']) expect(html).toContain(text)
++  for (const text of ['optimizer', versionFixture.observed_by, 'approved-2', 'original-1', 'champion-7', 'run%2F42', 'Compare versions', 'Next history page', 'external-3']) expect(html).toContain(text)
+   expect(html).not.toContain('Version 3')
+ })
+diff --git a/frontend/src/components/version-control/overview-badge.test.tsx b/frontend/src/components/version-control/overview-badge.test.tsx
+index afe3445..b822f67 100644
+--- a/frontend/src/components/version-control/overview-badge.test.tsx
++++ b/frontend/src/components/version-control/overview-badge.test.tsx
+@@ -29,3 +29,37 @@ it('overview_does_not_fetch_live_genie_per_row', async () => {
+   expect(transport.mock.calls[1][0]).toBe('/api/version-control/overview?limit=25&cursor=page%2F2')
+   expect(transport.mock.calls.every(([url]) => String(url).includes('/overview?'))).toBe(true)
+ })
++
++it('badge_distinguishes_partial_unresolved_quarantined_conflicted_and_stale_clean', () => {
++  const render = (changes = {}) => renderToStaticMarkup(<OverviewBadge status={{ ...bindingFixture, reasons: [], ...changes }} />)
++  const markups = [
++    render({ drift: 'diverged', unresolved_operation_id: 'op-1' }),
++    render({ drift: 'diverged', unresolved_operation_id: null }),
++    render({ quarantined: true, drift: 'conflicted' }),
++    render({ drift: 'clean', stale: true, heads: { approved: 'p', deployed: 'p', observed: 'x' } }),
++    render({ drift: 'unknown' }),
++    render({ drift: 'unreachable' }),
++  ]
++  expect(new Set(markups).size).toBe(markups.length)
++  expect(markups[0]).toContain('op-1')
++  expect(markups[2]).toContain('Quarantined')
++  expect(markups[2]).toContain('Conflicted')
++  expect(markups[3]).not.toContain('In sync')
++  expect(render({ reasons: ['dual_authority_detected'] })).toContain('dual_authority_detected')
++  for (const [drift, label] of [['external_ahead', 'External ahead'], ['desired_ahead', 'Desired ahead'], ['diverged', 'Diverged']]) expect(render({ drift })).toContain(label)
++  expect(render({ drift: 'clean', heads: { observed: 'x', approved: null, deployed: null } })).toContain('Unknown')
++  expect(render({ drift: 'clean', heads: { observed: 'x', approved: 'p', deployed: 'p' } })).toContain('In sync')
++  expect(render({ drift: 'clean', heads: { observed: 'p', approved: 'p', deployed: 'q' } })).toContain('Policy mismatch')
++})
++
++import m02Bindings from '../../../../backend/tests/fixtures/vc_contracts/binding_status.json'
++import type { BindingStatus } from '@/types/version-control'
++it('badge_covers_every_m02_drift_projection', async () => {
++  const labels: Record<BindingStatus['drift'], string> = { clean: 'Unknown', external_ahead: 'External ahead', desired_ahead: 'Desired ahead', diverged: 'Diverged', unknown: 'Unknown', unreachable: 'Unreachable', applied_unverified: 'Applied, unverified', conflicted: 'Conflicted' }
++  const api = new VersionControlApi(vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ items: m02Bindings.examples, next_cursor: null }))))
++  for (const status of (await api.overview()).items) {
++    const html = renderToStaticMarkup(<OverviewBadge status={status} />)
++    expect(html).toContain(labels[status.drift])
++    for (const reason of status.reasons) expect(html).toContain(reason)
++  }
++})
+diff --git a/frontend/src/components/version-control/overview-badge.tsx b/frontend/src/components/version-control/overview-badge.tsx
+index 2e5012f..fee0b8a 100644
+--- a/frontend/src/components/version-control/overview-badge.tsx
++++ b/frontend/src/components/version-control/overview-badge.tsx
+@@ -1,14 +1,18 @@
+ import type { BindingStatus } from '@/types/version-control'
+-export function OverviewBadge({ status }: { status: BindingStatus }) {
++import type { VersionControlApi } from '@/lib/version-control-api'
++import { OperationDrillThrough } from './reconcile'
++export function OverviewBadge({ status, api }: { status: BindingStatus; api?: VersionControlApi }) {
+   const labels = { clean: 'Policy mismatch', external_ahead: 'External ahead', desired_ahead: 'Desired ahead', diverged: 'Diverged', unknown: 'Unknown', unreachable: 'Unreachable', applied_unverified: 'Applied, unverified', conflicted: 'Conflicted' }
+   let label = labels[status.drift]
+   if (status.drift === 'clean') {
+     label = !status.heads.approved || !status.heads.deployed ? 'Unknown' : status.heads.approved === status.heads.deployed ? 'In sync' : 'Policy mismatch'
+   }
+-  if (status.quarantined) label = 'Quarantined'
+-  if (status.stale && label === 'In sync') label = 'Unknown'
++  if (status.stale && label === 'In sync') label = 'Policy equality unverified while stale'
+   return <div className="rounded-lg border border-border p-3 text-sm">
+     <strong>{label}</strong>{status.stale && <span> · Stale</span>}
++    {status.quarantined && <span> · Quarantined</span>}
++    {status.unresolved_operation_id && <OperationDrillThrough key={status.unresolved_operation_id} api={api} operationId={status.unresolved_operation_id} />}
++    <ul aria-label="Drift reasons">{status.reasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul>
+     <dl>{Object.entries(status.heads).map(([head, version]) => <div key={head}><dt>{head}</dt><dd title={version ?? undefined}>{version?.slice(0, 8) ?? 'Not recorded'}</dd></div>)}</dl>
+     <p>Projection as of <time>{status.projection_as_of}</time></p>
+     <p>Observed: {status.observed_at ?? 'Unknown'}</p>
+diff --git a/frontend/src/components/version-control/overview.tsx b/frontend/src/components/version-control/overview.tsx
+index e45704a..0e339ae 100644
+--- a/frontend/src/components/version-control/overview.tsx
++++ b/frontend/src/components/version-control/overview.tsx
+@@ -29,7 +29,7 @@ export function VersionControlOverview({ api, onSelect }: { api: VersionControlA
+     {!loading && !error && page.items.length === 0 && <p>No enrolled bindings.</p>}
+     <ul>{page.items.map(status => <li key={status.binding_id}>
+       <button onClick={() => onSelect(status.binding_id)}>{status.binding_id}</button>
+-      <OverviewBadge status={status} />
++      <OverviewBadge api={api} status={status} />
+     </li>)}</ul>
+     <button disabled={loading || !cursor} onClick={() => setCursor(undefined)}>First page</button>
+     <button disabled={loading || !page.next_cursor} onClick={() => setCursor(page.next_cursor ?? undefined)}>Next page</button>
+diff --git a/frontend/src/components/version-control/promotion.test.tsx b/frontend/src/components/version-control/promotion.test.tsx
+index d556466..75c843b 100644
+--- a/frontend/src/components/version-control/promotion.test.tsx
++++ b/frontend/src/components/version-control/promotion.test.tsx
+@@ -1,3 +1,4 @@
++// @vitest-environment jsdom
+ import { expect, it, vi } from 'vitest'
+ import { createPromotionFlow, ReceiptView, pollReceipt } from './promotion'
+ import { VersionControlApi } from '@/lib/version-control-api'
+@@ -7,7 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
+ it('promotion_requires_explicit_target_mapping_preflight_and_approval', async () => {
+   const transport = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(String(url).endsWith('/releases')
+     ? { release_id: 'release-1', operation_id: 'package-1', status: 'requested', job_run_id: null }
+-    : { operation_id: 'operation-1', status: String(url).includes('/operations/') ? 'confirmed' : 'requested', job_run_id: null, checkpoints: [], audit: [], receipt_references: [] })))
++    : { operation_id: 'operation-1', status: String(url).includes('/operations/') ? 'confirmed' : 'requested', job_run_id: null, checkpoints: [], audit: [], receipt_references: [], evidence_digest: 'preflight-from-server', approval_inputs: { ...approvalFixture.inputs, target_binding: { ...approvalFixture.inputs.target_binding, binding_id: 'target' } } })))
+   const flow = createPromotionFlow(new VersionControlApi(transport))
+   await expect(flow.validate('no-target')).rejects.toThrow('explicit target')
+   const selection = { source_binding: 'source', source_version_id: 'version-1', target_binding: 'target', mapping_digest: 'mapping-1', policy: 'production' }
+@@ -17,7 +18,8 @@ it('promotion_requires_explicit_target_mapping_preflight_and_approval', async ()
+   expect(transport.mock.calls.map(([url]) => url)).toEqual(['/api/version-control/releases', '/api/version-control/releases/release-1/validate', '/api/version-control/operations/operation-1'])
+   expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual(selection)
+   await expect(flow.promote(approvalFixture, 'invalid-approval')).rejects.toThrow('approval')
+-  const valid = { ...approvalFixture, valid: true, inputs: { ...approvalFixture.inputs, target_binding: 'target', source_version_id: 'version-1', mapping_digest: 'mapping-1', expires_at: new Date(Date.now() + 3600000).toISOString() } }
++  const valid = { ...approvalFixture, valid: true, inputs: { ...approvalFixture.inputs, target_binding: { ...approvalFixture.inputs.target_binding, binding_id: 'target' }, preflight_evidence_digest: 'preflight-from-server', approval_inputs: { ...approvalFixture.inputs, target_binding: { ...approvalFixture.inputs.target_binding, binding_id: 'target' } }, source_version_id: 'version-1', mapping_digest: 'mapping-1', expires_at: new Date(Date.now() + 3600000).toISOString() } }
++  await expect(flow.promote({ ...valid, inputs: { ...valid.inputs, target_binding: { ...valid.inputs.target_binding, binding_revision: valid.inputs.target_binding.binding_revision + 1 } } }, 'wrong-revision')).rejects.toThrow('approval')
+   await flow.promote(valid, 'promote-intent')
+   expect(transport.mock.calls[3][0]).toBe('/api/version-control/releases/release-1/promote')
+   expect(JSON.parse(String(transport.mock.calls[3][1]?.body))).toEqual({ approval_id: valid.approval_id })
+@@ -27,10 +29,40 @@ it('promotion_requires_explicit_target_mapping_preflight_and_approval', async ()
+ 
+ it('receipt_shows_intended_rendered_observed_and_compensation_status', async () => {
+   const html = renderToStaticMarkup(<ReceiptView receipt={receiptFixture} />)
+-  for (const text of ['Intended', 'Rendered', 'Observed', 'config-3', 'rendered-config', 'partial-config', 'applied_partial', 'compensation-1', 'target-before', 'target-executor', 'package-1']) expect(html).toContain(text)
++  for (const text of ['Intended', 'Rendered', 'Observed', receiptFixture.intended_fingerprints.config, receiptFixture.rendered_fingerprints.config, receiptFixture.observed_fingerprints.config, 'applied_partial', receiptFixture.pre_version_id, receiptFixture.executor_id, receiptFixture.package_digest]) expect(html).toContain(text)
+   expect(html).not.toContain('Deployment confirmed')
+   const transport = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ operation_id: 'pending-1', status: 'requested', job_run_id: null }), { status: 202 })).mockResolvedValueOnce(new Response(JSON.stringify(receiptFixture)))
+   expect(await pollReceipt(new VersionControlApi(transport), 'release/1', async () => {})).toEqual(receiptFixture)
+   expect(transport.mock.calls.map(([url]) => url)).toEqual(['/api/version-control/releases/release%2F1/receipt', '/api/version-control/releases/release%2F1/receipt'])
+   expect(transport.mock.calls.every(([, init]) => !init.method)).toBe(true)
+ })
++
++
++it('promotion_approval_binds_the_preflight_evidence_digest_returned_by_validate', async () => {
++  const projection = { ...approvalFixture.inputs, target_binding: { ...approvalFixture.inputs.target_binding, binding_id: 'target' }, raw_source_digest: 'server-raw', rendered_target_digest: 'server-rendered', validation_policy_digest: 'server-policy' }
++  const transport = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(String(url).endsWith('/releases')
++    ? { release_id: 'release-evidence', operation_id: 'package', status: 'requested', job_run_id: null }
++    : String(url).includes('/approvals') ? approvalFixture
++    : { operation_id: 'preflight', status: 'confirmed', job_run_id: null, checkpoints: [], audit: [], receipt_references: [], evidence_digest: 'validated-distinctive-digest', approval_inputs: projection })))
++  const host = document.createElement('div')
++  const root = createRoot(host)
++  const input = async (label: string, value: string) => {
++    const element = [...host.querySelectorAll('label')].find(node => node.textContent?.startsWith(label))!.querySelector('input')!
++    await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(element, value); element.dispatchEvent(new Event('input', { bubbles: true })) })
++  }
++  try {
++    await act(async () => root.render(<PromotionPanel api={new VersionControlApi(transport)} bindingId="source" sourceVersionId="version-1" inputs={approvalFixture.inputs} disabled={false} />))
++    await input('Target binding', 'target'); await input('Immutable mapping', 'mapping-1'); await input('Validation policy', 'production')
++    await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent?.startsWith('Create release'))!.click())
++    await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent === 'Request fresh approval')!.click())
++    const posts = transport.mock.calls.filter(([url]) => String(url).endsWith('/approvals'))
++    expect(posts).toHaveLength(1)
++    expect(JSON.parse(String(posts[0][1]?.body)).preflight_evidence_digest).toBe('validated-distinctive-digest')
++    await input('Immutable mapping', 'changed')
++    expect([...host.querySelectorAll('button')].some(button => button.textContent === 'Request fresh approval')).toBe(false)
++  } finally { await act(async () => root.unmount()) }
++})
++import { act } from 'react'
++import { createRoot } from 'react-dom/client'
++import { PromotionPanel } from './promotion'
++Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+diff --git a/frontend/src/components/version-control/promotion.tsx b/frontend/src/components/version-control/promotion.tsx
+index 3b311c0..02dd7db 100644
+--- a/frontend/src/components/version-control/promotion.tsx
++++ b/frontend/src/components/version-control/promotion.tsx
+@@ -1,7 +1,7 @@
+ import { useEffect, useMemo, useState } from 'react'
+ import type { VersionControlApi } from '@/lib/version-control-api'
+ import { createMutationIntent } from '@/lib/version-control-api'
+-import type { ApprovalInputs, ApprovalRecord, DeploymentReceipt, OperationHandle, ReleaseCommand } from '@/types/version-control'
++import type { ApprovalRequestInputs, ApprovalRecord, BindingRef, DeploymentReceipt, OperationHandle, ReleaseCommand } from '@/types/version-control'
+ import { pollOperation } from './restore'
+ import { ApprovalsPanel } from './approvals'
+ export function ReceiptView({ receipt }: { receipt: DeploymentReceipt }) {
+@@ -45,10 +45,12 @@ export function createPromotionFlow(api: VersionControlApi) {
+   let selection: ReleaseCommand | null = null
+   let releaseId = ''
+   let preflight = false
++  let targetBinding: BindingRef | null = null
++  let evidenceDigest: string | null = null
+   let revision = 0
+   return {
+     configure(next: ReleaseCommand) {
+-      if (JSON.stringify(next) !== JSON.stringify(selection)) { selection = next; releaseId = ''; preflight = false; revision += 1 }
++      if (JSON.stringify(next) !== JSON.stringify(selection)) { selection = next; releaseId = ''; preflight = false; evidenceDigest = null; targetBinding = null; revision += 1 }
+     },
+     async validate(key: string) {
+       if (!selection?.target_binding.trim() || !selection.mapping_digest.trim() || !selection.source_version_id || !selection.policy.trim() || selection.source_binding === selection.target_binding) throw new Error('Select an explicit target, immutable mapping, source version and policy.')
+@@ -58,24 +60,28 @@ export function createPromotionFlow(api: VersionControlApi) {
+       const operation = await pollOperation(api, handle.operation_id)
+       if (revision !== started) throw new Error('Selection changed; preflight is invalid.')
+       releaseId = release.release_id
+-      preflight = operation.status === 'confirmed'
++      evidenceDigest = operation.evidence_digest ?? null
++      preflight = operation.status === 'confirmed' && Boolean(evidenceDigest)
+       if (!preflight) throw new Error(`Preflight incomplete: ${operation.status}`)
+-      return releaseId
++      const inputs = operation.approval_inputs
++      targetBinding = inputs?.target_binding ?? null
++      return { releaseId, evidenceDigest, inputs: inputs ? { ...inputs, preflight_evidence_digest: evidenceDigest! } : null }
+     },
+     async promote(approval: ApprovalRecord | null, key: string) {
+       if (!preflight || !releaseId) throw new Error('A confirmed preflight is required.')
+-      if (!approval?.valid || !approval.approval_digest || approval.inputs.target_binding !== selection?.target_binding || approval.inputs.source_version_id !== selection.source_version_id || approval.inputs.mapping_digest !== selection.mapping_digest || Date.parse(approval.inputs.expires_at) <= Date.now()) throw new Error('Fresh target-local approval matching the selected inputs is required.')
++      if (!approval?.valid || !approval.approval_digest || approval.inputs.preflight_evidence_digest !== evidenceDigest || !targetBinding || targetBinding.binding_id !== selection?.target_binding || approval.inputs.target_binding.binding_id !== targetBinding.binding_id || approval.inputs.target_binding.binding_revision !== targetBinding.binding_revision || approval.inputs.source_version_id !== selection.source_version_id || approval.inputs.mapping_digest !== selection.mapping_digest || Date.parse(approval.inputs.expires_at) <= Date.now()) throw new Error('Fresh target-local approval matching the selected inputs is required.')
+       const handle = await api.promote(releaseId, { approval_id: approval.approval_id }, key)
+       return pollOperation(api, handle.operation_id)
+     },
+   }
+ }
+-export function PromotionPanel({ api, bindingId, sourceVersionId, inputs, disabled }: { api: VersionControlApi; bindingId: string; sourceVersionId: string; inputs: ApprovalInputs; disabled: boolean }) {
++export function PromotionPanel({ api, bindingId, sourceVersionId, disabled }: { api: VersionControlApi; bindingId: string; sourceVersionId: string; inputs: ApprovalRequestInputs | null; disabled: boolean }) {
+   const flow = useMemo(() => createPromotionFlow(api), [api])
+   const [target, setTarget] = useState('')
+   const [mapping, setMapping] = useState('')
+   const [policy, setPolicy] = useState('')
+   const [releaseId, setReleaseId] = useState('')
++  const [approvalInputs, setApprovalInputs] = useState<ApprovalRequestInputs | null>(null)
+   const [approvalId, setApprovalId] = useState('')
+   const [approval, setApproval] = useState<ApprovalRecord | null>(null)
+   const [busy, setBusy] = useState(false)
+@@ -83,12 +89,12 @@ export function PromotionPanel({ api, bindingId, sourceVersionId, inputs, disabl
+   const [message, setMessage] = useState('')
+   const [intent] = useState(createMutationIntent)
+   const selection = { source_binding: bindingId, source_version_id: sourceVersionId, target_binding: target, mapping_digest: mapping, policy }
+-  const change = (setter: (value: string) => void, value: string) => { setter(value); setReleaseId(''); setApprovalId(''); setApproval(null); setError('') }
++  const change = (setter: (value: string) => void, value: string) => { setter(value); setReleaseId(''); setApprovalInputs(null); setApprovalId(''); setApproval(null); setError('') }
+   const validate = async () => {
+     if (disabled || busy) return
+     setBusy(true)
+     flow.configure(selection)
+-    try { setReleaseId(await flow.validate(intent.key({ action: 'validate', selection }))); setMessage('Preflight confirmed. Request target-local approval next.') }
++    try { const result = await flow.validate(intent.key({ action: 'validate', selection })); setReleaseId(result.releaseId); setApprovalInputs(result.inputs); setMessage('Preflight confirmed. Request target-local approval next.') }
+     catch (error) { setError(String(error)) }
+     finally { setBusy(false) }
+   }
+@@ -108,7 +114,7 @@ export function PromotionPanel({ api, bindingId, sourceVersionId, inputs, disabl
+       <label>Validation policy<input value={policy} onChange={event => change(setPolicy, event.target.value)} /></label>
+     </fieldset>
+     <button disabled={disabled || busy || !sourceVersionId || !target || !mapping || !policy || Boolean(error) || Boolean(releaseId)} onClick={() => void validate()}>Create release and validate mapping</button>
+-    {releaseId && <ApprovalsPanel key={releaseId} api={api} approvalId={approvalId} inputs={{ ...inputs, operation_type: 'promotion', source_version_id: sourceVersionId, target_binding: target, mapping_digest: mapping }} disabled={disabled || busy} onApproval={setApprovalId} onRecord={setApproval} />}
++    {releaseId && <ApprovalsPanel key={releaseId} api={api} approvalId={approvalId} inputs={approvalInputs} disabled={disabled || busy} onApproval={setApprovalId} onRecord={setApproval} />}
+     <button disabled={disabled || busy || !releaseId || !approval?.valid || Boolean(error)} onClick={() => void promote()}>Promote with target-local approval</button>
+     {busy && <p role="status">Promotion workflow pending…</p>}
+     {message && <p role="status">{message}</p>}
+diff --git a/frontend/src/components/version-control/reconcile.test.tsx b/frontend/src/components/version-control/reconcile.test.tsx
+index 74c045e..4c18736 100644
+--- a/frontend/src/components/version-control/reconcile.test.tsx
++++ b/frontend/src/components/version-control/reconcile.test.tsx
+@@ -1,8 +1,9 @@
++// @vitest-environment jsdom
+ import { expect, it, vi } from 'vitest'
+-import { reconcileAction, OperationStatusView } from './reconcile'
++import { reconcileAction, OperationStatusView, ReconcilePanel } from './reconcile'
+ import { renderToStaticMarkup } from 'react-dom/server'
+ import { VersionControlApi } from '@/lib/version-control-api'
+-import { approvalFixture, approvalInputsFixture, fingerprints } from './fixtures'
++import { approvalFixture, approvalInputsFixture, fingerprints, bindingFixture } from './fixtures'
+ 
+ it('adopt_requests_approval_and_reapply_does_not_reuse_invalid_approval', async () => {
+   const transport = vi.fn(async () => new Response(JSON.stringify(approvalFixture)))
+@@ -10,19 +11,92 @@ it('adopt_requests_approval_and_reapply_does_not_reuse_invalid_approval', async
+   const reviewed = { binding_revision: 3, expected_base: fingerprints, approval_id: approvalFixture.approval_id }
+   await reconcileAction(api, 'demo-binding', 'adopt', reviewed, approvalInputsFixture, approvalFixture, 'adopt-intent')
+   expect(transport.mock.calls[0][0]).toBe('/api/version-control/approvals')
+-  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual(approvalInputsFixture)
++  const body = JSON.parse(String(transport.mock.calls[0][1]?.body))
++  expect(body.expected_base_fingerprints).toEqual(fingerprints)
++  expect(body).not.toHaveProperty('requester_id')
+   await expect(reconcileAction(api, 'demo-binding', 'reapply', reviewed, approvalInputsFixture, approvalFixture, 'reapply-intent')).rejects.toThrow('fresh approval')
+   expect(transport).toHaveBeenCalledTimes(1)
+ })
+ 
+-it('quarantine_and_partial_outcome_never_offer_blind_retry', () => {
++it('quarantine_and_partial_outcome_never_offer_blind_retry', async () => {
+   for (const status of ['quarantined', 'applied_partial', 'applied_unverified', 'conflicted'] as const) {
+     const html = renderToStaticMarkup(<OperationStatusView operation={{ operation_id: 'unresolved-1', status, job_run_id: null, checkpoints: ['Description write incomplete'], audit: ['Operator must inspect captured evidence'], receipt_references: [] }} onVerify={vi.fn()} />)
+     expect(html).toContain(status)
+     expect(html).toContain('Description write incomplete')
+     expect(html).toContain('Operator must inspect captured evidence')
+     expect(html).toContain('Verify operation status')
+-    expect(html).not.toMatch(/>Retry|>Reapply|>Restore|>Promote/)
++    // A just-returned partial result must lock the real controls even before a refresh returns.
++    const api = new VersionControlApi(vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ operation_id: 'unresolved-1', status, job_run_id: null, checkpoints: [], audit: [], receipt_references: [] }))))
++    const host = document.createElement('div'); const root = createRoot(host)
++    try {
++      await act(async () => root.render(<ReconcilePanel api={api} state={permissiveState} inputs={approvalInputsFixture} approval={null} onApproval={vi.fn()} onComplete={vi.fn()} onCompare={vi.fn()} />))
++      const buttons = () => [...host.querySelectorAll('button')].filter(button => /adoption|Adopt captured|Reapply|Acknowledge/.test(button.textContent ?? ''))
++      expect(buttons().filter(button => !button.disabled)).toHaveLength(2)
++      await act(async () => buttons().find(button => button.textContent?.includes('Acknowledge'))!.click())
++      expect(buttons()).toHaveLength(3)
++      expect(buttons().every(button => button.disabled)).toBe(true)
++    } finally { await act(async () => root.unmount()) }
+     expect(html).toContain('No mutation replay')
+   }
+ })
++
++
++it('reconcile_result_renders_operation_evidence_not_a_bare_message', async () => {
++  const operation = { operation_id: 'partial-1', status: 'applied_partial', job_run_id: null, checkpoints: ['Description stopped'], audit: ['External state preserved'], receipt_references: [] }
++  const transport = vi.fn(async () => new Response(JSON.stringify(operation)))
++  const api = new VersionControlApi(transport)
++  const state = { bindingId: 'demo-binding', loading: false, captured: true, captureFailure: null, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
++  const host = document.createElement('div')
++  const root = createRoot(host)
++  try {
++    await act(async () => root.render(<ReconcilePanel api={api} state={state} inputs={approvalInputsFixture} approval={null} onApproval={vi.fn()} onComplete={vi.fn()} onCompare={vi.fn()} />))
++    await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent?.includes('Acknowledge'))!.click())
++    expect(host.textContent).toContain('applied_partial')
++    expect(host.textContent).toContain('Description stopped')
++    expect(host.textContent).toContain('External state preserved')
++    expect(transport.mock.calls[1][0]).toBe('/api/version-control/operations/partial-1')
++  } finally { await act(async () => root.unmount()) }
++})
++
++import { act } from 'react'
++import { createRoot } from 'react-dom/client'
++Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
++
++it('adopt_with_fresh_bound_approval_posts_reconcile_action_adopt', async () => {
++  const operation = { operation_id: 'adopt-1', status: 'confirmed', job_run_id: null, checkpoints: [], audit: [], receipt_references: [] }
++  const transport = vi.fn(async () => new Response(JSON.stringify(operation)))
++  const api = new VersionControlApi(transport)
++  const approval = { ...approvalFixture, valid: true, inputs: { ...approvalInputsFixture, expires_at: new Date(Date.now() + 60000).toISOString() } }
++  const reviewed = { binding_revision: 3, expected_base: fingerprints, approval_id: approval.approval_id }
++  await reconcileAction(api, 'demo-binding', 'adopt', reviewed, approvalInputsFixture, approval, 'fresh')
++  expect(transport.mock.calls[0][0]).toBe('/api/version-control/bindings/demo-binding/reconcile')
++  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toMatchObject({ ...reviewed, action: 'adopt' })
++  for (const inputs of [{ ...approval.inputs, expires_at: '2000-01-01T00:00:00Z' }, { ...approval.inputs, expected_base_fingerprints: { ...fingerprints, config: 'changed' } }]) {
++    const staleTransport = vi.fn(async () => new Response(JSON.stringify(approvalFixture)))
++    await reconcileAction(new VersionControlApi(staleTransport), 'demo-binding', 'adopt', reviewed, approvalInputsFixture, { ...approval, inputs }, 'stale')
++    expect(staleTransport).toHaveBeenCalledTimes(1)
++    expect(staleTransport.mock.calls[0][0]).toBe('/api/version-control/approvals')
++  }
++})
++
++import { RestorePanel } from './restore'
++import { PromotionPanel } from './promotion'
++import { canMutate } from '@/hooks/use-version-control'
++import type { VersionControlState } from '@/hooks/use-version-control'
++const permissiveState: VersionControlState = { bindingId: 'demo-binding', loading: false, captured: true, captureFailure: null, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
++it('reconcile_and_restore_controls_render_disabled_for_quarantined_and_partial_bindings', () => {
++  const api = new VersionControlApi(vi.fn())
++  for (const changes of [{ quarantined: true }, { unresolved_operation_id: 'op-1' }]) {
++    const state = { ...permissiveState, status: { ...bindingFixture, ...changes } }
++    const html = renderToStaticMarkup(<>
++      <ReconcilePanel api={api} state={state} inputs={approvalInputsFixture} approval={null} onApproval={vi.fn()} onComplete={vi.fn()} onCompare={vi.fn()} />
++      <RestorePanel api={api} bindingId="demo-binding" command={{ binding_revision: 3, expected_base: fingerprints, version_id: 'version' }} disabled={!canMutate(state, 'restore')} onComplete={vi.fn()} />
++      <PromotionPanel api={api} bindingId="demo-binding" sourceVersionId="version" inputs={approvalInputsFixture} disabled={!canMutate(state, 'promote')} />
++    </>)
++    const host = document.createElement('div'); host.innerHTML = html
++    // Exclude only the read-only compare control; new mutation buttons are included automatically.
++    const mutations = [...host.querySelectorAll('button')].filter(button => button.textContent !== 'Compare approved with observed')
++    expect(mutations).toHaveLength(6)
++    expect(mutations.filter(button => button.disabled)).toHaveLength(mutations.length)
++  }
++})
+diff --git a/frontend/src/components/version-control/reconcile.tsx b/frontend/src/components/version-control/reconcile.tsx
+index d6814af..fd35eed 100644
+--- a/frontend/src/components/version-control/reconcile.tsx
++++ b/frontend/src/components/version-control/reconcile.tsx
+@@ -17,11 +17,29 @@ export function OperationStatusView({ operation, onVerify }: { operation: Operat
+   </section>
+ }
+ 
+-export async function reconcileAction(api: VersionControlApi, bindingId: string, action: 'adopt' | 'reapply' | 'acknowledge', reviewed: ReviewedCommand, inputs: ApprovalInputs, approval: ApprovalRecord | null, key: string) {
+-  if (action === 'adopt') return api.requestApproval(inputs, key)
+-  if (action === 'reapply' && (!approval?.valid || approval.approval_id !== reviewed.approval_id || approval.inputs.target_binding !== bindingId || Date.parse(approval.inputs.expires_at) <= Date.now() || JSON.stringify(approval.inputs.expected_base_fingerprints) !== JSON.stringify(reviewed.expected_base))) {
+-    throw new Error('Reapply requires a fresh approval for the newly captured base.')
++export function OperationDrillThrough({ api, operationId }: { api?: VersionControlApi; operationId: string }) {
++  const [operation, setOperation] = useState<Operation | null>(null)
++  const [error, setError] = useState('')
++  const verify = async () => {
++    if (!api) return
++    try { setOperation(await api.operation(operationId)); setError('') }
++    catch (error) { setError(String(error)) }
+   }
++  return <div>
++    <button disabled={!api} onClick={() => void verify()}>Inspect unresolved operation {operationId}</button>
++    {operation && <OperationStatusView operation={operation} onVerify={() => void verify()} />}
++    {error && <p role="alert">Operation evidence unavailable: {error}. No mutation replay.</p>}
++  </div>
++}
++
++function hasFreshApproval(bindingId: string, reviewed: ReviewedCommand, approval: ApprovalRecord | null) {
++  return Boolean(approval?.valid && approval.approval_id === reviewed.approval_id && approval.inputs.target_binding.binding_id === bindingId && approval.inputs.target_binding.binding_revision === reviewed.binding_revision && Date.parse(approval.inputs.expires_at) > Date.now() && JSON.stringify(approval.inputs.expected_base_fingerprints) === JSON.stringify(reviewed.expected_base))
++}
++
++export async function reconcileAction(api: VersionControlApi, bindingId: string, action: 'adopt' | 'reapply' | 'acknowledge', reviewed: ReviewedCommand, inputs: ApprovalInputs, approval: ApprovalRecord | null, key: string) {
++  const fresh = hasFreshApproval(bindingId, reviewed, approval)
++  if (action === 'adopt' && !fresh) return api.requestApproval(inputs, key)
++  if (action === 'reapply' && !fresh) throw new Error('Reapply requires a fresh approval for the newly captured base.')
+   const handle = await api.reconcile(bindingId, { ...reviewed, action, policy_inputs: { validation_policy_digest: inputs.validation_policy_digest, benchmark_policy_digest: inputs.benchmark_policy_digest } }, key)
+   return pollOperation(api, handle.operation_id)
+ }
+@@ -31,16 +49,17 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
+ }) {
+   const [busy, setBusy] = useState(false)
+   const [message, setMessage] = useState('')
++  const [operation, setOperation] = useState<Operation | null>(null)
+   const [error, setError] = useState('')
+   const [intent] = useState(createMutationIntent)
+   const action = async (action: 'adopt' | 'reapply' | 'acknowledge') => {
+-    if (!canMutate(state, action) || busy || !state.status) return
++    if (!canMutate(state, action) || busy || operation || !state.status) return
+     setBusy(true)
+     try {
+       const reviewed = { binding_revision: state.status.binding_revision, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }
+       const result = await reconcileAction(api, state.bindingId, action, reviewed, inputs, approval, intent.key({ bindingId: state.bindingId, action, reviewed, inputs }))
+       if ('approval_id' in result) { onApproval(result.approval_id); setMessage(`Approval requested: ${result.approval_id}. Not yet approved.`) }
+-      else { setMessage(`Operation ${result.operation_id}: ${result.status}. Acknowledgement does not align heads.`); onComplete() }
++      else { setOperation(result); setMessage(`Operation ${result.operation_id}: ${result.status}. Acknowledgement does not align heads.`); onComplete() }
+     } catch (error) { setError(String(error)) }
+     finally { setBusy(false) }
+   }
+@@ -48,9 +67,10 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
+     <h3>Reconcile captured external changes</h3>
+     <p>Capture is evidence, not approval. Reapply requires approval for the current base.</p>
+     <button onClick={onCompare} disabled={!state.status?.heads.approved || !state.status.heads.observed}>Compare approved with observed</button>
+-    {(['adopt', 'reapply', 'acknowledge'] as const).map(kind => <button key={kind} disabled={busy || Boolean(error) || !canMutate(state, kind) || (kind === 'reapply' && !approval?.valid)} onClick={() => void action(kind)}>{kind === 'adopt' ? 'Request adoption approval' : kind === 'reapply' ? 'Reapply approved state' : 'Acknowledge scoped divergence'}</button>)}
++    {(['adopt', 'reapply', 'acknowledge'] as const).map(kind => <button key={kind} disabled={busy || Boolean(operation) || Boolean(error) || !canMutate(state, kind) || (kind === 'reapply' && !approval?.valid)} onClick={() => void action(kind)}>{kind === 'adopt' ? hasFreshApproval(state.bindingId, { binding_revision: state.status?.binding_revision ?? -1, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }, approval) ? 'Adopt captured state with approval' : 'Request adoption approval' : kind === 'reapply' ? 'Reapply approved state' : 'Acknowledge scoped divergence'}</button>)}
+     {busy && <p role="status">Reconciliation pending…</p>}
+     {message && <p role="status">{message}</p>}
++    {operation && <OperationStatusView operation={operation} onVerify={() => { void api.operation(operation.operation_id).then(setOperation).catch(error => setError(String(error))) }} />}
+     {error && <p role="alert">{error} No automatic mutation retry.</p>}
+   </section>
+ }
+diff --git a/frontend/src/components/version-control/version-control-tab.test.tsx b/frontend/src/components/version-control/version-control-tab.test.tsx
+index 0e4a2e6..5983d76 100644
+--- a/frontend/src/components/version-control/version-control-tab.test.tsx
++++ b/frontend/src/components/version-control/version-control-tab.test.tsx
+@@ -28,11 +28,11 @@ it('open_waits_for_capture_before_showing_reconcile_choices', async () => {
+   expect(canMutate(store.getSnapshot(), 'adopt')).toBe(false)
+   completeCapture(new Response(JSON.stringify({ status: bindingFixture, captured_version: versionFixture, busy: false })))
+   await returning
+-  expect(JSON.parse(String(transport.mock.calls.filter(([url]) => String(url).endsWith('/observe')).length))).toBe(2)
++  expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/observe'))).toHaveLength(2)
+ })
+ 
+ it('version_control_actions_are_keyboard_accessible_and_errors_announced', () => {
+-  const state = { bindingId: 'demo-binding', loading: false, captured: false, busy: false, stale: true, status: bindingFixture, history: { items: [versionFixture], next_cursor: null }, error: 'Evidence unavailable' }
++  const state = { bindingId: 'demo-binding', loading: false, captured: false, captureFailure: null, busy: false, stale: true, status: bindingFixture, history: { items: [versionFixture], next_cursor: null }, error: 'Evidence unavailable' }
+   const html = renderToStaticMarkup(<VersionControlView state={state} />)
+   expect(html).toContain('aria-live="polite"')
+   expect(html).toContain('role="alert"')
+@@ -72,7 +72,7 @@ it('fake_api_supports_approval_restore_promotion_and_receipt_without_network', a
+     expect(await api.receipt(release.release_id)).toHaveProperty('status', 'requested')
+     const preflight = await api.validate(release.release_id, 'validate-1')
+     expect((await api.operation(preflight.operation_id)).status).toBe('confirmed')
+-    const promotionApproval = await api.requestApproval({ ...inputs, operation_type: 'promotion', target_binding: 'demo-target', mapping_digest: 'mapping-1' }, 'promotion-request')
++    const promotionApproval = await api.requestApproval({ ...inputs, operation_type: 'promotion', target_binding: { ...inputs.target_binding, binding_id: 'demo-target' }, mapping_digest: 'mapping-1' }, 'promotion-request')
+     await api.vote(promotionApproval.approval_id, 'approve', 'promotion-vote')
+     await api.promote(release.release_id, { approval_id: promotionApproval.approval_id }, 'promote-1')
+     expect(await api.receipt(release.release_id)).toHaveProperty('post_version_id')
+@@ -97,3 +97,41 @@ it('capture_failure_shows_stale_history_and_disables_mutating_actions', async ()
+   expect(html).toContain('external-3')
+   expect(html).not.toContain('Request adoption approval')
+ })
++
++
++it('production_modules_do_not_import_test_fixtures', () => {
++  for (const file of readdirSync(new URL('.', import.meta.url)).filter(file => /\.tsx?$/.test(file) && !file.includes('.test.') && !['demo-api.ts', 'fixtures.ts'].includes(file))) {
++    expect(readFileSync(new URL(file, import.meta.url), 'utf8'), file).not.toMatch(/from ['"]\.\/fixtures['"]/)
++  }
++})
++import { readFileSync, readdirSync } from 'node:fs'
++
++import m02Errors from '../../../../backend/tests/fixtures/vc_contracts/api_error.json'
++it('open_distinguishes_409_conflict_423_unresolved_and_503_stale_surfaces', async () => {
++  const markups: string[] = []
++  for (const [httpStatus, kind] of [[409, 'conflict'], [423, 'unresolved'], [503, 'unavailable']] as const) {
++    const payload = m02Errors.examples[0]
++    const transport = vi.fn<typeof fetch>(async url => String(url).endsWith('/observe')
++      ? new Response(JSON.stringify(payload), { status: httpStatus })
++      : new Response(JSON.stringify({ items: [versionFixture], next_cursor: null })))
++    const api = new VersionControlApi(transport)
++    const store = createVersionControlStore(api)
++    await store.open('demo-binding')
++    const state = store.getSnapshot()
++    for (const action of bindingFixture.allowed_actions) expect(canMutate(state, action)).toBe(false)
++    const html = renderToStaticMarkup(<VersionControlView state={state} api={api} onCompare={vi.fn()} onRefresh={vi.fn()} />)
++    markups.push(html)
++    if (httpStatus === 409) {
++      expect(html).toContain('Preserved conflict'); expect(html).toContain('Compare preserved history')
++      expect(html).not.toContain('Stale history')
++    } else if (httpStatus === 423) {
++      expect(html).toContain('Quarantined / unresolved'); expect(html).toContain(payload.operation_id)
++      expect(html).not.toContain('Stale history'); expect(html).not.toMatch(/<button[^>]*>[^<]*[Rr]etry/)
++    } else {
++      expect(html).toContain('Stale history'); expect(html).toContain('Refresh captured history')
++      expect(state.history.items).toEqual([versionFixture]); expect(html).toContain('external-3')
++    }
++    expect(state.captureFailure).toMatchObject({ kind, operationId: payload.operation_id })
++  }
++  expect(new Set(markups).size).toBe(3)
++})
+diff --git a/frontend/src/components/version-control/version-control-tab.tsx b/frontend/src/components/version-control/version-control-tab.tsx
+index b12b4b2..93962fd 100644
+--- a/frontend/src/components/version-control/version-control-tab.tsx
++++ b/frontend/src/components/version-control/version-control-tab.tsx
+@@ -8,19 +8,30 @@ import { History } from './history'
+ import { SemanticDiffView } from './diff'
+ import { demoApi } from './demo-api'
+ import { RestorePanel } from './restore'
+-import { ReconcilePanel } from './reconcile'
++import { ReconcilePanel, OperationDrillThrough } from './reconcile'
+ import { ApprovalsPanel } from './approvals'
+-import { approvalInputsFixture } from './fixtures'
+ import { PromotionPanel } from './promotion'
+ 
+-export function VersionControlView({ state }: { state: VersionControlState }) {
+-  return <section aria-label="Version Control and Promotion" aria-live="polite" className="space-y-4">
++export function VersionControlView({ state, api, onCompare, onRefresh }: { state: VersionControlState; api?: VersionControlApi; onCompare?: () => void; onRefresh?: () => void }) {
++  return <section aria-label="Version Control and Promotion" className="space-y-4">
+     <h2>Version Control and Promotion</h2>
+-    {state.loading && <p role="status">Capturing external history…</p>}
+-    {state.stale && <p role="alert">Stale history — mutating actions disabled. {state.error}</p>}
++    {state.loading && <p role="status" aria-live="polite">Capturing external history…</p>}
++    {state.captureFailure?.kind === 'conflict' && <section aria-label="Preserved conflict">
++      <p role="alert" aria-live="polite">Preserved conflict — external state preserved; inspect and compare before reconciliation. {state.captureFailure.message}</p>
++      <button onClick={onCompare} disabled={!onCompare}>Compare preserved history</button>
++    </section>}
++    {state.captureFailure?.kind === 'unresolved' && <section aria-label="Quarantined or unresolved operation">
++      <p role="alert" aria-live="polite">Quarantined / unresolved — inspect operator evidence. No mutation replay. {state.captureFailure.message}</p>
++      {state.captureFailure.operationId && <OperationDrillThrough key={state.captureFailure.operationId} api={api} operationId={state.captureFailure.operationId} />}
++    </section>}
++    {state.stale && (!state.captureFailure || state.captureFailure.kind === 'unavailable') && <section aria-label="Stale unavailable evidence">
++      <p role="alert" aria-live="polite">Stale history — mutating actions disabled. {state.error}</p>
++      {state.captureFailure?.operationId && <OperationDrillThrough key={state.captureFailure.operationId} api={api} operationId={state.captureFailure.operationId} />}
++      <button onClick={onRefresh} disabled={!onRefresh || state.loading}>Refresh captured history</button>
++    </section>}
+     {state.busy && <p role="status">Capture busy — wait for verification. No mutation retry.</p>}
+     {!state.loading && !state.history.items.length && <p>No captured versions available.</p>}
+-    {state.status && <OverviewBadge status={state.status} />}
++    {state.status && <OverviewBadge api={api} status={state.status} />}
+     <ul>{state.history.items.map(version => <li key={version.version_id}>{version.version_id} · {version.origin}</li>)}</ul>
+     {canMutate(state, 'adopt') && <p>Reconciliation choices are available for the captured base.</p>}
+   </section>
+@@ -34,7 +45,8 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
+   const [approvalId, setApprovalId] = useState('')
+   const [approval, setApproval] = useState<ApprovalRecord | null>(null)
+   const base = state.history.items.find(version => version.version_id === state.status?.heads.observed)
+-  const inputs = { ...approvalInputsFixture, target_binding: bindingId, source_version_id: base?.version_id ?? '', expected_base_fingerprints: base?.fingerprints ?? approvalInputsFixture.expected_base_fingerprints }
++  const projection = state.status?.approval_inputs
++  const inputs = base && projection?.source_version_id === base.version_id ? { ...projection, source_fingerprints: base.fingerprints, expected_base_fingerprints: base.fingerprints } : null
+   const compare = async (left: string, right: string) => {
+     setComparing(true)
+     setError('')
+@@ -43,7 +55,7 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
+     finally { setComparing(false) }
+   }
+   return <div className="space-y-6">
+-    <VersionControlView state={state} />
++    <VersionControlView api={api} state={state} onRefresh={() => void state.refresh()} onCompare={state.history.items.length >= 2 ? () => void compare(state.history.items[0].version_id, state.history.items[1].version_id) : undefined} />
+     <button disabled={state.loading} onClick={() => void state.refresh('history')}>Refresh captured history</button>
+     <History page={state.history} loading={state.loading} onNext={() => void state.nextPage()} onSelect={setSelected} onCompare={(left, right) => void compare(left, right)} />
+     {selected && <p>Selected historical version: {selected.version_id}</p>}
+@@ -54,7 +66,7 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
+     {comparing && <p role="status">Loading comparison…</p>}
+     {error && <p role="alert">{error}</p>}
+     {diff && <SemanticDiffView diff={diff} />}
+-    {base && <ReconcilePanel api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
++    {base && inputs && <ReconcilePanel key={`${bindingId}-${base.version_id}-${state.status?.binding_revision}`} api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
+     <ApprovalsPanel api={api} approvalId={approvalId} inputs={inputs} disabled={!canMutate(state, 'adopt')} onApproval={setApprovalId} onRecord={setApproval} />
+     <PromotionPanel key={`${bindingId}-${selected?.version_id ?? ''}-${state.status?.binding_revision}`} api={api} bindingId={bindingId} sourceVersionId={selected?.version_id ?? ''} inputs={inputs} disabled={!canMutate(state, 'promote')} />
+   </div>
+diff --git a/frontend/src/hooks/use-version-control.test.ts b/frontend/src/hooks/use-version-control.test.ts
+index 3623525..1cc1bf3 100644
+--- a/frontend/src/hooks/use-version-control.test.ts
++++ b/frontend/src/hooks/use-version-control.test.ts
+@@ -1,5 +1,5 @@
+ import { expect, it, vi } from 'vitest'
+-import { createVersionControlStore } from './use-version-control'
++import { createVersionControlStore, canMutate } from './use-version-control'
+ import { VersionControlApi } from '@/lib/version-control-api'
+ import { bindingFixture, versionFixture } from '@/components/version-control/fixtures'
+ 
+@@ -22,3 +22,18 @@ it('late_response_for_previous_binding_cannot_replace_current_heads', async () =
+   await store.invalidate()
+   expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/current/observe'))).toHaveLength(2)
+ })
++
++import type { VersionControlState } from './use-version-control'
++const permissive: VersionControlState = { bindingId: 'demo-binding', captured: true, captureFailure: null, loading: false, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
++const blockers: [string, Partial<VersionControlState>][] = [
++  ['quarantined', { status: { ...bindingFixture, quarantined: true } }],
++  ['unresolved', { status: { ...bindingFixture, unresolved_operation_id: 'op-1' } }],
++  ['status stale', { status: { ...bindingFixture, stale: true } }],
++  ['state stale', { stale: true }], ['busy', { busy: true }], ['uncaptured', { captured: false }], ['loading', { loading: true }], ['no status', { status: null }],
++  ...(['unknown', 'unreachable', 'applied_unverified', 'conflicted'] as const).map(drift => [drift, { status: { ...bindingFixture, drift } }] as [string, Partial<VersionControlState>]),
++]
++it.each(blockers)('can_mutate_is_false_for_quarantined_unresolved_and_each_blocking_drift_state: %s', (_name, changes) => {
++  expect(canMutate(permissive, 'adopt')).toBe(true)
++  expect(canMutate({ ...permissive, ...changes }, 'adopt')).toBe(false)
++  expect(canMutate(permissive, 'not-allowed')).toBe(false)
++})
+diff --git a/frontend/src/hooks/use-version-control.ts b/frontend/src/hooks/use-version-control.ts
+index da3f4da..4ea34c0 100644
+--- a/frontend/src/hooks/use-version-control.ts
++++ b/frontend/src/hooks/use-version-control.ts
+@@ -6,11 +6,12 @@ import { demoApi } from '@/components/version-control/demo-api'
+ 
+ export interface VersionControlState {
+   bindingId: string; loading: boolean; captured: boolean; busy: boolean; stale: boolean
++  captureFailure: { kind: 'conflict' | 'unresolved' | 'unavailable'; message: string; operationId?: string } | null
+   status: BindingStatus | null; history: VersionPage; error: string
+ }
+-const initialState = (): VersionControlState => ({ bindingId: '', loading: false, captured: false, busy: false, stale: false, status: null, history: { items: [], next_cursor: null }, error: '' })
++const initialState = (): VersionControlState => ({ bindingId: '', loading: false, captured: false, busy: false, stale: false, captureFailure: null, status: null, history: { items: [], next_cursor: null }, error: '' })
+ export function canMutate(state: VersionControlState, action: string) {
+-  return Boolean(state.captured && !state.loading && !state.busy && !state.stale && state.status && !state.status.stale && !state.status.quarantined && !state.status.unresolved_operation_id && !['unknown', 'unreachable', 'applied_unverified', 'conflicted'].includes(state.status.drift) && state.status.allowed_actions.includes(action))
++  return Boolean(state.captured && !state.loading && !state.busy && !state.stale && !state.captureFailure && state.status && !state.status.stale && !state.status.quarantined && !state.status.unresolved_operation_id && !['unknown', 'unreachable', 'applied_unverified', 'conflicted'].includes(state.status.drift) && state.status.allowed_actions.includes(action))
+ }
+ export function createVersionControlStore(api: VersionControlApi) {
+   let state = initialState()
+@@ -26,13 +27,14 @@ export function createVersionControlStore(api: VersionControlApi) {
+     const signal = controller.signal
+     const updateCurrent = (changes: Partial<VersionControlState>) => { if (current === generation && !signal.aborted) update(changes) }
+     if (state.bindingId !== bindingId) state = initialState()
+-    updateCurrent({ bindingId, loading: true, captured: false, error: '' })
++    updateCurrent({ bindingId, loading: true, captured: false, captureFailure: null, error: '' })
+     try {
+       const observation = await api.observe(bindingId, reason, crypto.randomUUID())
+       updateCurrent({ status: observation.status, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale })
+     } catch (error) {
+-      const label = error instanceof VersionControlError ? error.status === 423 ? 'Quarantined / unresolved: ' : error.status === 409 ? 'Conflicted; preserved history: ' : error.status === 503 ? 'Evidence unreachable: ' : '' : ''
+-      updateCurrent({ captured: false, stale: true, error: label + (error instanceof Error ? error.message : 'Capture unavailable') })
++      const kind = error instanceof VersionControlError && error.status === 409 ? 'conflict' : error instanceof VersionControlError && error.status === 423 ? 'unresolved' : 'unavailable'
++      const message = error instanceof Error ? error.message : 'Capture unavailable'
++      updateCurrent({ captured: false, stale: true, error: message, captureFailure: { kind, message, operationId: error instanceof VersionControlError ? error.operation_id : undefined } })
+     }
+     if (current !== generation || signal.aborted) return
+     try { updateCurrent({ history: await api.versions(bindingId, undefined, signal) }) }
+diff --git a/frontend/src/lib/version-control-api.test.ts b/frontend/src/lib/version-control-api.test.ts
+index fcd6390..2e0d6d4 100644
+--- a/frontend/src/lib/version-control-api.test.ts
++++ b/frontend/src/lib/version-control-api.test.ts
+@@ -2,25 +2,6 @@ import { expect, it, vi } from 'vitest'
+ import { createMutationIntent, VersionControlApi } from './version-control-api'
+ import { fingerprints } from '@/components/version-control/fixtures'
+ 
+-it('loads_vc_contract_fixtures_without_type_or_nullability_drift', async () => {
+-  const fixture = {
+-    items: [{ binding_id: 'binding/1', binding_revision: 7,
+-      heads: { observed: 'external-3', approved: 'approved-2', deployed: null },
+-      drift: 'external_ahead', quarantined: false, unresolved_operation_id: null,
+-      observed_at: null, projection_as_of: '2026-09-07T00:00:00Z', stale: true,
+-      allowed_actions: [], reasons: ['Evidence unavailable'] }], next_cursor: null,
+-  }
+-  const transport = vi.fn(async () => new Response(JSON.stringify(fixture)))
+-  const api = new VersionControlApi(transport)
+-  expect(await api.overview()).toEqual(fixture)
+-  expect(transport.mock.calls[0]).toEqual(['/api/version-control/overview?limit=25', { signal: undefined }])
+-  await api.observe('binding/1', 'open', 'intent-1')
+-  expect(transport.mock.calls[1]).toEqual(['/api/version-control/bindings/binding%2F1/observe', {
+-    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'intent-1' },
+-    body: JSON.stringify({ reason: 'open' }),
+-  }])
+-})
+-
+ it('double_click_or_network_loss_does_not_generate_new_mutation_key', async () => {
+   const intent = createMutationIntent()
+   const body = { version_id: 'version-1', expected_base: fingerprints, binding_revision: 3, approval_id: 'approval-1' }
+@@ -41,3 +22,189 @@ it('double_click_or_network_loss_does_not_generate_new_mutation_key', async () =
+   await expect(api.restore('binding-1', changed, newKey)).rejects.toThrow('Network lost')
+   expect(transport).toHaveBeenCalledTimes(2)
+ })
++
++it('interleaved_intents_reuse_the_original_key_when_the_first_intent_returns', async () => {
++  const intent = createMutationIntent()
++  const a = { version_id: 'a', expected_base: fingerprints, binding_revision: 3, approval_id: 'approval-1' }
++  const b = { ...a, version_id: 'b' }
++  const k1 = intent.key(a); const k2 = intent.key(b)
++  expect(intent.key(a)).toBe(k1)
++  expect(k2).not.toBe(k1)
++  const transport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ operation_id: 'operation', status: 'requested', job_run_id: null })))
++  const api = new VersionControlApi(transport)
++  await api.restore('binding-1', a, k1)
++  await api.restore('binding-1', b, k2)
++  await api.restore('binding-1', a, intent.key(a))
++  expect(transport).toHaveBeenCalledTimes(2)
++  await api.restore('binding-1', a, 'mismanaged-new-key')
++  expect(transport).toHaveBeenCalledTimes(2)
++  await expect(api.restore('binding-1', b, 'mismanaged-new-key')).rejects.toThrow('different intent')
++})
++
++import type { ApprovalInputs, DeploymentReceipt, DriftState, OperationStatus, Origin, Comparison, DiffItem, PackageManifest } from '@/types/version-control'
++import { reconcileAction } from '@/components/version-control/reconcile'
++import { approvalInputsFixture } from '@/components/version-control/fixtures'
++import enums from '../../../backend/tests/fixtures/vc_contracts/enums.json'
++import binding_status from '../../../backend/tests/fixtures/vc_contracts/binding_status.json'
++import version_summary from '../../../backend/tests/fixtures/vc_contracts/version_summary.json'
++import operation_handle from '../../../backend/tests/fixtures/vc_contracts/operation_handle.json'
++import approval_inputs from '../../../backend/tests/fixtures/vc_contracts/approval_inputs.json'
++import deployment_receipt from '../../../backend/tests/fixtures/vc_contracts/deployment_receipt.json'
++import api_error from '../../../backend/tests/fixtures/vc_contracts/api_error.json'
++import diff_item from '../../../backend/tests/fixtures/vc_contracts/diff_item.json'
++import package_manifest from '../../../backend/tests/fixtures/vc_contracts/package_manifest.json'
++import observation_result from '../../../backend/tests/fixtures/vc_contracts/observation_result.json'
++
++function assertNever(value: never): never { throw new Error(`Unexpected enum: ${value}`) }
++function roundTripDriftState(value: DriftState) {
++  switch (value) {
++    case 'clean': return value
++    case 'external_ahead': return value
++    case 'desired_ahead': return value
++    case 'diverged': return value
++    case 'unknown': return value
++    case 'unreachable': return value
++    case 'applied_unverified': return value
++    case 'conflicted': return value
++    default: return assertNever(value)
++  }
++}
++const DriftStateValues: Record<DriftState, true> = { clean: true, external_ahead: true, desired_ahead: true, diverged: true, unknown: true, unreachable: true, applied_unverified: true, conflicted: true }
++function roundTripOperationStatus(value: OperationStatus) {
++  switch (value) {
++    case 'requested': return value
++    case 'preimage_captured': return value
++    case 'apply_attempted': return value
++    case 'applied_unverified': return value
++    case 'applied_partial': return value
++    case 'confirmed': return value
++    case 'conflicted': return value
++    case 'quarantined': return value
++    case 'failed': return value
++    case 'compensation_attempted': return value
++    case 'compensated': return value
++    case 'noop': return value
++    default: return assertNever(value)
++  }
++}
++const OperationStatusValues: Record<OperationStatus, true> = { requested: true, preimage_captured: true, apply_attempted: true, applied_unverified: true, applied_partial: true, confirmed: true, conflicted: true, quarantined: true, failed: true, compensation_attempted: true, compensated: true, noop: true }
++function roundTripOrigin(value: Origin) {
++  switch (value) {
++    case 'workbench': return value
++    case 'external': return value
++    case 'optimizer': return value
++    case 'restore': return value
++    case 'promotion': return value
++    case 'unknown': return value
++    default: return assertNever(value)
++  }
++}
++const OriginValues: Record<Origin, true> = { workbench: true, external: true, optimizer: true, restore: true, promotion: true, unknown: true }
++function roundTripComparison(value: Comparison) {
++  switch (value) {
++    case 'equal': return value
++    case 'different': return value
++    case 'unknown': return value
++    default: return assertNever(value)
++  }
++}
++const ComparisonValues: Record<Comparison, true> = { equal: true, different: true, unknown: true }
++function roundTripDiffCategory(value: DiffItem['category']) {
++  switch (value) {
++    case 'sources': return value
++    case 'columns': return value
++    case 'instructions': return value
++    case 'joins': return value
++    case 'filters': return value
++    case 'parameters': return value
++    case 'sql': return value
++    case 'benchmarks': return value
++    case 'questions': return value
++    case 'metadata': return value
++    case 'bindings': return value
++    default: return assertNever(value)
++  }
++}
++const DiffCategoryValues: Record<DiffItem['category'], true> = { sources: true, columns: true, instructions: true, joins: true, filters: true, parameters: true, sql: true, benchmarks: true, questions: true, metadata: true, bindings: true }
++function roundTripDiffChange(value: DiffItem['change']) {
++  switch (value) {
++    case 'added': return value
++    case 'removed': return value
++    case 'modified': return value
++    default: return assertNever(value)
++  }
++}
++const DiffChangeValues: Record<DiffItem['change'], true> = { added: true, removed: true, modified: true }
++
++it('every_drift_and_operation_enum_and_full_approval_receipt_payload_parses_from_m02_json_fixtures', async () => {
++  expect(Object.keys(DriftStateValues).map(value => roundTripDriftState(value as keyof typeof DriftStateValues))).toEqual(enums.DriftState)
++  expect(Object.keys(OperationStatusValues).map(value => roundTripOperationStatus(value as keyof typeof OperationStatusValues))).toEqual(enums.OperationStatus)
++  expect(Object.keys(OriginValues).map(value => roundTripOrigin(value as keyof typeof OriginValues))).toEqual(enums.Origin)
++  expect(Object.keys(ComparisonValues).map(value => roundTripComparison(value as keyof typeof ComparisonValues))).toEqual(enums.Comparison)
++  expect(Object.keys(DiffCategoryValues).map(value => roundTripDiffCategory(value as keyof typeof DiffCategoryValues))).toEqual(enums.DiffCategory)
++  expect(Object.keys(DiffChangeValues).map(value => roundTripDiffChange(value as keyof typeof DiffChangeValues))).toEqual(enums.DiffChange)
++  const apiFor = (payload: unknown, status = 200) => new VersionControlApi(vi.fn<typeof fetch>(async () => new Response(JSON.stringify(payload), { status })))
++  for (const example of binding_status.examples) {
++    const parsed = await apiFor(example).status(example.binding_id)
++    expect(parsed).toEqual(example)
++    expect(roundTripDriftState(parsed.drift)).toBe(example.drift)
++    expect(parsed.observed_at).toBeNull()
++  }
++  for (const example of version_summary.examples) {
++    const page = await apiFor({ items: [example], next_cursor: null }).versions(example.binding_id)
++    expect(page.items[0]).toEqual(example)
++    expect(roundTripOrigin(page.items[0].origin)).toBe(example.origin)
++    expect(await apiFor(example).version(example.binding_id, example.version_id)).toEqual(example)
++  }
++  for (const example of operation_handle.examples) {
++    const parsed = await apiFor(example).restore('binding', { version_id: 'version', binding_revision: 1, expected_base: fingerprints, approval_id: 'approval' }, example.status)
++    expect(parsed).toEqual(example)
++    expect(roundTripOperationStatus(parsed.status)).toBe(example.status)
++  }
++  const inputs: ApprovalInputs[] = approval_inputs.examples
++  const approvalFields = ["schema_version", "operation_id", "operation_type", "source_version_id", "raw_source_digest", "source_fingerprints", "artifact_digest", "mapping_digest", "rendered_target_digest", "transformer_version", "canonicalizer_version", "target_binding", "expected_base_fingerprints", "permission_policy_digest", "validation_policy_digest", "benchmark_policy_digest", "preflight_evidence_digest", "thresholds", "requester_id", "recovery_policy", "expires_at"]
++  for (const example of inputs) {
++    const parsed = (await apiFor({ approval_id: 'approval', inputs: example }).approval('approval')).inputs
++    expect(parsed).toEqual(example)
++    expect(Object.keys(parsed).sort()).toEqual([...approvalFields].sort())
++    expect(parsed.target_binding.binding_id).toBe(example.target_binding.binding_id)
++    expect(parsed.recovery_policy).toEqual({ automatic_clear: false, residual_risk_acknowledged: false })
++    for (const field of ['artifact_digest', 'mapping_digest', 'transformer_version', 'permission_policy_digest'] as const) {
++      expect(field in parsed).toBe(true)
++      expect(parsed[field]).toBe(example[field])
++    }
++  }
++  const receiptFields = ["schema_version", "release_id", "operation_id", "target_binding", "attempt_id", "generation", "coordination_backend", "approval_id", "approval_digest", "source_version_id", "package_digest", "mapping_digest", "intended_fingerprints", "rendered_fingerprints", "observed_fingerprints", "pre_version_id", "post_version_id", "transformer_version", "canonicalizer_version", "executor_id", "job_run_id", "validation_evidence_digest", "benchmark_evidence_digest", "status", "compensation_operation_id", "recorded_at"]
++  for (const example of deployment_receipt.examples) {
++    const typed: DeploymentReceipt = { ...example, status: roundTripOperationStatus(example.status as OperationStatus), coordination_backend: 'delta' }
++    const parsed = await apiFor(example).receipt(example.release_id)
++    expect(parsed).toEqual(typed)
++    expect(Object.keys(parsed).sort()).toEqual([...receiptFields].sort())
++    expect(parsed).toHaveProperty('post_version_id', example.post_version_id)
++  }
++  for (const example of api_error.examples) {
++    await expect(apiFor(example, 423).observe('binding', 'open', 'observe')).rejects.toMatchObject({ code: example.code, details: example.details })
++  }
++  for (const comparison of enums.Comparison) {
++    const parsed = await apiFor({ comparison, items: diff_item.examples }).diff('binding', 'left', 'right')
++    expect(roundTripComparison(parsed.comparison)).toBe(comparison)
++    expect(parsed.items).toEqual(diff_item.examples)
++    for (const item of parsed.items) { roundTripDiffCategory(item.category); roundTripDiffChange(item.change) }
++  }
++  for (const example of observation_result.examples) expect(await apiFor(example).observe('binding', 'open', 'capture')).toEqual(example)
++  const packages: PackageManifest[] = package_manifest.examples
++  expect(JSON.parse(JSON.stringify(packages))).toEqual(package_manifest.examples)
++  // Exercise the real authorization gate with a separately deserialized BindingRef object.
++  const input = { ...inputs[0], expires_at: new Date(Date.now() + 60000).toISOString() }
++  const transport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ operation_id: 'adopt', status: 'confirmed', job_run_id: null, checkpoints: [], audit: [], receipt_references: [] })))
++  const reviewed = { binding_revision: input.target_binding.binding_revision, expected_base: input.expected_base_fingerprints, approval_id: 'approval' }
++  const approval = { approval_id: 'approval', inputs: input, valid: true, approval_digest: 'digest', invalidation_reasons: [], votes: [], allowed_actions: [] }
++  await reconcileAction(new VersionControlApi(transport), input.target_binding.binding_id, 'adopt', reviewed, input, approval, 'adopt')
++  expect(transport.mock.calls[0][0]).toBe(`/api/version-control/bindings/${input.target_binding.binding_id}/reconcile`)
++  const staleTransport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ approval_id: 'new-approval', inputs: input })))
++  await reconcileAction(new VersionControlApi(staleTransport), input.target_binding.binding_id, 'adopt', { ...reviewed, binding_revision: reviewed.binding_revision + 1 }, input, approval, 'revision-changed')
++  expect(staleTransport).toHaveBeenCalledTimes(1)
++  expect(staleTransport.mock.calls[0][0]).toBe('/api/version-control/approvals')
++  expect(approvalInputsFixture.target_binding).toHaveProperty('binding_revision')
++  expect(fingerprints.canonicalizer_version).toBe('vc-c14n/1')
++})
+diff --git a/frontend/src/lib/version-control-api.ts b/frontend/src/lib/version-control-api.ts
+index dd6ebac..12f985c 100644
+--- a/frontend/src/lib/version-control-api.ts
++++ b/frontend/src/lib/version-control-api.ts
+@@ -1,7 +1,8 @@
+-import type { ApiError, ApprovalInputs, ApprovalRecord, ApprovalRequest, BindingStatus, DeploymentReceipt, ObservationResult, Operation, OperationHandle, OverviewPage, ReconcileCommand, ReleaseCommand, ReleaseHandle, RestoreCommand, SemanticDiff, VersionDetail, VersionPage } from '@/types/version-control'
++import type { ApiError, ApprovalRequestInputs, ApprovalRecord, ApprovalRequest, BindingStatus, DeploymentReceipt, ObservationResult, Operation, OperationHandle, OverviewPage, ReconcileCommand, ReleaseCommand, ReleaseHandle, RestoreCommand, SemanticDiff, VersionDetail, VersionPage } from '@/types/version-control'
+ 
+ export class VersionControlError extends Error implements ApiError {
+   code: string
++  details?: Record<string, unknown>
+   operation_id?: string
+   retryable: boolean
+   stale: boolean
+@@ -10,6 +11,7 @@ export class VersionControlError extends Error implements ApiError {
+     super(error.message)
+     this.status = status
+     this.code = error.code
++    this.details = error.details
+     this.operation_id = error.operation_id
+     this.retryable = error.retryable
+     this.stale = error.stale
+@@ -18,12 +20,11 @@ export class VersionControlError extends Error implements ApiError {
+ 
+ const bindingPath = (bindingId: string) => `/bindings/${encodeURIComponent(bindingId)}`
+ export function createMutationIntent() {
+-  let previous = ''
+-  let key = ''
++  const keys = new Map<string, string>()
+   return { key: (body: unknown) => {
+     const serialized = JSON.stringify(body)
+-    if (!key || serialized !== previous) { previous = serialized; key = crypto.randomUUID() }
+-    return key
++    if (!keys.has(serialized)) keys.set(serialized, crypto.randomUUID())
++    return keys.get(serialized)!
+   } }
+ }
+ const pageQuery = (cursor?: string, limit = 25) => {
+@@ -35,6 +36,7 @@ const pageQuery = (cursor?: string, limit = 25) => {
+ export class VersionControlApi {
+   private transport: typeof fetch
+   private commands = new Map<string, { intent: string; result: Promise<unknown> }>()
++  private intents = new Map<string, Promise<unknown>>()
+   constructor(transport: typeof fetch) { this.transport = transport }
+   private async request<Result>(path: string, init: RequestInit): Promise<Result> {
+     const response = await this.transport(`/api/version-control${path}`, init)
+@@ -43,15 +45,16 @@ export class VersionControlApi {
+     return payload as Result
+   }
+   private get<Result>(path: string, signal?: AbortSignal) { return this.request<Result>(path, { signal }) }
+-  private post<Result>(path: string, body: unknown, key: string) {
++  private post<Result>(path: string, body: unknown, key: string, dedupeIntent = true) {
+     const intent = JSON.stringify({ path, body })
+     const prior = this.commands.get(key)
+     if (prior) {
+       if (prior.intent !== intent) return Promise.reject(new VersionControlError(409, { code: 'IDEMPOTENCY_MISMATCH', message: 'Key belongs to a different intent; conflict preserved.', stale: true, retryable: false }))
+       return prior.result as Promise<Result>
+     }
+-    const result = this.request<Result>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) })
++    const result = (dedupeIntent ? this.intents.get(intent) as Promise<Result> | undefined : undefined) ?? this.request<Result>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) })
+     this.commands.set(key, { intent, result })
++    if (dedupeIntent) this.intents.set(intent, result)
+     return result
+   }
+   overview(cursor?: string, signal?: AbortSignal) { return this.get<OverviewPage>(`/overview?${pageQuery(cursor)}`, signal) }
+@@ -59,10 +62,35 @@ export class VersionControlApi {
+   versions(bindingId: string, cursor?: string, signal?: AbortSignal) { return this.get<VersionPage>(`${bindingPath(bindingId)}/versions?${pageQuery(cursor)}`, signal) }
+   version(bindingId: string, versionId: string) { return this.get<VersionDetail>(`${bindingPath(bindingId)}/versions/${encodeURIComponent(versionId)}`) }
+   diff(bindingId: string, left: string, right: string) { return this.get<SemanticDiff>(`${bindingPath(bindingId)}/diff?${new URLSearchParams({ left, right })}`) }
+-  observe(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return', key: string) { return this.post<ObservationResult>(`${bindingPath(bindingId)}/observe`, { reason }, key) }
++  observe(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return', key: string) { return this.post<ObservationResult>(`${bindingPath(bindingId)}/observe`, { reason }, key, false) }
+   restore(bindingId: string, body: RestoreCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/restore`, body, key) }
+   reconcile(bindingId: string, body: ReconcileCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/reconcile`, body, key) }
+-  requestApproval(body: ApprovalInputs, key: string) { return this.post<ApprovalRequest>('/approvals', body, key) }
++  requestApproval(inputs: ApprovalRequestInputs, key: string) {
++    // Whitelist the request contract: response-only identities never cross this boundary.
++    const body: ApprovalRequestInputs = {
++      schema_version: inputs.schema_version,
++      operation_type: inputs.operation_type,
++      source_version_id: inputs.source_version_id,
++      raw_source_digest: inputs.raw_source_digest,
++      source_fingerprints: inputs.source_fingerprints,
++      artifact_digest: inputs.artifact_digest,
++      mapping_digest: inputs.mapping_digest,
++      rendered_target_digest: inputs.rendered_target_digest,
++      transformer_version: inputs.transformer_version,
++      canonicalizer_version: inputs.canonicalizer_version,
++      target_binding: inputs.target_binding,
++      expected_base_fingerprints: inputs.expected_base_fingerprints,
++      permission_policy_digest: inputs.permission_policy_digest,
++      validation_policy_digest: inputs.validation_policy_digest,
++      benchmark_policy_digest: inputs.benchmark_policy_digest,
++      preflight_evidence_digest: inputs.preflight_evidence_digest,
++      thresholds: inputs.thresholds,
++      recovery_policy: inputs.recovery_policy,
++      expires_at: inputs.expires_at,
++    }
++    if (!body.preflight_evidence_digest || !body.raw_source_digest || !body.rendered_target_digest || !body.validation_policy_digest || !body.benchmark_policy_digest) return Promise.reject(new Error('Server approval evidence unavailable; request blocked.'))
++    return this.post<ApprovalRequest>('/approvals', body, key)
++  }
+   vote(approvalId: string, decision: 'approve' | 'reject', key: string) { return this.post<ApprovalRecord>(`/approvals/${encodeURIComponent(approvalId)}/votes`, { decision }, key) }
+   approval(approvalId: string) { return this.get<ApprovalRecord>(`/approvals/${encodeURIComponent(approvalId)}`) }
+   operation(operationId: string) { return this.get<Operation>(`/operations/${encodeURIComponent(operationId)}`) }
+diff --git a/frontend/src/types/version-control.ts b/frontend/src/types/version-control.ts
+index ce2fda9..ed1c2b9 100644
+--- a/frontend/src/types/version-control.ts
++++ b/frontend/src/types/version-control.ts
+@@ -1,13 +1,15 @@
++export type Comparison = 'equal' | 'different' | 'unknown'
+ export type DriftState = 'clean' | 'external_ahead' | 'desired_ahead' | 'diverged' | 'unknown' | 'unreachable' | 'applied_unverified' | 'conflicted'
+ export type OperationStatus = 'requested' | 'preimage_captured' | 'apply_attempted' | 'applied_unverified' | 'applied_partial' | 'confirmed' | 'conflicted' | 'quarantined' | 'failed' | 'compensation_attempted' | 'compensated' | 'noop'
+ export type Origin = 'workbench' | 'external' | 'optimizer' | 'restore' | 'promotion' | 'unknown'
++export interface BindingRef { binding_id: string; binding_revision: number; space_key: string; workspace_id: string; space_id: string | null; environment: string }
+ export interface Heads { observed: string | null; approved: string | null; deployed: string | null }
+ export interface Fingerprints { config: string; benchmark: string; metadata: string; canonicalizer_version: string }
+ export interface BindingStatus {
+   binding_id: string; binding_revision: number; heads: Heads; drift: DriftState
+   quarantined: boolean; unresolved_operation_id: string | null
+   observed_at: string | null; projection_as_of: string; stale: boolean
+-  allowed_actions: string[]; reasons: string[]
++  allowed_actions: string[]; reasons: string[]; approval_inputs?: ApprovalRequestInputs
+ }
+ export interface VersionSummary {
+   version_id: string; binding_id: string; observed_at: string; origin: Origin; observed_by: string
+@@ -19,25 +21,26 @@ export type VersionPage = Page<VersionSummary>
+ export type OverviewPage = Page<BindingStatus>
+ export interface VersionDetail extends VersionSummary { snapshot?: unknown }
+ export interface OperationHandle { operation_id: string; status: OperationStatus; job_run_id: string | null }
+-export interface Operation extends OperationHandle { checkpoints: string[]; audit: string[]; receipt_references: string[] }
++export interface Operation extends OperationHandle { checkpoints: string[]; audit: string[]; receipt_references: string[]; evidence_digest?: string; approval_inputs?: ApprovalRequestInputs }
+ export interface DiffItem {
+   category: 'sources' | 'columns' | 'instructions' | 'joins' | 'filters' | 'parameters' | 'sql' | 'benchmarks' | 'questions' | 'metadata' | 'bindings'
+   path: string; change: 'added' | 'removed' | 'modified'; before: unknown; after: unknown; review_required: boolean
+ }
+-export interface SemanticDiff { items: DiffItem[]; comparison: 'known' | 'unknown' }
++export interface SemanticDiff { items: DiffItem[]; comparison: Comparison }
+ export interface ObservationResult { status: BindingStatus; captured_version: VersionSummary | null; busy: boolean }
+-export interface ApiError { code: string; message: string; operation_id?: string; retryable: boolean; stale: boolean }
++export interface ApiError { code: string; message: string; operation_id?: string; retryable: boolean; stale: boolean; details?: Record<string, unknown> }
+ export interface ReviewedCommand { binding_revision: number; expected_base: Fingerprints; approval_id: string }
+ export interface RestoreCommand extends ReviewedCommand { version_id: string }
+ export interface ReconcileCommand extends ReviewedCommand { action: 'adopt' | 'reapply' | 'acknowledge'; policy_inputs: Record<string, unknown> }
+ export interface ApprovalInputs {
+-  schema_version: string; operation_id: string; operation_type: string; source_version_id: string
+-  raw_source_digest: string; source_fingerprints: Fingerprints; artifact_digest?: string; mapping_digest?: string
+-  rendered_target_digest: string; transformer_version?: string; canonicalizer_version: string
+-  target_binding: string; expected_base_fingerprints: Fingerprints; permission_policy_digest?: string
++  schema_version: string; operation_id?: string; operation_type: string; source_version_id: string
++  raw_source_digest: string; source_fingerprints: Fingerprints; artifact_digest: string | null; mapping_digest: string | null
++  rendered_target_digest: string; transformer_version: string | null; canonicalizer_version: string
++  target_binding: BindingRef; expected_base_fingerprints: Fingerprints; permission_policy_digest: string | null
+   validation_policy_digest: string; benchmark_policy_digest: string; preflight_evidence_digest: string
+-  thresholds: Record<string, number>; requester_id: string; recovery_policy: string; expires_at: string
++  thresholds: Record<string, number>; requester_id?: string; recovery_policy: { automatic_clear: boolean; residual_risk_acknowledged: boolean }; expires_at: string
+ }
++export type ApprovalRequestInputs = Omit<ApprovalInputs, 'requester_id' | 'operation_id'>
+ export interface ApprovalRequest { approval_id: string; inputs: ApprovalInputs }
+ export interface ApprovalRecord extends ApprovalRequest {
+   approval_digest: string | null; valid: boolean; invalidation_reasons: string[]; allowed_actions: string[]
+@@ -50,13 +53,13 @@ export interface PackageManifest {
+   ownership: Record<string, string>; file_digests: Record<string, string>; package_digest: string
+ }
+ export interface DeploymentReceipt {
+-  schema_version: string; release_id: string; operation_id: string; target_binding: string; attempt_id: string
++  schema_version: string; release_id: string; operation_id: string; target_binding: BindingRef; attempt_id: string
+   generation: number; coordination_backend: 'delta'; approval_id: string; approval_digest: string
+   source_version_id: string; package_digest: string; mapping_digest: string
+   intended_fingerprints: Fingerprints; rendered_fingerprints: Fingerprints; observed_fingerprints: Fingerprints
+-  pre_version_id: string; post_version_id?: string | null; transformer_version: string; canonicalizer_version: string
++  pre_version_id: string; post_version_id: string | null; transformer_version: string; canonicalizer_version: string
+   executor_id: string; job_run_id: string; validation_evidence_digest: string; benchmark_evidence_digest: string
+-  status: OperationStatus; compensation_operation_id?: string | null; recorded_at: string
++  status: OperationStatus; compensation_operation_id: string | null; recorded_at: string
+ }
+ export interface ReleaseCommand { source_binding: string; source_version_id: string; target_binding: string; mapping_digest: string; policy: string }
+ export interface ReleaseHandle extends OperationHandle { release_id: string }
+diff --git a/frontend/tsconfig.app.json b/frontend/tsconfig.app.json
+index dcf2ad7..11ce1b7 100644
+--- a/frontend/tsconfig.app.json
++++ b/frontend/tsconfig.app.json
+@@ -10,6 +10,7 @@
+ 
+     /* Bundler mode */
+     "moduleResolution": "bundler",
++    "resolveJsonModule": true,
+     "allowImportingTsExtensions": true,
+     "verbatimModuleSyntax": true,
+     "moduleDetection": "force",
+diff --git a/frontend/tsconfig.vc-tests.json b/frontend/tsconfig.vc-tests.json
+new file mode 100644
+index 0000000..0adc728
+--- /dev/null
++++ b/frontend/tsconfig.vc-tests.json
+@@ -0,0 +1,6 @@
++{
++  "extends": "./tsconfig.app.json",
++  "compilerOptions": { "noUnusedLocals": false, "noUnusedParameters": false, "resolveJsonModule": true },
++  "include": ["src/lib/version-control-api.test.ts"],
++  "exclude": []
++}

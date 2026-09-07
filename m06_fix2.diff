@@ -1,0 +1,50 @@
+diff --git a/backend/tests/test_vc_approvals.py b/backend/tests/test_vc_approvals.py
+index 199ee83..4260f47 100644
+--- a/backend/tests/test_vc_approvals.py
++++ b/backend/tests/test_vc_approvals.py
+@@ -237,6 +237,22 @@ def approve(context):
+     return approval
+ 
+ 
++def test_durable_consumption_fact_blocks_reuse_after_grant_is_published():
++    context = setup_approval()
++    approval = approve(context)
++    context.service.authorize(context.request, context.executor)
++    record = context.service.get(approval.approval_id)
++    context.facts.append(fact(
++        binding=context.request.binding, request=context.request.identity, requester_id='requester',
++        fact_kind=FactKind.APPROVAL_CONSUMED, status=FactStatus.CONSUMED,
++        approval_id=approval.approval_id, approval_digest=record.approval_digest,
++        attempt_id=uid(5), generation=1, evidence=record,
++    ))
++    assert context.facts.get_request(uid(2)).approval.status == FactStatus.APPROVED
++    with pytest.raises(PermissionError, match='consumed'):
++        context.service.authorize(context.request, context.executor)
++
++
+ @pytest.mark.parametrize('fault', ['revoked', 'source-only', 'wrong-workspace', 'wrong-run-as', 'human-executor', 'outage'])
+ def test_target_membership_rechecked_by_target_executor_at_execution(fault):
+     context = setup_approval()
+@@ -339,6 +355,7 @@ def test_historical_approval_reuse_and_different_request_digest_are_rejected(fau
+     approval = approve(context)
+     request = context.request
+     if fault == 'consumed':
++        context.service.authorize(context.request, context.executor)
+         record = context.service.get(approval.approval_id)
+         context.facts.append(fact(
+             binding=request.binding, request=request.identity, requester_id='requester',
+@@ -367,8 +384,12 @@ def test_historical_approval_reuse_and_different_request_digest_are_rejected(fau
+     else:
+         context.facts.append(fact(binding=request.binding, request=request.identity,
+                                  transition_sequence=10, status=FactStatus.CONFIRMED))
+-    with pytest.raises((PermissionError, ValueError, OSError)):
+-        context.service.authorize(request, context.executor)
++    if fault == 'consumed':
++        with pytest.raises(PermissionError, match='consumed'):
++            context.service.authorize(request, context.executor)
++    else:
++        with pytest.raises((PermissionError, ValueError, OSError)):
++            context.service.authorize(request, context.executor)
+ 
+ 
+ def test_approval_request_rejects_inputs_not_bound_to_durable_request():
