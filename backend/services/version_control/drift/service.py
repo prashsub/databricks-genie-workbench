@@ -160,16 +160,7 @@ class DriftService:
                 conflicts = ()
                 if entry.governed_by == "workbench":
                     status = replace(status, drift=vc.DriftState.UNKNOWN, allowed_actions=())
-                    if self.bundles is None:
-                        raise RuntimeError("Sanctioned bundle inventory unavailable")
-                    bundle_snapshot = self.bundles.for_binding(entry.binding)
-                    if not bundle_snapshot.complete:
-                        raise RuntimeError("Sanctioned bundle inventory incomplete")
-                    conflicts = tuple(resource for resource in bundle_snapshot.resources
-                                      if resource.workspace_id == workspace_id
-                                      and resource.space_id == entry.binding.space_id
-                                      and resource.manages_content
-                                      and resource.resource_path.startswith("resources.genie_spaces."))
+                    conflicts = self._bundle_conflicts(entry.binding)
                     status = self._bundle_status(entry.status, conflicts)
                 due = (conflicts or status.stale or full_fetch_at is None or full_fetch_at > self.clock()
                        or self.clock() - full_fetch_at >= self.full_fetch_interval
@@ -199,6 +190,24 @@ class DriftService:
                         pass
             results.append(status)
         return vc.ReconcileBatch(tuple(results), page.next_cursor)
+
+    def _bundle_conflicts(self, binding):
+        if self.bundles is None:
+            raise RuntimeError("Sanctioned bundle inventory unavailable")
+        snapshot = self.bundles.for_binding(binding)
+        if snapshot.complete is not True:
+            raise RuntimeError("Sanctioned bundle inventory incomplete")
+        return tuple(resource for resource in snapshot.resources
+                     if resource.workspace_id == binding.workspace_id
+                     and resource.space_id == binding.space_id
+                     and resource.manages_content
+                     and resource.resource_path.startswith("resources.genie_spaces."))
+
+    def _require_single_authority(self, binding):
+        conflicts = self._bundle_conflicts(binding)
+        if conflicts:
+            details = "; ".join(f"{resource.bundle} {resource.resource_path}" for resource in conflicts)
+            raise ReconcileError("dual_authority", f"Dual authority: {details}", http_status=409)
 
     def _bundle_status(self, status, conflicts):
         if not conflicts:
@@ -247,6 +256,7 @@ class DriftService:
         if self.ledger is None or self.policy is None or self.approvals is None:
             raise RuntimeError("Reconciliation policy/evidence unavailable")
         self._require_coordination(binding)
+        self._require_single_authority(binding)
         captured = self.prepare_choice(binding)
         base = self.ledger.get_version(binding, captured.status.heads.observed)
         if (base.context.binding != binding or base.version_id != captured.status.heads.observed

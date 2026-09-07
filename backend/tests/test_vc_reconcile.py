@@ -80,8 +80,12 @@ def ledger_fixture():
 
 
 def reconcile_setup(**options):
-    from backend.services.version_control.drift.ports import CoordinationReadiness, ReconcilePolicy
+    from backend.services.version_control.drift.ports import (
+        BundleInventory, BundleSnapshot, CoordinationReadiness, ReconcilePolicy,
+    )
 
+    bundles = Mock(spec=BundleInventory)
+    bundles.for_binding.return_value = BundleSnapshot((), True)
     ledger = ledger_fixture()
     policy = Mock(spec=ReconcilePolicy)
     def inputs(binding, request, source, base, actor):
@@ -96,7 +100,7 @@ def reconcile_setup(**options):
     approvals.request.side_effect = lambda inputs, actor: vc.ApprovalRequest(version_id(20), inputs, NOW)
     identity = Mock(spec=vc.IdentityProvider)
     identity.can_edit.return_value = True
-    dependencies = dict(ledger=ledger, policy=policy, approvals=approvals, identity=identity,
+    dependencies = dict(ledger=ledger, policy=policy, approvals=approvals, identity=identity, bundles=bundles,
                         reconcile_enabled=True, clock=lambda: NOW, readiness=Mock(spec=CoordinationReadiness))
     dependencies.update(options)
     service, observer = setup_service(**dependencies)
@@ -379,6 +383,7 @@ def test_reconcile_coordination_failure_disables_actions_but_keeps_available_his
     assert caught.value.error.stale is True
     assert caught.value.error.retryable is False
     assert caught.value.error.operation_id == version_id(10)
+    service.bundles.for_binding.assert_not_called()
     observer.capture.assert_not_called()
     approvals.request.assert_not_called()
     projected, projections, unused_observer, registry, authorize = projection_setup()
@@ -536,3 +541,70 @@ def test_scan_without_ledger_cannot_publish_observer_clean_badge(last_full_fetch
     assert unverified.drift == vc.DriftState.UNKNOWN
     assert unverified.allowed_actions == ()
     assert "ledger" in " ".join(unverified.reasons).lower()
+
+
+@pytest.mark.parametrize("action", ["adopt", "reapply"])
+def test_reconcile_is_blocked_while_a_bundle_holds_dual_authority(action):
+    from backend.services.version_control.drift.errors import ReconcileError
+    from backend.services.version_control.drift.ports import BundleInventory, BundleResource, BundleSnapshot
+
+    binding = binding_fixture()
+    bundles = Mock(spec=BundleInventory)
+    bundles.for_binding.return_value = BundleSnapshot((BundleResource(
+        binding.workspace_id, binding.space_id, "sanctioned/deploy",
+        "resources.genie_spaces.sales", True, "bundle-owner"),), True)
+    dispatcher = Mock(spec=vc.JobDispatcher)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(
+        bundles=bundles, dispatcher=dispatcher, dispatch_enabled=True)
+    with pytest.raises(ReconcileError) as caught:
+        service.reconcile(binding, reconcile_request(action), actor_fixture())
+    assert caught.value.http_status == 409
+    assert "Dual authority" in str(caught.value)
+    assert "sanctioned/deploy" in str(caught.value)
+    bundles.for_binding.assert_called_once_with(binding)
+    service.readiness.assert_available.assert_called_once_with(binding)
+    observer.capture.assert_not_called()
+    policy.inputs.assert_not_called()
+    approvals.request.assert_not_called()
+    dispatcher.submit_local.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["adopt", "reapply"])
+@pytest.mark.parametrize("failure", ["absent", "incomplete", "unavailable"])
+def test_reconcile_requires_complete_bundle_inventory(action, failure):
+    from backend.services.version_control.drift.errors import ReconcileError
+    from backend.services.version_control.drift.ports import BundleInventory, BundleSnapshot
+
+    bundles = Mock(spec=BundleInventory)
+    bundles.for_binding.return_value = BundleSnapshot((), failure != "incomplete")
+    if failure == "unavailable":
+        bundles.for_binding.side_effect = RuntimeError("Bundle inventory unavailable")
+    dispatcher = Mock(spec=vc.JobDispatcher)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(
+        bundles=None if failure == "absent" else bundles,
+        dispatcher=dispatcher, dispatch_enabled=True)
+    with pytest.raises(ReconcileError) as caught:
+        service.reconcile(binding_fixture(), reconcile_request(action), actor_fixture())
+    assert caught.value.http_status == 503
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    observer.capture.assert_not_called()
+    approvals.request.assert_not_called()
+    dispatcher.submit_local.assert_not_called()
+
+
+@pytest.mark.parametrize("change", [
+    {"workspace_id": "other"}, {"space_id": "other"}, {"manages_content": False},
+    {"resource_path": "resources.jobs.sales"},
+])
+def test_reconcile_bundle_join_ignores_unrelated_authority(change):
+    from backend.services.version_control.drift.ports import BundleInventory, BundleResource, BundleSnapshot
+
+    binding = binding_fixture()
+    resource = BundleResource(binding.workspace_id, binding.space_id, "sanctioned/deploy",
+                              "resources.genie_spaces.sales", True, None)
+    bundles = Mock(spec=BundleInventory)
+    bundles.for_binding.return_value = BundleSnapshot((replace(resource, **change),), True)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(bundles=bundles)
+    assert service.reconcile(binding, reconcile_request(), actor_fixture()).status == vc.OperationStatus.REQUESTED
+    bundles.for_binding.assert_called_once_with(binding)
+    approvals.request.assert_called_once()
