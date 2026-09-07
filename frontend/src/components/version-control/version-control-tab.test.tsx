@@ -28,7 +28,7 @@ it('open_waits_for_capture_before_showing_reconcile_choices', async () => {
   expect(canMutate(store.getSnapshot(), 'adopt')).toBe(false)
   completeCapture(new Response(JSON.stringify({ status: bindingFixture, captured_version: versionFixture, busy: false })))
   await returning
-  expect(JSON.parse(String(transport.mock.calls.filter(([url]) => String(url).endsWith('/observe')).length))).toBe(2)
+  expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/observe'))).toHaveLength(2)
 })
 
 it('version_control_actions_are_keyboard_accessible_and_errors_announced', () => {
