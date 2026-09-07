@@ -343,7 +343,12 @@ def test_reconcile_scan_paginates_isolates_failures_and_periodically_full_fetche
 
 def test_scan_default_off_bounds_scope_and_job_executor():
     from backend.jobs.vc_reconcile import run_scan
+    from backend.services.version_control.drift import DriftService
 
+    defaults = DriftService(canonicalizer=FakeCanonicalizer())
+    assert defaults.reconcile_enabled is False
+    assert defaults.dispatch_enabled is False
+    assert defaults.scan_enabled is False
     service, observer, inventory, projections = scan_setup([], scan_enabled=False)
     with pytest.raises(PermissionError):
         service.scan("123", None)
