@@ -50,3 +50,21 @@ def test_retired_revert_helper_cannot_patch_or_compensate():
                                    run_id="run", target_config={}, target_description="new",
                                    live_config={}, live_description="old")
     assert client.mock_calls == []
+
+
+def test_historical_revert_dispatches_governed_restore_job():
+    from genie_space_optimizer.integration.version_control import RestoreSelection
+
+    selection = RestoreSelection("run", "historical-version", "binding", "base", "approval")
+    jobs = Mock()
+    jobs.submit.return_value = SimpleNamespace(operation_id="restore-operation", job_run_id="job/restore")
+    client = Mock()
+    result = revert.revert_optimization("run", client, client, Mock(), selection=selection,
+                                        restore_jobs=jobs, requester="human", writes_enabled=True)
+    assert result is jobs.submit.return_value
+    jobs.submit.assert_called_once_with(selection, "human")
+    assert client.mock_calls == []
+    with pytest.raises(PermissionError):
+        revert.revert_optimization("run", client, client, Mock(), selection=selection,
+                                   restore_jobs=jobs, requester="human")
+    jobs.submit.assert_called_once()

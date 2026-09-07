@@ -80,6 +80,21 @@ class RecoveryHandle:
     job_kind: str = "recovery"
 
 
+@dataclass(frozen=True)
+class RestoreSelection:
+    run_id: str
+    historical_version_id: str
+    binding: Any
+    expected_base: str
+    approval_id: str
+
+
+class RestoreJobs(Protocol):
+    def submit(self, selection: RestoreSelection, requester: Any) -> Any:
+        """Resolve immutable approved restore inputs and submit through M04."""
+        ...
+
+
 class ChampionRun:
     def __init__(self, run_id: str, adapter: ChampionAdapter):
         self.run_id = run_id

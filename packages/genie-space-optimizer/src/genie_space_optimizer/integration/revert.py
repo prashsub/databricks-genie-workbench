@@ -40,6 +40,7 @@ from genie_space_optimizer.common.warehouse import (
 
 from .config import IntegrationConfig
 from .types import ActionResult
+from .version_control import RestoreJobs, RestoreSelection
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +61,20 @@ def revert_optimization(
     *,
     target: RevertTarget = "champion",
     benchmark_target: BenchmarkRevertTarget = "current",
-) -> ActionResult:
+    selection: RestoreSelection | None = None,
+    restore_jobs: RestoreJobs | None = None,
+    requester: object = None,
+    writes_enabled: bool = False,
+) -> object:
     """Retired managed-state mutation; callers must submit a governed restore Job."""
-    raise PermissionError("Use the governed restore Job; in-process revert is retired")
+    if writes_enabled is not True or restore_jobs is None or selection is None or requester is None:
+        raise PermissionError("Use the governed restore Job; in-process revert is retired")
+    if (selection.run_id != run_id or not selection.historical_version_id
+            or not selection.expected_base or not selection.approval_id):
+        raise PermissionError("Restore requires selected immutable version/base/approval")
+    if target not in {"champion", "baseline"} or benchmark_target != "current":
+        raise PermissionError("Mixed historical state requires a separately approved restore request")
+    return restore_jobs.submit(selection, requester)
 
 
 def _assert_no_active_space_runs(
