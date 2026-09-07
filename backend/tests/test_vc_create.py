@@ -84,3 +84,32 @@ def test_create_missing_physical_id_never_uses_display_name(create_rig):
     result = rig.gate.create(request, rig.executor)
     assert result.unresolved
     registry.bind_created.assert_not_called()
+
+
+def test_create_uncommitted_intent_never_reaches_post(create_rig):
+    rig, request, registry = create_rig
+    rig.facts.lookup_request.side_effect = lambda *args: vc.RequestHistory((), False)
+    with pytest.raises(RuntimeError, match="intent was not durably committed"):
+        rig.gate.create(request, rig.executor)
+    rig.transport.create_once.assert_not_called()
+    rig.coordination.reserve.assert_not_called()
+    registry.bind_created.assert_not_called()
+
+
+@pytest.mark.parametrize("mismatch", ["bind_result", "read_back"])
+def test_create_mismatched_physical_binding_is_unverified_without_followon(create_rig, mismatch):
+    rig, request, registry = create_rig
+    rig.transport.create_once.return_value = vc.CreateResponse("new-space", {"space_id": "new-space"})
+    physical = replace(request.binding, space_id="new-space")
+    other = replace(physical, space_id="other-space")
+    registry.bind_created.return_value = other if mismatch == "bind_result" else physical
+    registry.resolve.side_effect = [request.binding, other]
+    rig.state.update({"serialized_space": {"instructions": "new"}, "description": "new"})
+    result = rig.gate.create(request, rig.executor)
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    assert result.unresolved
+    rig.transport.create_once.assert_called_once()
+    rig.transport.get.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+    rig.coordination.finish.assert_not_called()
