@@ -54,6 +54,10 @@ _FRAGMENT_ARRAY_KEYS = frozenset({"content", "sql"})
 _BOUNDARY_SINGLE_QUOTE_RE = re.compile(r"(?<![A-Za-z0-9])'|'(?![A-Za-z0-9])")
 
 
+class Canonicalizer:
+    """VC/1.0 adapter extending the legacy fingerprint entry point."""
+
+
 def unwrap_serialized_space(config: Any) -> dict | None:
     """Reduce any stored/live config shape to the parsed serialized_space object.
 

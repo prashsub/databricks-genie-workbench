@@ -27,6 +27,20 @@ def _space(*, instruction: str = "Be helpful", with_version: bool = True) -> dic
     return space
 
 
+def test_existing_fingerprint_api_remains_compatible() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    assert callable(Canonicalizer)
+    assert unwrap_serialized_space(_space()) == _space()
+    assert canonicalize(_space()) == canonicalize(canonicalize(_space()))
+    assert config_fingerprint(_space()) == (
+        "cf766aabfb0dece9cb89c197a4ccf7e03e46cd0d503708fd05abfd5fee282eb5"
+    )
+    assert benchmark_fingerprint(_space()) == (
+        "5c9253d29ca1fc9c4f7683bfe5dadd87e2dbce3e46af6ee80404bc7259b41e1e"
+    )
+
+
 # ── unwrap_serialized_space ──────────────────────────────────────────────
 
 
