@@ -20,6 +20,17 @@ No live profile was selected and no platform mutations were attempted.
 | t13 | Missing read-only inventory evidence assertion | Nested governed content emits digest/path/time detection evidence with no inferred actor. Missing includes report unknown. Shell and notebook deploy preflights refuse before platform calls. Executable guard tested for allowed/denied content without file mutation. |
 | t14 | Missing artifact-grant verifier assertion | Four distinct Volume securables/writers, nonowner runtime identities and target-only operations writers required. Live positive/negative Volume writes, package/receipt reads and source-denied operations probes integration-marked, NOT EXECUTED. |
 | t15 | Missing composition safety gate assertion | First enable requires every storage/identity/evidence/authorization/recovery/live-permission/concurrency/failure-matrix capability, required ports and all writer routes. No success caching; outages leave history readable and writes denied. All App switches explicitly false; root composition still has no integrations. |
+| t16 | Missing repeatability runner and topology verifier assertions | Offline command-order/selection/content-change and unsupported-topology gates pass. Real root+package strict validation, root deployment/provisioning twice, unchanged full Genie content and stable resource identities tests marked integration; source/target transport probe also marked integration. NOT EXECUTED: deployment blockers. |
+
+The five integration tests can be collected/run with the same three-file command
+plus `-m integration`. The fixture verifies each explicit profile's live host,
+SCIM identity and X-Databricks-Org-Id before probes, without ambient credential
+fallback. For t16, config additionally supplies `bundle` (vc-sandbox selection,
+package target/variables, owner operation UUID and DAB variables), a nonempty
+`governed_spaces` inventory, and reviewed `topology` evidence. Cross-metastore
+transport is disabled unless Databricks-to-Databricks sharing and the actual
+Volume or reviewed read-only representation have been verified. Never supply
+source-held target write credentials to make a probe pass.
 
 The `vc-sandbox` target is opt-in and requires explicit executor, enrollment and
 provisioner principals. Its installed `vc-platform` entrypoint refuses by default:

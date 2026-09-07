@@ -220,3 +220,70 @@ def test_package_approval_receipt_securables_have_separate_writers(live_platform
     for action in ("insert", "update", "delete", "alter"):
         live_platform.assert_sql_denied("source", f"genie_space_operations.{action}")
     live_platform.assert_sql_denied("source", "genie_space_operations.read")
+
+
+def test_repeatable_provision_requires_explicit_nonproduction_selection():
+    run = getattr(platform, "repeatable_sandbox_provision", None)
+    assert callable(run), "Real provisioning must require explicit sandbox selection"
+    selection = dict(profile="sandbox-owner", target="vc-sandbox", package_target="dev",
+                     disposable_nonproduction=True,
+                     operation_id="00000000-0000-4000-8000-000000000016", variables={"catalog": "disposable"})
+    runner = Mock()
+    runner.verify_selection.return_value = True
+    runner.content_fingerprint.return_value = "unchanged"
+    runner.provisioning_fingerprint.return_value = "stable"
+    run(ROOT, selection, runner)
+    commands = [call.args[0] for call in runner.command.call_args_list]
+    assert sum("validate" in command for command in commands) == 4
+    assert sum("deploy" in command for command in commands) == 2
+    assert sum("run" in command for command in commands) == 2
+    assert all("--profile" in command and "sandbox-owner" in command for command in commands)
+    assert all("--strict" in command for command in commands if "validate" in command)
+    assert not any("--no-wait" in command for command in commands)
+    for key, value in (("profile", ""), ("profile", "DEFAULT"), ("target", "prod"),
+                       ("disposable_nonproduction", False)):
+        runner.reset_mock()
+        with pytest.raises(ValueError):
+            run(ROOT, dict(selection, **{key: value}), runner)
+        runner.command.assert_not_called()
+    runner.content_fingerprint.side_effect = ["before", "changed"]
+    with pytest.raises(PermissionError, match="content"):
+        run(ROOT, selection, runner)
+
+
+@pytest.mark.integration
+def test_dab_validate_and_sandbox_provision_are_repeatable(live_platform):
+    platform.repeatable_sandbox_provision(ROOT, live_platform.config["bundle"], live_platform)
+
+
+def test_unverified_cross_metastore_artifact_transport_disables_topology():
+    verify = getattr(platform, "topology_read_ready", None)
+    assert callable(verify), "Unsupported Delta Sharing topology must remain disabled"
+    proof = dict(source_workspace="source", target_workspace="target", source_metastore="shared",
+                 target_metastore="shared", packages_readable=True, receipts_readable=True,
+                 source_target_write_denied=True, remote_write_credentials=False,
+                 shared_uc_grants_verified=True)
+    assert verify(proof) is True
+    proof["target_metastore"] = "other"
+    assert verify(proof) is False
+    proof.update(delta_sharing_verified=True, volume_sharing_verified=True, artifact_representation="volumes")
+    assert verify(proof) is True
+    proof["volume_sharing_verified"] = False
+    assert verify(proof) is False
+    proof.update(artifact_representation="reviewed_readonly", representation_reviewed=True)
+    assert verify(proof) is True
+    proof["remote_write_credentials"] = True
+    assert verify(proof) is False
+
+
+@pytest.mark.integration
+def test_source_target_artifact_topology_is_verified_without_remote_write_credentials(live_platform):
+    source = live_platform.api("source", "get", "/api/2.1/unity-catalog/metastore_summary")
+    target = live_platform.api("executor", "get", "/api/2.1/unity-catalog/metastore_summary")
+    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
+    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
+    live_platform.assert_sql_denied("source", "vc_target_receipts.write")
+    live_platform.assert_sql_denied("source", "genie_space_operations.insert")
+    assert source["metastore_id"] == live_platform.config["topology"]["source_metastore"]
+    assert target["metastore_id"] == live_platform.config["topology"]["target_metastore"]
+    assert platform.topology_read_ready(live_platform.config["topology"])

@@ -1,9 +1,9 @@
 """Fail-closed VC/1.0 platform adapters; no ambient credentials."""
 
 from .bundles import bundle_detection_evidence, deployment_inventory, guard_bundle, preflight_deployment
-from .provisioning import provision
+from .provisioning import provision, repeatable_sandbox_provision
 from .permissions import verify_artifact_permissions, verify_coordination_permissions, verify_fact_permissions
-from .capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS, capabilities_ready, storage_write_ready
+from .capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS, capabilities_ready, storage_write_ready, topology_read_ready
 from .identity import PlatformIdentityProvider, TrustedSnapshotReader, verify_configured_job_run_as, verify_job_run_as
 from .jobs import GovernedJobRuntime, LocalJobDispatcher
 from .termination import PlatformTerminationEvidenceProvider
