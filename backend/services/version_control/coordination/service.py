@@ -34,7 +34,8 @@ class CoordinationService:
                  validate_authorization, verify_create_intent,
                  termination: c.TerminationEvidenceProvider,
                  authorize_human_recovery, authorize_heads,
-                 verified_request_lifetime: tuple[float, str] | None = None):
+                 verified_request_lifetime: tuple[float, str] | None = None,
+                 validate_stage_evidence=None):
         self.store = store
         self.facts = facts
         self.ledger = ledger
@@ -47,6 +48,7 @@ class CoordinationService:
         self.termination = termination
         self.authorize_human_recovery = authorize_human_recovery
         self.authorize_heads = authorize_heads
+        self.validate_stage_evidence = validate_stage_evidence
         # Deployment-owned verified capability, NEVER copied from RecoveryEvidence.
         self.verified_request_lifetime = verified_request_lifetime
 
@@ -285,6 +287,11 @@ class CoordinationService:
     def finish(self, claim: c.AdmissionClaim, result: c.OperationResult) -> None:
         self.assert_owner(claim)
         row = self._owned(claim)
+        if (row.mutation_stage in {c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
+                or result.unresolved or result.status in {
+                    c.OperationStatus.APPLIED_UNVERIFIED, c.OperationStatus.APPLIED_PARTIAL}):
+            self._quarantine_row(row, 'Possible send remains unresolved; GET cannot prove termination')
+            raise CoordinationError('In-flight or ambiguous result cannot release the attempt')
         if (result.operation_id != row.active_operation_id or result.preimage != claim.preimage
                 or result.unresolved or result.status not in {
                     c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP,
@@ -398,3 +405,32 @@ class CoordinationService:
                 or any(a.observed_at >= b.observed_at for a, b in zip(samples, samples[1:]))
                 or (not human and (samples[-1].observed_at - samples[0].observed_at).total_seconds() <= capability[0])):
             raise CoordinationError('Need three stable post-termination GETs spanning beyond verified lifetime')
+
+    def checkpoint(self, claim: c.AdmissionClaim, stage: c.PatchStage,
+                   evidence: c.StageEvidence) -> None:
+        self.assert_owner(claim)
+        row = self._owned(claim)
+        stages = list(c.PatchStage)
+        if (evidence.stage != stage or evidence.recorded_at > self.clock.now()
+                or evidence.recorded_at < row.admitted_at
+                or stages.index(stage) != stages.index(row.mutation_stage) + 1):
+            raise CoordinationError('Checkpoint stage must advance exactly once, never replay or skip')
+        observed = stage in {c.PatchStage.CONFIG_OBSERVED, c.PatchStage.DESCRIPTION_OBSERVED}
+        if observed:
+            if (evidence.observation is None
+                    or (evidence.observation.binding_id, evidence.observation.binding_revision) !=
+                        (row.binding.binding_id, row.binding.binding_revision)
+                    or not self._io(self.ledger.verify_committed, evidence.observation)
+                    or self.validate_stage_evidence is None
+                    or not self._io(self.validate_stage_evidence, claim, row, evidence)):
+                self._quarantine_row(row, 'GET does not prove synchronous send completion')
+                raise CoordinationError('Trusted send completion and committed observation required')
+        self._publish_consumption(claim)
+        checkpoint = dict(row.checkpoint or {})
+        checkpoint.update(evidence=c.to_wire(evidence),
+            resume_classification=('read-only-possible-send' if stage in {
+                c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
+                else 'read-only-unless-next-stage-proven-unsent'))
+        self._cas(row, lambda r: r.mutation_stage == row.mutation_stage,
+                  mutation_stage=stage, checkpoint=checkpoint,
+                  approval_consumption_published=True)

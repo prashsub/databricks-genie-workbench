@@ -39,7 +39,8 @@ def h():
                  insert_enrolled=store.seed, validate_authorization=Mock(return_value=True),
                  verify_create_intent=Mock(return_value=True), termination=termination,
                  authorize_human_recovery=Mock(return_value=False),
-                 authorize_heads=Mock(return_value=False))
+                 authorize_heads=Mock(return_value=False),
+                 validate_stage_evidence=Mock(return_value=True))
     service = CoordinationService(**ports)
     proof = c.EnrollmentProof(uid(), binding.binding_id, 1, 'serialized-enrollment')
     request = c.RequestIdentity(uid(), 'key-1', '1' * 64)
@@ -310,3 +311,88 @@ def test_consumed_approval_survives_row_reuse_and_crash(h, crash):
         with pytest.raises(CoordinationError, match='approval'):
             admit(h)
         assert h.facts.approval_use(h.binding, h.grant.approval_id).operation_ids == (claim.request.operation_id,)
+
+
+@pytest.mark.parametrize('point', ['evidence', 'admission', 'consumption', 'intent', 'receipt', 'release'])
+@pytest.mark.parametrize('boundary', ['before-commit', 'after-commit-before-response', 'during-follow-up-read'])
+def test_crashes_between_evidence_cas_consumption_patch_and_release_remain_safe(h, point, boundary):
+    from backend.tests.vc_fakes.stores import CrashBoundary
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    if point == 'evidence':
+        h.ledger.verify_committed.side_effect = OSError('Delta evidence unavailable')
+        action = lambda: h.service.admit(reservation, h.preimage, h.grant)
+    elif point in {'admission', 'consumption'}:
+        failures = h.store.failures if point == 'admission' else h.durable.failures
+        failures.inject(CrashBoundary(boundary))
+        action = lambda: h.service.admit(reservation, h.preimage, h.grant)
+    else:
+        claim = h.service.admit(reservation, h.preimage, h.grant)
+        if point == 'intent':
+            h.store.failures.inject(CrashBoundary(boundary))
+            action = lambda: h.service.checkpoint(claim, c.PatchStage.CONFIG_IN_FLIGHT,
+                c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None))
+        else:
+            if point == 'receipt':
+                if boundary == 'during-follow-up-read':
+                    h.facts.lookup_request.side_effect = OSError('receipt read-back unavailable')
+                else:
+                    # Consumption already durable; inject only the next append (receipt).
+                    h.durable.failures.inject(CrashBoundary(boundary))
+            else:
+                h.store.failures.inject(CrashBoundary(boundary))
+            action = lambda: complete(h, claim)
+    with pytest.raises(CoordinationError):
+        action()
+    row = h.store.read(h.binding.binding_id)
+    if row.unresolved:
+        assert row.attempt_id == reservation.fence.attempt_id
+        with pytest.raises(CoordinationError):
+            reserve(h)
+    else:
+        assert point == 'release'
+        assert any(r.payload['fact_kind'] == 'receipt' for r in h.durable.state.rows)
+
+
+def test_checkpoint_is_monotonic_and_matching_get_cannot_finish_in_flight(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
+    h.service.checkpoint(claim, send.stage, send)
+    row = h.store.read(h.binding.binding_id)
+    assert row.checkpoint['resume_classification'] == 'read-only-possible-send'
+    with pytest.raises(CoordinationError):
+        h.service.checkpoint(claim, send.stage, send)
+    with pytest.raises(CoordinationError):
+        complete(h, claim)
+    assert h.store.read(h.binding.binding_id).state == c.CoordinationState.QUARANTINED
+
+
+def test_checkpoint_observation_requires_trusted_send_completion(h):
+    enroll(h)
+    claim = admit(h)
+    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
+    h.service.checkpoint(claim, send.stage, send)
+    observed = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED, h.clock.now(), 'b' * 64, h.preimage)
+    h.validate_stage_evidence.return_value = False  # GET equality alone
+    with pytest.raises(CoordinationError):
+        h.service.checkpoint(claim, observed.stage, observed)
+    with pytest.raises(CoordinationError):
+        h.service.checkpoint(claim, c.PatchStage.DESCRIPTION_PENDING,
+            replace(observed, stage=c.PatchStage.DESCRIPTION_PENDING))
+
+
+def test_checkpoint_normal_sequence_and_flush_failure_retains_claim(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    for stage in list(c.PatchStage)[1:]:
+        observation = h.preimage if stage in {c.PatchStage.CONFIG_OBSERVED, c.PatchStage.DESCRIPTION_OBSERVED} else None
+        h.service.checkpoint(claim, stage,
+            c.StageEvidence('VC/1.0', stage, h.clock.now(), 'a' * 64, observation))
+    h.facts.verify_flush.side_effect = lambda _: False
+    with pytest.raises(CoordinationError):
+        complete(h, claim)
+    assert h.store.read(h.binding.binding_id).unresolved
