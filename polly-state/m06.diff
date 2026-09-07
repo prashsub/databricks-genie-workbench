@@ -1,0 +1,1793 @@
+diff --git a/backend/routers/vc_approvals.py b/backend/routers/vc_approvals.py
+new file mode 100644
+index 0000000..5535be2
+--- /dev/null
++++ b/backend/routers/vc_approvals.py
+@@ -0,0 +1,84 @@
++"""M08 supplies authenticated request context and explicitly mounts this router."""
++
++from typing import Literal
++
++from fastapi import APIRouter, HTTPException, Request
++from pydantic import BaseModel, ConfigDict
++
++from backend.services.version_control.contracts import (
++    ApprovalInputs, BreakGlassRequest, OperationHandle, OperationStatus, from_wire, to_wire,
++)
++
++
++class VoteBody(BaseModel):
++    model_config = ConfigDict(extra='forbid')
++    decision: Literal['approve', 'reject']
++
++
++def authenticated_actor(request, identity):
++    authentication = getattr(request.state, 'vc_auth', None)
++    if authentication is None:
++        raise HTTPException(401, detail={'code': 'authentication_required', 'message': 'Authentication required',
++                                         'retryable': False, 'stale': False})
++    return identity.actor(authentication)
++
++
++def parse_inputs(value_type, payload):
++    try:
++        return from_wire(value_type, payload)
++    except (ValueError, TypeError) as error:
++        raise HTTPException(422, detail={'code': 'invalid_inputs', 'message': str(error),
++                                         'retryable': False, 'stale': False}) from error
++
++
++def invoke(call):
++    try:
++        return to_wire(call())
++    except HTTPException:
++        raise
++    except (PermissionError, LookupError, ValueError, TypeError) as error:
++        status = 403 if isinstance(error, PermissionError) else 404 if isinstance(error, LookupError) else 409
++        raise HTTPException(status, detail={'code': 'governance_rejected', 'message': str(error),
++                                            'retryable': False, 'stale': False}) from error
++    except Exception as error:
++        raise HTTPException(503, detail={'code': 'evidence_unavailable', 'message': 'Poll operation; do not replay mutation',
++                                         'retryable': False, 'stale': True}) from error
++
++
++def build_router(service, identity):
++    router = APIRouter(prefix='/api/vc')
++
++    @router.post('/approvals')
++    def request_approval(body: dict, request: Request):
++        def submit():
++            actor = authenticated_actor(request, identity)
++            return service.request(parse_inputs(ApprovalInputs, body), actor)
++        return invoke(submit)
++
++    @router.post('/approvals/{approval_id}/votes')
++    def vote(approval_id: str, body: VoteBody, request: Request):
++        return invoke(lambda: service.vote(approval_id, body.decision, authenticated_actor(request, identity)))
++
++    @router.get('/approvals/{approval_id}')
++    def get(approval_id: str, request: Request):
++        def read():
++            actor = authenticated_actor(request, identity)
++            record = service.get(approval_id)
++            binding = record.request.inputs.target_binding
++            if actor.workspace_id != binding.workspace_id or not (
++                    identity.can_edit(actor.subject_id, binding)
++                    or 'approvers' in identity.groups(actor.subject_id, binding.workspace_id)):
++                raise PermissionError('Approval read scope denied')
++            return record
++        return invoke(read)
++
++    @router.post('/break-glass', status_code=202)
++    def break_glass(body: dict, request: Request):
++        def override():
++            actor = authenticated_actor(request, identity)
++            scoped = parse_inputs(BreakGlassRequest, body)
++            service.break_glass(scoped, actor)
++            return OperationHandle(scoped.identity.operation_id, OperationStatus.QUARANTINED, None)
++        return invoke(override)
++
++    return router
+diff --git a/backend/routers/vc_operations.py b/backend/routers/vc_operations.py
+new file mode 100644
+index 0000000..6af8c0d
+--- /dev/null
++++ b/backend/routers/vc_operations.py
+@@ -0,0 +1,27 @@
++"""Scoped operation reads. M08 owns router composition and authentication."""
++
++from fastapi import APIRouter, HTTPException, Request
++
++from .vc_approvals import authenticated_actor, invoke
++
++
++def build_router(audit, identity):
++    router = APIRouter(prefix='/api/vc/operations')
++
++    @router.get('/{operation_id}')
++    def get(operation_id: str, request: Request):
++        return invoke(lambda: audit.get(operation_id, authenticated_actor(request, identity)))
++
++    @router.get('/{operation_id}/audit')
++    async def correlate(operation_id: str, request: Request):
++        actor = invoke(lambda: authenticated_actor(request, identity))
++        from backend.services.version_control.contracts import ActorContext, from_wire
++
++        try:
++            return await audit.correlate(operation_id, from_wire(ActorContext, actor))
++        except PermissionError as error:
++            raise HTTPException(403, detail={'code': 'evidence_scope_denied', 'retryable': False, 'stale': False}) from error
++        except Exception as error:
++            raise HTTPException(503, detail={'code': 'evidence_unavailable', 'retryable': False, 'stale': True}) from error
++
++    return router
+diff --git a/backend/services/version_control/governance/__init__.py b/backend/services/version_control/governance/__init__.py
+new file mode 100644
+index 0000000..9d07501
+--- /dev/null
++++ b/backend/services/version_control/governance/__init__.py
+@@ -0,0 +1 @@
++"""Target-owned VC/1.0 governance; write capabilities are opt-in."""
+diff --git a/backend/services/version_control/governance/approvals.py b/backend/services/version_control/governance/approvals.py
+new file mode 100644
+index 0000000..6346f29
+--- /dev/null
++++ b/backend/services/version_control/governance/approvals.py
+@@ -0,0 +1,265 @@
++"""Workbench-native approval policy over VC/1.0 ports."""
++
++from dataclasses import replace
++from datetime import timedelta
++from uuid import NAMESPACE_URL, uuid5
++
++from backend.services.version_control.contracts import (
++    ActorContext, ApprovalRecord, ApprovalRequest, ApprovalVote, AuthorizationGrant, FactKind, FactStatus,
++    IdentityProvider, OperationFact, OperationFacts, Registry, RequestIdentity,
++    StageEvidence, canonical_json_hash, to_wire,
++)
++from .facts import fact_key
++
++
++def input_digest(inputs):
++    return canonical_json_hash('vc-approval-inputs/1', to_wire(inputs))
++
++
++def approval_digest(inputs, votes):
++    return canonical_json_hash('vc-approval/1', {
++        'inputs': to_wire(inputs),
++        'votes': to_wire(sorted(votes, key=lambda vote: vote.approver_id)),
++    })
++
++
++def request_digest(request):
++    payload = to_wire(request)
++    payload['identity'] = {'operation_id': request.identity.operation_id}
++    return canonical_json_hash('vc-request/1', payload)
++
++
++class ApprovalService:
++    def __init__(self, facts: OperationFacts, identity: IdentityProvider, registry: Registry,
++                 now, *, target_identity, writes_enabled=False):
++        self.facts = facts
++        self.identity = identity
++        self.registry = registry
++        self.now = now
++        self.target_identity = target_identity
++        self.writes_enabled = writes_enabled
++
++    def _enabled(self):
++        if not self.writes_enabled:
++            raise PermissionError('Approval writes disabled')
++
++    def _fresh(self, inputs, requested_at):
++        if (not timedelta(0) < inputs.expires_at - requested_at <= timedelta(hours=24)
++                or not requested_at <= self.now() < inputs.expires_at):
++            raise PermissionError('Approval expiry must be current and within 24 hours')
++        if self.registry.resolve(inputs.target_binding.binding_id) != inputs.target_binding:
++            raise PermissionError('Stale target binding revision')
++
++    def get(self, approval_id):
++        record = self.facts.get_request(approval_id).approval
++        if record is None or record.request.approval_id != approval_id:
++            raise LookupError('Approval evidence unavailable')
++        return record
++
++    def _bound(self, request, inputs):
++        rendered = canonical_json_hash('vc-rendered-target/1', {
++            'serialized_space': request.serialized_space, 'description': request.description,
++        })
++        if (request.identity.request_digest != request_digest(request)
++                or request.identity.operation_id != inputs.operation_id
++                or request.approval_id != inputs.operation_id
++                or request.binding != inputs.target_binding or request.operation_type != inputs.operation_type
++                or request.source_version_id != inputs.source_version_id
++                or request.expected_base != inputs.expected_base_fingerprints.state_digest
++                or rendered != inputs.rendered_target_digest):
++            raise ValueError('Request is not bound to reviewed immutable inputs')
++        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        if not any(isinstance(row.evidence, StageEvidence)
++                   and row.evidence.evidence_digest == inputs.preflight_evidence_digest
++                   and row.request == request.identity for row in history.facts):
++            raise PermissionError('Durable preflight evidence unavailable')
++
++    def _captured_base(self, request, reviewed_at):
++        if request.operation_type not in ('adopt', 'reapply'):
++            return
++        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        captures = [row for row in history.facts if row.status == FactStatus.PREIMAGE_CAPTURED
++                    and isinstance(row.evidence, StageEvidence) and row.evidence.observation is not None]
++        if history.ambiguous or not captures:
++            raise PermissionError('Fresh captured base evidence required')
++        latest = max(captures, key=lambda row: row.transition_sequence)
++        observation = latest.evidence.observation
++        if (observation.state_digest != request.expected_base
++                or observation.binding_id != request.binding.binding_id
++                or observation.binding_revision != request.binding.binding_revision
++                or latest.pre_version_id != observation.version_id
++                or latest.recorded_at > reviewed_at
++                or (request.operation_type == 'adopt' and request.source_version_id != observation.version_id)):
++            raise PermissionError('Approval must review newly captured base')
++
++    def _unused(self, request, approval_id):
++        if self.suspended(request.binding):
++            raise PermissionError('Break-glass suspension requires mandatory reconciliation')
++        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
++        if (history.ambiguous or not history.facts
++                or any(row.request != request.identity for row in history.facts)):
++            raise ValueError('Missing or conflicting idempotency evidence')
++        if any(row.fact_kind == FactKind.OPERATION and row.status in (
++                FactStatus.CONFIRMED, FactStatus.NOOP, FactStatus.COMPENSATED, FactStatus.FAILED)
++               for row in history.facts):
++            raise PermissionError('Completed request cannot authorize a new mutation')
++        use = self.facts.approval_use(request.binding, approval_id)
++        if use.ambiguous or use.consumptions or use.operation_ids:
++            raise PermissionError('Approval consumed; only existing-claim verification/publication may recover')
++
++    def _record(self, record, actor, kind):
++        inputs = record.request.inputs
++        request = self.facts.get_request(inputs.operation_id).request
++        provisional = OperationFact(
++            event_id=inputs.operation_id, fact_kind=kind, operation_id=inputs.operation_id,
++            transition_sequence=len(record.votes) + (1 if kind == FactKind.APPROVAL_GRANTED else 0),
++            event_key='', binding=inputs.target_binding,
++            request=request.identity, operation_type=inputs.operation_type,
++            requester_id=inputs.requester_id, actor=actor, status=record.status,
++            evidence=record, recorded_at=self.now(), approval_id=record.request.approval_id,
++            approval_digest=record.approval_digest,
++        )
++        key = fact_key(provisional)
++        self.facts.append(replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key))))
++
++    def request(self, inputs, actor):
++        self._enabled()
++        if inputs.requester_id != actor.subject_id or actor.workspace_id != inputs.target_binding.workspace_id:
++            raise PermissionError('Authenticated requester mismatch')
++        self._fresh(inputs, self.now())
++        stored = self.facts.get_request(inputs.operation_id)
++        self._bound(stored.request, inputs)
++        self._captured_base(stored.request, self.now())
++        if stored.approval is not None:
++            if stored.approval.request.inputs != inputs:
++                raise ValueError('Approval inputs are immutable')
++            return stored.approval.request
++        request = ApprovalRequest(inputs.operation_id, inputs, self.now())
++        self._record(ApprovalRecord(request, (), FactStatus.REQUESTED, None), actor, FactKind.APPROVAL_REQUEST)
++        return request
++
++    def vote(self, approval_id, decision, actor):
++        self._enabled()
++        record = self.get(approval_id)
++        inputs = record.request.inputs
++        self._fresh(inputs, record.request.requested_at)
++        if record.status != FactStatus.REQUESTED:
++            raise PermissionError('Approval votes are sealed')
++        if actor.actor_kind != 'human' or actor.subject_id == inputs.requester_id:
++            raise PermissionError('Only non-requester humans may approve')
++        if 'approvers' not in self.identity.groups(actor.subject_id, actor.workspace_id):
++            raise PermissionError('Approver policy membership required')
++        if decision not in ('approve', 'reject'):
++            raise ValueError('Unknown vote decision')
++        if actor.workspace_id != record.request.inputs.target_binding.workspace_id:
++            raise PermissionError('Wrong voting workspace')
++        prior = next((vote for vote in record.votes if vote.approver_id == actor.subject_id), None)
++        if prior is not None:
++            if prior.decision != decision:
++                raise ValueError('Votes are immutable')
++            return record
++        votes = (*record.votes, ApprovalVote(actor.subject_id, decision, self.now()))
++        updated = replace(record, votes=votes, approval_digest=approval_digest(record.request.inputs, votes))
++        self._record(updated, actor, FactKind.APPROVAL_VOTE)
++        return updated
++
++    def authorize(self, request, executor):
++        self._enabled()
++        record = self.get(request.approval_id)
++        if record.status not in (FactStatus.REQUESTED, FactStatus.APPROVED):
++            raise PermissionError('Approval invalidated or unavailable')
++        inputs = record.request.inputs
++        self._fresh(inputs, record.request.requested_at)
++        stored = self.facts.get_request(inputs.operation_id)
++        if request != stored.request:
++            raise ValueError('Immutable request identity or digest mismatch')
++        self._bound(request, inputs)
++        self._captured_base(request, record.request.requested_at)
++        self._unused(request, record.request.approval_id)
++        if executor.workspace_id != inputs.target_binding.workspace_id or executor.actor_kind != 'service':
++            raise PermissionError('Target service executor required')
++        target = self.target_identity(executor)
++        target.verify_run_as(executor.execution_ref, executor.principal_id)
++        if inputs.target_binding.environment == 'dev' and inputs.operation_type == 'edit':
++            if not self.identity.can_edit(inputs.requester_id, inputs.target_binding):
++                raise PermissionError('Requester edit right required')
++            self._publish_grant(record, executor)
++            return AuthorizationGrant(inputs.target_binding, request.identity,
++                                      f'rights:{inputs.operation_id}:{input_digest(inputs)}',
++                                      inputs.expected_base_fingerprints, inputs.rendered_target_digest,
++                                      inputs.expires_at, None, None)
++        if inputs.operation_type in ('release', 'promotion') and 'release-requesters' not in self.identity.groups(
++                inputs.requester_id, inputs.target_binding.workspace_id):
++            raise PermissionError('Requester release policy group required')
++        approvers = {vote.approver_id for vote in record.votes if vote.decision == 'approve'}
++        if (len(approvers) < 2 or any(vote.decision != 'approve' for vote in record.votes)
++                or inputs.requester_id in approvers or executor.principal_id in approvers):
++            raise PermissionError('Two distinct non-requester non-deployer humans required')
++        if any('approvers' not in self.identity.groups(subject, inputs.target_binding.workspace_id)
++               for subject in approvers):
++            raise PermissionError('Approver policy membership revoked')
++        if not any('target-approvers' in target.groups(subject, executor.workspace_id) for subject in approvers):
++            raise PermissionError('Target-side approver membership required')
++        self._publish_grant(record, executor)
++        return AuthorizationGrant(inputs.target_binding, request.identity, record.request.approval_id,
++                                  inputs.expected_base_fingerprints, inputs.rendered_target_digest,
++                                  inputs.expires_at, record.request.approval_id, record.approval_digest)
++
++    def _publish_grant(self, record, executor):
++        if record.status == FactStatus.APPROVED:
++            return
++        approved = replace(record, status=FactStatus.APPROVED,
++                           approval_digest=approval_digest(record.request.inputs, record.votes))
++        self._record(approved, ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
++                     FactKind.APPROVAL_GRANTED)
++
++    def suspended(self, binding):
++        history = self.facts.lookup_request(binding, 'vc:break-glass-suspension')
++        return history.ambiguous or bool(history.facts)
++
++    def break_glass(self, request, actor):
++        self._enabled()
++        if (actor.actor_kind != 'human' or actor.workspace_id != request.binding.workspace_id
++                or 'break-glass' not in self.identity.groups(actor.subject_id, request.binding.workspace_id)):
++            raise PermissionError('Separate break-glass group and target human identity required')
++        if not request.reason.strip() or not request.residual_risk_acknowledged:
++            raise PermissionError('Break-glass reason and residual risk acknowledgement required')
++        stored = self.facts.get_request(request.identity.operation_id)
++        record = self.get(request.identity.operation_id)
++        inputs = record.request.inputs
++        self._fresh(inputs, record.request.requested_at)
++        self._bound(stored.request, inputs)
++        self._captured_base(stored.request, record.request.requested_at)
++        if (request.identity != stored.request.identity or request.binding != stored.request.binding
++                or request.evidence_digest != inputs.preflight_evidence_digest):
++            raise ValueError('Break-glass scope and evidence must match immutable request')
++        if not self.now() < request.expires_at <= min(inputs.expires_at, self.now() + timedelta(hours=24)):
++            raise PermissionError('Invalid break-glass expiry')
++        use = self.facts.approval_use(request.binding, record.request.approval_id)
++        if use.ambiguous or use.consumptions or use.operation_ids:
++            raise PermissionError('Break-glass cannot reuse consumed evidence')
++        scope_digest = canonical_json_hash('vc-break-glass-scope/1', to_wire(request.binding))
++        scope_id = str(uuid5(NAMESPACE_URL, scope_digest))
++        override_digest = canonical_json_hash('vc-break-glass/1', {'request': to_wire(request), 'actor': to_wire(actor)})
++        provisional = OperationFact(
++            event_id=scope_id, fact_kind=FactKind.BREAK_GLASS, operation_id=scope_id,
++            transition_sequence=0, event_key='', binding=request.binding,
++            request=RequestIdentity(scope_id, 'vc:break-glass-suspension', scope_digest),
++            operation_type='break_glass', requester_id=inputs.requester_id, actor=actor,
++            status=FactStatus.QUARANTINED, evidence=request, recorded_at=self.now(),
++            approval_id=record.request.approval_id, approval_digest=override_digest,
++            approval_reference=request.identity.operation_id, drift_override=True,
++        )
++        key = fact_key(provisional)
++        history = self.facts.lookup_request(request.binding, 'vc:break-glass-suspension')
++        if history.ambiguous:
++            raise PermissionError('Ambiguous break-glass evidence')
++        if history.facts:
++            existing = history.facts[0]
++            if existing.evidence != request or existing.actor != actor:
++                raise PermissionError('Existing suspension requires reconciliation')
++        else:
++            self.facts.append(replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key))))
++        return AuthorizationGrant(request.binding, request.identity, f'break-glass:{key}',
++                                  inputs.expected_base_fingerprints, inputs.rendered_target_digest,
++                                  request.expires_at, record.request.approval_id, override_digest)
+diff --git a/backend/services/version_control/governance/audit.py b/backend/services/version_control/governance/audit.py
+new file mode 100644
+index 0000000..9bf6725
+--- /dev/null
++++ b/backend/services/version_control/governance/audit.py
+@@ -0,0 +1,53 @@
++"""Optional, asynchronously fetched platform evidence; never authorization."""
++
++from datetime import datetime, timedelta
++
++from backend.services.version_control.contracts import FactKind, OperationFacts, IdentityProvider, to_wire
++
++
++class AuditService:
++    def __init__(self, facts: OperationFacts, identity: IdentityProvider, now, fetch):
++        self.facts = facts
++        self.identity = identity
++        self.now = now
++        self.fetch = fetch
++
++    def _scoped(self, operation_id, actor):
++        stored = self.facts.get_request(operation_id)
++        binding = stored.request.binding
++        if actor.workspace_id != binding.workspace_id or not self.identity.can_edit(actor.subject_id, binding):
++            raise PermissionError('Operation evidence read scope denied')
++        history = self.facts.lookup_request(binding, stored.request.identity.idempotency_key)
++        if history.ambiguous or not history.facts:
++            raise ValueError('Ambiguous or missing operation evidence')
++        return stored, history
++
++    def get(self, operation_id, actor):
++        stored, history = self._scoped(operation_id, actor)
++        checkpoints = [row for row in history.facts if row.fact_kind in (FactKind.OPERATION, FactKind.CREATE_INTENT)]
++        return {
++            'operation': to_wire(stored.request),
++            'status': checkpoints[-1].status.value if checkpoints else 'requested',
++            'checkpoints': to_wire(checkpoints),
++            'receipt_references': [row.event_id for row in history.facts if row.fact_kind == FactKind.RECEIPT],
++            'audit': {'availability': 'pending', 'authoritative': False, 'actor': 'unknown'},
++        }
++
++    async def correlate(self, operation_id, actor):
++        stored, history = self._scoped(operation_id, actor)
++        binding = stored.request.binding
++        start = min(row.recorded_at for row in history.facts) - timedelta(minutes=5)
++        end = self.now() + timedelta(minutes=5)
++        result = {'availability': 'lagging', 'authoritative': False, 'actor': 'unknown', 'events': []}
++        try:
++            events = await self.fetch(binding, operation_id, start, end)
++            scoped = [event for event in events if event.get('workspace_id') == binding.workspace_id
++                      and event.get('space_id') == binding.space_id
++                      and event.get('operation_id') == operation_id
++                      and start <= datetime.fromisoformat(event['recorded_at'].replace('Z', '+00:00')) <= end]
++            result['events'] = [{**event, 'actor_id': event.get('actor_id') or 'unknown'} for event in scoped]
++            if scoped:
++                result['availability'] = 'available'
++        except Exception:
++            result['availability'] = 'unavailable'
++        return result
+diff --git a/backend/services/version_control/governance/delta.py b/backend/services/version_control/governance/delta.py
+new file mode 100644
+index 0000000..f1010c9
+--- /dev/null
++++ b/backend/services/version_control/governance/delta.py
+@@ -0,0 +1,78 @@
++"""Parameter-bound SQL storage; M08 supplies an explicitly target-authenticated runner.
++
++The entire operations table and private Volume are target-owned securables.
++JSON kinds, workspace predicates, and Volume prefixes are not ACL boundaries.
++This adapter neither provisions grants nor treats a successful INSERT response
++as sufficient durability: DurableOperationFacts performs committed read-back.
++"""
++
++import json
++import re
++from hashlib import sha256
++
++from backend.services.version_control.contracts import OperationFact, from_wire, to_wire
++from .facts import validate_evidence
++
++
++class DeltaFactStore:
++    def __init__(self, sql, catalog, control_schema, target_workspace_id, *, writes_enabled=False, read_evidence=None):
++        if any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*', name) for name in (catalog, control_schema)):
++            raise ValueError('Invalid control catalog or schema identifier')
++        self.sql = sql
++        self.table = f'`{catalog}`.`{control_schema}`.`genie_space_operations`'
++        self.target_workspace_id = target_workspace_id
++        self.writes_enabled = writes_enabled
++        self.read_evidence = read_evidence
++        self.evidence_prefix = f'/Volumes/{catalog}/{control_schema}/vc_approval_evidence/'
++
++    def _validate(self, payload):
++        fact = from_wire(OperationFact, {key: value for key, value in payload.items()
++                                        if key not in ('operation_request', 'admission_claim')})
++        if fact.binding.workspace_id != self.target_workspace_id or fact.actor.workspace_id != self.target_workspace_id:
++            raise PermissionError('Facts must belong to the trusted target workspace')
++        validate_evidence(fact)
++        if fact.evidence_uri is not None:
++            if (not fact.evidence_uri.startswith(self.evidence_prefix)
++                    or any(part in ('.', '..', '') for part in fact.evidence_uri[len(self.evidence_prefix):].split('/'))
++                    or '%' in fact.evidence_uri or '\\' in fact.evidence_uri):
++                raise PermissionError('Private evidence must remain in the target-owned Volume')
++            if self.read_evidence is None:
++                raise PermissionError('Private evidence reader unavailable')
++            content = self.read_evidence(fact.evidence_uri)
++            if not isinstance(content, bytes) or sha256(content).hexdigest() != fact.evidence_digest:
++                raise ValueError('Private evidence integrity failure')
++        return fact
++
++    def read(self):
++        rows = self.sql(f'SELECT evidence_json FROM {self.table} WHERE target_workspace = :target_workspace',
++                        {'target_workspace': self.target_workspace_id})
++        payloads = []
++        for row in rows:
++            envelope = json.loads(row['evidence_json'])
++            if envelope.get('schema_version') != 'VC/1.0' or set(envelope) != {'schema_version', 'fact'}:
++                raise ValueError('Unknown durable fact schema')
++            self._validate(envelope['fact'])
++            payloads.append(envelope['fact'])
++        return tuple(payloads)
++
++    def append(self, event_key, payload):
++        if not self.writes_enabled:
++            raise PermissionError('Delta fact writes disabled')
++        fact = self._validate(payload)
++        if fact.event_key != event_key:
++            raise ValueError('Fact event key mismatch')
++        wire = to_wire(fact)
++        parameters = {key: value for key, value in wire.items()
++                      if key not in ('binding', 'request', 'actor', 'evidence', 'expected_base_fingerprint')}
++        parameters.update({
++            'space_key': fact.binding.space_key, 'binding_id': fact.binding.binding_id,
++            'binding_revision': fact.binding.binding_revision, 'target_workspace': self.target_workspace_id,
++            'idempotency_key': fact.request.idempotency_key, 'request_digest': fact.request.request_digest,
++            'actor_id': fact.actor.subject_id, 'actor_kind': fact.actor.actor_kind,
++            'requested_base_fingerprint': fact.expected_base_fingerprint,
++            'evidence_json': json.dumps({'schema_version': 'VC/1.0', 'fact': to_wire(payload)},
++                                        sort_keys=True, separators=(',', ':'), allow_nan=False),
++        })
++        columns = ', '.join(parameters)
++        values = ', '.join(f':{column}' for column in parameters)
++        self.sql(f'INSERT INTO {self.table} ({columns}) VALUES ({values})', parameters)
+diff --git a/backend/services/version_control/governance/facts.py b/backend/services/version_control/governance/facts.py
+new file mode 100644
+index 0000000..40616d1
+--- /dev/null
++++ b/backend/services/version_control/governance/facts.py
+@@ -0,0 +1,236 @@
++"""Append-only durable projections. Inject target-owned storage, never a cache.
++
++Storage callbacks must read committed Delta rows and propagate failures. Logical
++keys are not Delta uniqueness constraints: conflicting duplicates fail closed.
++Admission serialization remains exclusively the Coordination port's concern.
++"""
++
++from collections.abc import Callable, Mapping, Sequence
++from dataclasses import replace
++from datetime import datetime, timezone
++from uuid import NAMESPACE_URL, uuid5
++
++from backend.services.version_control.contracts import (
++    ActorContext, AdmissionClaim, ApprovalInputs, ApprovalRecord, ApprovalUse, ApprovedOperation,
++    BreakGlassRequest, CreateIntentRef, CreateRequest, DeploymentReceipt, FactKind,
++    FactStatus, FactRef, MutationRequest, OperationFact, PackageManifest, RecoveryEvidence,
++    RequestHistory,
++    canonical_json_hash, from_wire, to_wire,
++)
++
++
++def fact_key(fact: OperationFact) -> str:
++    return canonical_json_hash('vc-fact-key/1', {
++        'binding': to_wire(fact.binding), 'operation_id': fact.operation_id,
++        'kind': fact.fact_kind.value, 'sequence': fact.transition_sequence,
++        'attempt_id': fact.attempt_id, 'generation': fact.generation,
++    })
++
++
++def validate_evidence(fact):
++    expected = {
++        FactKind.APPROVAL_REQUEST: (ApprovalInputs, ApprovalRecord),
++        FactKind.APPROVAL_VOTE: (ApprovalRecord,),
++        FactKind.APPROVAL_GRANTED: (ApprovalRecord,),
++        FactKind.APPROVAL_INVALIDATED: (ApprovalRecord,),
++        FactKind.RELEASE: (PackageManifest,),
++        FactKind.RECEIPT: (DeploymentReceipt,),
++        FactKind.BREAK_GLASS: (BreakGlassRequest,),
++        FactKind.RECOVERY: (RecoveryEvidence,),
++    }
++    if fact.fact_kind in expected and not isinstance(fact.evidence, expected[fact.fact_kind]):
++        raise ValueError('Fact kind requires matching typed evidence')
++    if fact.evidence_uri is not None and fact.evidence_digest is None:
++        raise ValueError('Private evidence digest required')
++
++
++class DurableOperationFacts:
++    def __init__(self, read: Callable[[], Sequence[Mapping]],
++                 insert: Callable[[str, Mapping], object], *, writes_enabled=False):
++        self._read = read
++        self._insert = insert
++        self.writes_enabled = writes_enabled
++
++    def _rows(self):
++        return tuple(from_wire(OperationFact, {key: value for key, value in row.items()
++                                              if key not in ('operation_request', 'admission_claim')})
++                     for row in self._read())
++
++    def append(self, fact: OperationFact) -> FactRef:
++        return self._append(fact)
++
++    def record_request(self, request: MutationRequest | CreateRequest, fact: OperationFact) -> FactRef:
++        if request.identity != fact.request or request.binding != fact.binding:
++            raise ValueError('Request identity mismatch')
++        prior = [row['operation_request'] for row in self._read()
++                 if row['operation_id'] == request.identity.operation_id and 'operation_request' in row]
++        if any(payload != to_wire(request) for payload in prior):
++            raise ValueError('Immutable request conflict')
++        return self._append(fact, request)
++
++    def _append(self, fact, request=None, claim=None):
++        if not self.writes_enabled:
++            raise PermissionError('Fact writes disabled')
++        fact = from_wire(OperationFact, to_wire(fact))
++        validate_evidence(fact)
++        if fact.operation_id != fact.request.operation_id:
++            raise ValueError('Operation identity mismatch')
++        if fact.fact_kind == FactKind.CREATE_INTENT:
++            expected = CreateIntentRef(fact.event_id, fact.operation_id, fact.binding.binding_id,
++                                       fact.binding.binding_revision, fact.request.request_digest)
++            if (fact.evidence != expected or fact.pre_version_id is not None
++                    or fact.binding.space_id is not None or fact.operation_type != 'create'):
++                raise ValueError('Invalid create intent evidence')
++        if fact.event_key != fact_key(fact):
++            raise ValueError('Invalid deterministic event key')
++        if fact.event_id != str(uuid5(NAMESPACE_URL, fact.event_key)):
++            raise ValueError('Invalid deterministic event identity')
++        history = self.lookup_request(fact.binding, fact.request.idempotency_key)
++        if history.ambiguous or any(row.request != fact.request for row in history.facts):
++            raise ValueError('Conflicting idempotency key or request digest')
++        existing = tuple(row for row in self._rows() if row.event_key == fact.event_key)
++        if any(row != fact for row in existing):
++            raise ValueError('Fact conflict')
++        if not existing:
++            payload = to_wire(fact)
++            if request is not None:
++                payload['operation_request'] = to_wire(request)
++            if claim is not None:
++                payload['admission_claim'] = to_wire(claim)
++            self._insert(fact.event_key, payload)
++        if request is not None and self.get_request(request.identity.operation_id).request != request:
++            raise ValueError('Immutable request conflict')
++        persisted = tuple(row for row in self._rows() if row.event_key == fact.event_key)
++        if not persisted or any(row != fact for row in persisted):
++            raise ValueError('Fact conflict or unavailable committed evidence')
++        return FactRef(fact.event_id, fact.event_key,
++                       canonical_json_hash('vc-fact-evidence/1', to_wire(fact.evidence)))
++
++    def lookup_request(self, binding, idempotency_key):
++        rows = tuple(row for row in self._rows() if row.binding.binding_id == binding.binding_id
++                     and row.binding.binding_revision == binding.binding_revision
++                     and row.binding.workspace_id == binding.workspace_id
++                     and row.request.idempotency_key == idempotency_key)
++        identities = {row.request for row in rows}
++        by_key = {}
++        conflict = False
++        for row in rows:
++            if row.event_key in by_key and row != by_key[row.event_key]:
++                conflict = True
++            by_key[row.event_key] = row
++        return RequestHistory(tuple(sorted(by_key.values(), key=lambda row: row.transition_sequence)),
++                              conflict or len(identities) > 1)
++
++    def approval_use(self, binding, approval_id):
++        rows = tuple(row for row in self._rows() if row.binding == binding
++                     and row.approval_id == approval_id and row.fact_kind == FactKind.APPROVAL_CONSUMED)
++        unique = {row.event_key: row for row in rows}
++        operations = tuple(sorted({row.operation_id for row in rows}))
++        ambiguous = len(operations) > 1 or any(unique[row.event_key] != row for row in rows)
++        refs = tuple(FactRef(row.event_id, row.event_key,
++                            canonical_json_hash('vc-fact-evidence/1', to_wire(row.evidence)))
++                     for row in unique.values())
++        return ApprovalUse(binding, approval_id, refs, operations, ambiguous)
++
++    def get_request(self, operation_id):
++        requests = []
++        for row in self._read():
++            if row['operation_id'] == operation_id and 'operation_request' in row:
++                payload = row['operation_request']
++                kind = CreateRequest if 'payload' in payload else MutationRequest
++                requests.append(from_wire(kind, payload))
++        if not requests:
++            raise LookupError('Durable request evidence unavailable')
++        if any(request != requests[0] for request in requests):
++            raise ValueError('Ambiguous durable request')
++        records = [row for row in self._rows() if row.operation_id == operation_id
++                   and isinstance(row.evidence, ApprovalRecord)]
++        records.sort(key=lambda row: row.transition_sequence)
++        if records and any(row.transition_sequence == records[-1].transition_sequence
++                           and row.evidence != records[-1].evidence for row in records):
++            raise ValueError('Ambiguous approval evidence')
++        return ApprovedOperation(requests[0], records[-1].evidence if records else None)
++
++    def _claims(self, operation_id):
++        return tuple((from_wire(AdmissionClaim, row['admission_claim']), row)
++                     for row in self._read() if row['operation_id'] == operation_id
++                     and row['fact_kind'] == FactKind.APPROVAL_CONSUMED.value
++                     and 'admission_claim' in row)
++
++    def verify_flush(self, claim):
++        rows = [row for row in self._read() if row['operation_id'] == claim.request.operation_id
++                and row['fact_kind'] == FactKind.APPROVAL_CONSUMED.value]
++        if not rows or any(row != rows[0] for row in rows):
++            return False
++        row = rows[0]
++        if (row.get('admission_claim') != to_wire(claim) or row['attempt_id'] != claim.attempt_id
++                or row['generation'] != claim.generation or row['approval_id'] != claim.approval_id
++                or row['approval_digest'] != claim.approval_digest or row['request'] != to_wire(claim.request)):
++            return False
++        binding = self.get_request(claim.request.operation_id).request.binding
++        history = self.lookup_request(binding, claim.request.idempotency_key)
++        if history.ambiguous:
++            return False
++        if claim.approval_id is not None:
++            use = self.approval_use(binding, claim.approval_id)
++            if use.ambiguous or use.operation_ids != (claim.request.operation_id,):
++                return False
++        return True
++
++    def publish_consumption(self, claim):
++        if not self.writes_enabled:
++            raise PermissionError('Fact writes disabled')
++        existing = self._claims(claim.request.operation_id)
++        if existing:
++            if not self.verify_flush(claim):
++                raise PermissionError('Conflicting consumed admission claim')
++            payload = existing[0][1]
++            return FactRef(payload['event_id'], payload['event_key'],
++                           canonical_json_hash('vc-fact-evidence/1', payload['evidence']))
++        stored = self.get_request(claim.request.operation_id)
++        request = stored.request
++        record = stored.approval
++        if (request.identity != claim.request or request.binding.binding_id != claim.binding_id
++                or request.binding.binding_revision != claim.binding_revision
++                or claim.preimage.binding_id != claim.binding_id
++                or claim.preimage.binding_revision != claim.binding_revision):
++            raise ValueError('Admission claim binding or request mismatch')
++        if record is None:
++            raise PermissionError('Durable approval evidence does not match consumption')
++        evidence = record
++        if claim.approval_id is None:
++            if (claim.approval_digest is not None or request.binding.environment != 'dev'
++                    or request.operation_type != 'edit' or record.status != FactStatus.APPROVED):
++                raise PermissionError('Durable dev grant evidence required')
++        else:
++            normal = (record.request.approval_id == claim.approval_id
++                      and record.approval_digest == claim.approval_digest and record.status == FactStatus.APPROVED)
++            if not normal:
++                overrides = [row for row in self.lookup_request(request.binding, 'vc:break-glass-suspension').facts
++                             if row.fact_kind == FactKind.BREAK_GLASS and row.approval_id == claim.approval_id
++                             and row.approval_digest == claim.approval_digest
++                             and row.evidence.identity == claim.request and row.evidence.binding == request.binding]
++                if len(overrides) != 1:
++                    raise PermissionError('Durable approval evidence does not match consumption')
++                evidence = overrides[0].evidence
++            use = self.approval_use(request.binding, claim.approval_id)
++            if use.ambiguous or use.consumptions:
++                raise PermissionError('Approval already consumed')
++        pre_version_id = getattr(claim.preimage, 'version_id', None)
++        if isinstance(request, MutationRequest) and getattr(claim.preimage, 'state_digest', None) != request.expected_base:
++            raise ValueError('Admission preimage differs from reviewed base')
++        provisional = OperationFact(
++            event_id=request.identity.operation_id, fact_kind=FactKind.APPROVAL_CONSUMED,
++            operation_id=request.identity.operation_id, transition_sequence=0, event_key='',
++            binding=request.binding, request=request.identity, operation_type=request.operation_type,
++            requester_id=record.request.inputs.requester_id,
++            actor=ActorContext('coordination', request.binding.workspace_id, 'system'),
++            status=FactStatus.CONSUMED, evidence=evidence, recorded_at=datetime.now(timezone.utc),
++            attempt_id=claim.attempt_id, generation=claim.generation, pre_version_id=pre_version_id,
++            approval_id=claim.approval_id, approval_digest=claim.approval_digest,
++        )
++        key = fact_key(provisional)
++        reference = self._append(replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key))), claim=claim)
++        if not self.verify_flush(claim):
++            raise PermissionError('Consumption flush unavailable')
++        return reference
+diff --git a/backend/tests/test_vc_approvals.py b/backend/tests/test_vc_approvals.py
+new file mode 100644
+index 0000000..7057123
+--- /dev/null
++++ b/backend/tests/test_vc_approvals.py
+@@ -0,0 +1,439 @@
++from dataclasses import fields, replace
++from datetime import timedelta
++from types import SimpleNamespace
++
++import pytest
++
++from backend.services.version_control.contracts import (
++    ActorContext, ApprovalInputs, ApprovalUse, ApprovalVote, AuthenticatedRequest, BreakGlassRequest,
++    FactKind, FactStatus, Fingerprints, MutationRequest, ObservationRef, PatchStage, RequestHistory, StageEvidence,
++    RequestIdentity, canonical_json_hash, from_wire, to_wire,
++)
++from backend.tests.test_vc_operation_facts import NOW, DIGEST, durable, fact, uid
++from backend.tests.vc_fakes.fixtures import FakeIdentityProvider, binding_fixture, executor_fixture
++from backend.tests.vc_fakes.stores import ManualClock
++
++
++def inputs():
++    fingerprints = Fingerprints(DIGEST, DIGEST, DIGEST, 'vc-c14n/1')
++    return ApprovalInputs(
++        'VC/1.0', uid(2), 'edit', uid(3), DIGEST, fingerprints, None, None,
++        DIGEST, None, 'vc-c14n/1', binding_fixture(), fingerprints, None,
++        DIGEST, DIGEST, DIGEST, {'minimum': 1}, 'requester',
++        {'verify_only': True}, NOW + timedelta(hours=1),
++    )
++
++
++BOUND_PATHS = [field.name for field in fields(ApprovalInputs)] + [
++    f'{parent}.{field.name}'
++    for parent, value_type in [('target_binding', type(binding_fixture())),
++                               ('source_fingerprints', Fingerprints),
++                               ('expected_base_fingerprints', Fingerprints)]
++    for field in fields(value_type)
++]
++
++
++@pytest.mark.parametrize('path', BOUND_PATHS)
++def test_approval_digest_changes_for_every_bound_input(path):
++    from backend.services.version_control.governance.approvals import approval_digest, input_digest
++
++    original = inputs()
++    payload = to_wire(original)
++    container = payload
++    names = path.split('.')
++    for name in names[:-1]:
++        container = container[name]
++    name = names[-1]
++    value = container[name]
++    if path == 'schema_version':
++        payload[name] = 'VC/2.0'
++        with pytest.raises((ValueError, TypeError)):
++            from_wire(ApprovalInputs, payload)
++        return
++    if isinstance(value, dict):
++        if name == 'target_binding':
++            container[name]['binding_revision'] += 1
++        elif 'fingerprints' in name:
++            container[name]['metadata'] = 'b' * 64
++        else:
++            container[name]['changed'] = True
++    elif isinstance(value, int):
++        container[name] += 1
++    elif value is None:
++        container[name] = 'b' * 64 if 'digest' in name else 'changed'
++    elif name.endswith('_id') and value.startswith('00000000-'):
++        container[name] = uid(99)
++    elif name == 'expires_at':
++        container[name] = to_wire(NOW + timedelta(hours=2))
++    elif len(value) == 64:
++        container[name] = 'b' * 64
++    else:
++        container[name] = value + '-changed'
++    changed = from_wire(ApprovalInputs, payload)
++    assert input_digest(original) != input_digest(changed)
++    vote = ApprovalVote('human-1', 'approve', NOW)
++    assert approval_digest(original, (vote,)) != approval_digest(changed, (vote,))
++    assert approval_digest(original, (vote,)) != approval_digest(original, (replace(vote, approver_id='human-2'),))
++    assert approval_digest(original, (vote,)) != approval_digest(original, (replace(vote, approved_at=NOW + timedelta(seconds=1)),))
++
++
++def test_request_digest_is_distinct_from_idempotency_key_and_payload_is_immutable():
++    from backend.services.version_control.governance.approvals import request_digest
++
++    request = MutationRequest(RequestIdentity(uid(2), 'key', DIGEST), binding_fixture(),
++                              'edit', uid(3), DIGEST, {'nested': [1]}, None, uid(2))
++    assert request_digest(request) == request_digest(replace(request, identity=replace(request.identity, idempotency_key='another')))
++    assert request_digest(request) != request_digest(replace(request, description='changed'))
++    with pytest.raises(TypeError):
++        request.serialized_space['nested'] = []
++
++
++def setup_approval(environment='prod', operation_type='edit'):
++    from backend.services.version_control.governance.approvals import ApprovalService, request_digest
++
++    ledger, store = durable()
++    identity = FakeIdentityProvider()
++    target_identity = FakeIdentityProvider()
++    clock = ManualClock(NOW)
++    bound = replace(inputs(), target_binding=replace(binding_fixture(), environment=environment),
++                    operation_type=operation_type)
++    request = MutationRequest(RequestIdentity(uid(2), 'key', DIGEST), bound.target_binding,
++                              operation_type, uid(3), bound.expected_base_fingerprints.state_digest,
++                              {'instructions': []}, None, uid(2))
++    bound = replace(bound, rendered_target_digest=canonical_json_hash(
++        'vc-rendered-target/1', {'serialized_space': request.serialized_space, 'description': request.description}))
++    request = replace(request, identity=replace(request.identity, request_digest=request_digest(request)))
++    ledger.record_request(request, fact(binding=request.binding, request=request.identity,
++                                       requester_id='requester', operation_type=operation_type))
++    registry = SimpleNamespace(binding=bound.target_binding)
++    registry.resolve = lambda binding_id: registry.binding
++    for subject in ('human-1', 'human-2', 'requester'):
++        identity.actors[subject] = ActorContext(subject, '123', 'human')
++        identity.memberships[(subject, '123')] = frozenset({'approvers'})
++        target_identity.memberships[(subject, '123')] = frozenset({'target-approvers'})
++    identity.edit_rights.add(('requester', '123', request.binding.binding_id, 1))
++    executor = executor_fixture()
++    target_identity.run_as[executor.execution_ref] = executor.principal_id
++    service = ApprovalService(ledger, identity, registry, clock.now,
++                              target_identity=lambda selected: target_identity, writes_enabled=True)
++    return SimpleNamespace(service=service, facts=ledger, store=store, identity=identity,
++                           target_identity=target_identity, clock=clock, bound=bound,
++                           request=request, registry=registry, executor=executor)
++
++
++def submit(context):
++    return context.service.request(context.bound, context.identity.actors['requester'])
++
++
++def test_vote_identity_is_server_derived_not_request_body():
++    from fastapi import FastAPI
++    from fastapi.testclient import TestClient
++    from backend.routers.vc_approvals import build_router
++
++    context = setup_approval()
++    approval = submit(context)
++    app = FastAPI()
++
++    @app.middleware('http')
++    async def authenticate(request, call_next):
++        request.state.vc_auth = AuthenticatedRequest('human-1', '123')
++        return await call_next(request)
++
++    app.include_router(build_router(context.service, context.identity))
++    client = TestClient(app)
++    url = f'/api/vc/approvals/{approval.approval_id}/votes'
++    assert client.post(url, json={'decision': 'approve', 'actor_id': 'human-2'}).status_code == 422
++    response = client.post(url, json={'decision': 'approve'})
++    assert response.status_code == 200
++    assert response.json()['votes'][0]['approver_id'] == 'human-1'
++    record = context.service.get(approval.approval_id)
++    assert record.votes[0].approver_id == 'human-1'
++    assert context.service.vote(approval.approval_id, 'approve', context.identity.actors['human-1']) == record
++    with pytest.raises(ValueError, match='immutable'):
++        context.service.vote(approval.approval_id, 'reject', context.identity.actors['human-1'])
++    with pytest.raises(PermissionError, match='requester'):
++        context.service.request(replace(context.bound, requester_id='spoof'), context.identity.actors['requester'])
++
++
++@pytest.mark.parametrize('invalid', ['missing', 'duplicate', 'requester', 'service', 'unauthorized', 'deployer', 'reject'])
++def test_production_requires_two_distinct_nonrequester_humans(invalid):
++    context = setup_approval()
++    approval = submit(context)
++    first = context.identity.actors['human-1']
++    context.service.vote(approval.approval_id, 'approve', first)
++    if invalid in ('requester', 'service', 'unauthorized'):
++        actor = context.identity.actors['requester'] if invalid == 'requester' else ActorContext('bot', '123', 'service') if invalid == 'service' else ActorContext('outsider', '123', 'human')
++        with pytest.raises(PermissionError):
++            context.service.vote(approval.approval_id, 'approve', actor)
++    if invalid == 'duplicate':
++        context.service.vote(approval.approval_id, 'approve', first)
++    if invalid in ('reject', 'deployer'):
++        context.service.vote(approval.approval_id, 'reject' if invalid == 'reject' else 'approve', context.identity.actors['human-2'])
++    executor = replace(context.executor, principal_id='human-2') if invalid == 'deployer' else context.executor
++    with pytest.raises(PermissionError):
++        context.service.authorize(context.request, executor)
++    if invalid not in ('reject', 'deployer'):
++        context.service.vote(approval.approval_id, 'approve', context.identity.actors['human-2'])
++        grant = context.service.authorize(context.request, context.executor)
++        assert grant.approval_id == approval.approval_id
++        assert grant.binding == context.bound.target_binding
++        assert grant.request == context.request.identity
++        assert grant.expected_base_fingerprints == context.bound.expected_base_fingerprints
++
++
++def approve(context):
++    approval = submit(context)
++    for subject in ('human-1', 'human-2'):
++        context.service.vote(approval.approval_id, 'approve', context.identity.actors[subject])
++    return approval
++
++
++@pytest.mark.parametrize('fault', ['revoked', 'source-only', 'wrong-workspace', 'wrong-run-as', 'human-executor', 'outage'])
++def test_target_membership_rechecked_by_target_executor_at_execution(fault):
++    context = setup_approval()
++    approve(context)
++    seen = []
++
++    def target_provider(executor):
++        seen.append(executor)
++        return context.target_identity
++
++    context.service.target_identity = target_provider
++    context.target_identity.memberships.pop(('human-2', '123'))
++    assert context.service.authorize(context.request, context.executor).approval_id == uid(2)
++    assert seen == [context.executor]
++    executor = context.executor
++    if fault in ('revoked', 'source-only'):
++        context.target_identity.memberships.clear()
++        context.identity.memberships[('human-1', 'source')] = frozenset({'target-approvers'})
++    elif fault == 'wrong-workspace':
++        executor = replace(executor, workspace_id='source')
++    elif fault == 'wrong-run-as':
++        context.target_identity.run_as[executor.execution_ref] = 'another-service'
++    elif fault == 'human-executor':
++        executor = replace(executor, actor_kind='human')
++    else:
++        def unavailable(*args):
++            raise OSError('identity evidence unavailable')
++        context.target_identity.groups = unavailable
++    with pytest.raises((PermissionError, OSError)):
++        context.service.authorize(context.request, executor)
++
++
++@pytest.mark.parametrize('fault', ['over-24h', 'expired', 'expired-vote', 'stale-request', 'stale-execution', 'exact-24h'])
++def test_expiry_over_24_hours_and_stale_binding_revision_are_rejected(fault):
++    context = setup_approval()
++    if fault == 'over-24h':
++        context.bound = replace(context.bound, expires_at=NOW + timedelta(hours=24, seconds=1))
++        with pytest.raises(PermissionError, match='expiry'):
++            submit(context)
++    elif fault == 'stale-request':
++        context.registry.binding = replace(context.registry.binding, binding_revision=2)
++        with pytest.raises(PermissionError, match='binding'):
++            submit(context)
++    elif fault == 'expired-vote':
++        approval = submit(context)
++        context.clock.advance(timedelta(hours=1))
++        with pytest.raises(PermissionError, match='expiry'):
++            context.service.vote(approval.approval_id, 'approve', context.identity.actors['human-1'])
++    else:
++        if fault == 'exact-24h':
++            context.bound = replace(context.bound, expires_at=NOW + timedelta(hours=24))
++        approve(context)
++        if fault == 'expired':
++            context.clock.advance(timedelta(hours=1))
++        elif fault == 'stale-execution':
++            context.registry.binding = replace(context.registry.binding, binding_revision=2)
++        if fault == 'exact-24h':
++            assert context.service.authorize(context.request, context.executor).expires_at == context.bound.expires_at
++        else:
++            with pytest.raises(PermissionError, match='expiry|binding'):
++                context.service.authorize(context.request, context.executor)
++
++
++def test_approval_writes_default_off_and_non_utc_expiry_rejected():
++    from backend.services.version_control.governance.approvals import ApprovalService
++
++    context = setup_approval()
++    service = ApprovalService(context.facts, context.identity, context.registry, context.clock.now,
++                              target_identity=lambda executor: context.target_identity)
++    with pytest.raises(PermissionError, match='disabled'):
++        service.request(context.bound, context.identity.actors['requester'])
++    with pytest.raises(ValueError, match='UTC'):
++        replace(context.bound, expires_at=NOW.replace(tzinfo=None))
++
++
++def test_dev_grant_requires_requester_edit_right_but_release_requires_policy_group():
++    context = setup_approval(environment='dev')
++    submit(context)
++    grant = context.service.authorize(context.request, context.executor)
++    assert grant.authorization_reference.startswith('rights:')
++    assert grant.approval_id is None
++    context.identity.edit_rights.clear()
++    with pytest.raises(PermissionError, match='edit right'):
++        context.service.authorize(context.request, context.executor)
++    release = setup_approval(environment='dev', operation_type='release')
++    approve(release)
++    with pytest.raises(PermissionError, match='release policy'):
++        release.service.authorize(release.request, release.executor)
++    release.identity.memberships[('requester', '123')] = frozenset({'release-requesters'})
++    assert release.service.authorize(release.request, release.executor).approval_id == uid(2)
++    release.target_identity.memberships.clear()
++    with pytest.raises(PermissionError, match='Target-side'):
++        release.service.authorize(release.request, release.executor)
++
++
++@pytest.mark.parametrize('fault', ['consumed', 'different-digest', 'same-key-new-operation',
++                                  'payload', 'metadata', 'ambiguous', 'missing', 'outage', 'completed'])
++def test_historical_approval_reuse_and_different_request_digest_are_rejected(fault):
++    context = setup_approval()
++    approval = approve(context)
++    request = context.request
++    if fault == 'consumed':
++        record = context.service.get(approval.approval_id)
++        context.facts.append(fact(
++            binding=request.binding, request=request.identity, requester_id='requester',
++            fact_kind=FactKind.APPROVAL_CONSUMED, status=FactStatus.CONSUMED,
++            approval_id=approval.approval_id, approval_digest=record.approval_digest,
++            attempt_id=uid(5), generation=1, evidence=record,
++        ))
++        context.facts.append(fact(binding=request.binding, operation_id=uid(20),
++                                 request=RequestIdentity(uid(20), 'successor', DIGEST)))
++    elif fault == 'different-digest':
++        request = replace(request, identity=replace(request.identity, request_digest='b' * 64))
++    elif fault == 'same-key-new-operation':
++        request = replace(request, identity=replace(request.identity, operation_id=uid(20)))
++    elif fault == 'payload':
++        request = replace(request, serialized_space={'tampered': True})
++    elif fault == 'metadata':
++        request = replace(request, description='unreviewed')
++    elif fault == 'ambiguous':
++        context.facts.approval_use = lambda binding, approval_id: ApprovalUse(binding, approval_id, (), (), True)
++    elif fault == 'missing':
++        context.facts.lookup_request = lambda *args: RequestHistory((), False)
++    elif fault == 'outage':
++        def unavailable(*args):
++            raise OSError('fact evidence unavailable')
++        context.facts.approval_use = unavailable
++    else:
++        context.facts.append(fact(binding=request.binding, request=request.identity,
++                                 transition_sequence=10, status=FactStatus.CONFIRMED))
++    with pytest.raises((PermissionError, ValueError, OSError)):
++        context.service.authorize(request, context.executor)
++
++
++def test_approval_request_rejects_inputs_not_bound_to_durable_request():
++    context = setup_approval()
++    with pytest.raises(ValueError, match='bound'):
++        context.service.request(replace(context.bound, rendered_target_digest='b' * 64),
++                                context.identity.actors['requester'])
++
++
++@pytest.mark.parametrize('action', ['adopt', 'reapply'])
++def test_adopt_and_reapply_need_new_approval_for_newly_captured_base(action):
++    from backend.services.version_control.governance.approvals import request_digest
++
++    context = setup_approval(operation_type=action)
++    with pytest.raises(PermissionError, match='captured base'):
++        submit(context)
++    observation = ObservationRef(uid(3), context.request.binding.binding_id, 1,
++                                 context.request.expected_base, DIGEST)
++    capture = fact(binding=context.request.binding, request=context.request.identity,
++                   operation_type=action, transition_sequence=1,
++                   status=FactStatus.PREIMAGE_CAPTURED, pre_version_id=observation.version_id,
++                   evidence=StageEvidence('VC/1.0', PatchStage.CONFIG_PENDING, NOW, DIGEST, observation))
++    context.facts.append(capture)
++    assert context.facts.get_request(uid(2)).approval is None
++    approve(context)
++    assert context.service.authorize(context.request, context.executor).approval_id == uid(2)
++    new_base = replace(context.bound.expected_base_fingerprints, metadata='b' * 64)
++    new_request = replace(context.request, identity=RequestIdentity(uid(22), 'new-base', DIGEST),
++                          expected_base=new_base.state_digest)
++    new_request = replace(new_request, identity=replace(new_request.identity, request_digest=request_digest(new_request)))
++    context.facts.record_request(new_request, fact(operation_id=uid(22), binding=new_request.binding,
++                                                 request=new_request.identity, operation_type=action))
++    new_inputs = replace(context.bound, operation_id=uid(22), expected_base_fingerprints=new_base)
++    with pytest.raises((ValueError, PermissionError)):
++        context.service.request(new_inputs, context.identity.actors['requester'])
++    with pytest.raises((ValueError, PermissionError)):
++        context.service.authorize(new_request, context.executor)
++
++
++@pytest.mark.parametrize('fault', ['group', 'reason', 'expiry', 'over-24h', 'scope', 'evidence', 'acknowledgement', 'outage', 'none'])
++def test_break_glass_requires_group_reason_expiry_and_cannot_skip_evidence(fault):
++    context = setup_approval()
++    approve(context)
++    actor = ActorContext('emergency-human', '123', 'human')
++    context.identity.memberships[(actor.subject_id, '123')] = frozenset({'break-glass'})
++    request = BreakGlassRequest(context.request.identity, context.request.binding, 'incident-42',
++                                NOW + timedelta(minutes=15), context.bound.preflight_evidence_digest, True)
++    if fault == 'group':
++        context.identity.memberships[(actor.subject_id, '123')] = frozenset({'approvers'})
++    elif fault == 'reason':
++        request = replace(request, reason='  ')
++    elif fault == 'expiry':
++        request = replace(request, expires_at=NOW)
++    elif fault == 'over-24h':
++        request = replace(request, expires_at=NOW + timedelta(hours=25))
++    elif fault == 'scope':
++        request = replace(request, binding=replace(request.binding, workspace_id='other'))
++    elif fault == 'evidence':
++        request = replace(request, evidence_digest='b' * 64)
++    elif fault == 'acknowledgement':
++        request = replace(request, residual_risk_acknowledged=False)
++    elif fault == 'outage':
++        def unavailable(*args):
++            raise OSError('Delta unavailable')
++        context.facts.append = unavailable
++    if fault != 'none':
++        with pytest.raises((PermissionError, ValueError, OSError)):
++            context.service.break_glass(request, actor)
++    else:
++        grant = context.service.break_glass(request, actor)
++        assert grant.authorization_reference.startswith('break-glass:')
++        assert grant.expected_base_fingerprints == context.bound.expected_base_fingerprints
++        assert context.service.suspended(request.binding)
++        assert context.service.break_glass(request, actor) == grant
++        with pytest.raises(PermissionError, match='reconciliation'):
++            context.service.authorize(context.request, context.executor)
++        assert any(row.payload['drift_override'] and row.payload['status'] == 'quarantined'
++                   for row in context.store.state.rows)
++
++
++def test_authorization_publishes_durable_grant_before_return_and_invalidations_block():
++    from backend.tests.vc_fakes.stores import CrashBoundary, InjectedCrash
++
++    context = setup_approval()
++    approval = approve(context)
++    context.store.failures.inject(CrashBoundary.BEFORE_COMMIT)
++    with pytest.raises(InjectedCrash):
++        context.service.authorize(context.request, context.executor)
++    grant = context.service.authorize(context.request, context.executor)
++    record = context.facts.get_request(uid(2)).approval
++    assert record.status == FactStatus.APPROVED
++    assert grant == context.service.authorize(context.request, context.executor)
++    with pytest.raises(PermissionError, match='sealed'):
++        context.service.vote(approval.approval_id, 'approve', ActorContext('late-voter', '123', 'human'))
++    context.facts.append(fact(binding=context.request.binding, request=context.request.identity,
++                             fact_kind=FactKind.APPROVAL_INVALIDATED, transition_sequence=100,
++                             status=FactStatus.INVALIDATED, approval_id=approval.approval_id,
++                             evidence=replace(record, status=FactStatus.INVALIDATED)))
++    with pytest.raises(PermissionError, match='invalidated'):
++        context.service.authorize(context.request, context.executor)
++
++
++def test_preflight_proof_must_exist_in_durable_request_evidence():
++    context = setup_approval()
++    with pytest.raises(PermissionError, match='preflight'):
++        context.service.request(replace(context.bound, preflight_evidence_digest='b' * 64),
++                                context.identity.actors['requester'])
++    approve(context)
++    lookup = context.facts.lookup_request
++
++    def without_proof(*args):
++        history = lookup(*args)
++        return replace(history, facts=tuple(row for row in history.facts if not isinstance(row.evidence, StageEvidence)))
++
++    context.facts.lookup_request = without_proof
++    with pytest.raises(PermissionError, match='preflight'):
++        context.service.authorize(context.request, context.executor)
+diff --git a/backend/tests/test_vc_audit.py b/backend/tests/test_vc_audit.py
+new file mode 100644
+index 0000000..d770a62
+--- /dev/null
++++ b/backend/tests/test_vc_audit.py
+@@ -0,0 +1,174 @@
++from dataclasses import replace
++
++import pytest
++
++from backend.services.version_control.contracts import ActorContext, AuthenticatedRequest, BreakGlassRequest, to_wire
++from backend.tests.test_vc_approvals import approve, setup_approval
++from backend.tests.test_vc_operation_facts import NOW, uid
++
++
++@pytest.mark.parametrize('availability', ['available', 'lagging', 'unavailable'])
++async def test_audit_correlation_is_optional_evidence_not_approval_or_lock(availability):
++    from backend.services.version_control.governance.audit import AuditService
++
++    context = setup_approval()
++    approve(context)
++    before = tuple(context.store.state.rows)
++    calls = []
++
++    async def fetch(binding, operation_id, start, end):
++        calls.append((binding, operation_id, start, end))
++        if availability == 'unavailable':
++            raise OSError('audit table unavailable')
++        if availability == 'lagging':
++            return []
++        return [
++            {'event_id': 'matching', 'workspace_id': '123', 'space_id': binding.space_id,
++             'operation_id': operation_id, 'recorded_at': to_wire(NOW), 'actor_id': None},
++            {'event_id': 'foreign', 'workspace_id': 'other', 'space_id': binding.space_id,
++             'operation_id': operation_id, 'recorded_at': to_wire(NOW), 'actor_id': 'outsider'},
++        ]
++
++    audit = AuditService(context.facts, context.identity, context.clock.now, fetch)
++    result = await audit.correlate(uid(2), context.identity.actors['requester'])
++    assert calls[0][0] == context.request.binding
++    assert result['authoritative'] is False
++    assert result['actor'] == 'unknown'
++    assert result['availability'] == availability
++    assert [event['event_id'] for event in result['events']] == (['matching'] if availability == 'available' else [])
++    assert tuple(context.store.state.rows) == before
++    assert context.service.authorize(context.request, context.executor).approval_id == uid(2)
++    with pytest.raises(PermissionError):
++        await audit.correlate(uid(2), ActorContext('outsider', 'other', 'human'))
++
++
++def test_scoped_operation_and_break_glass_routes_never_serialize_grants():
++    from datetime import timedelta
++    from fastapi import FastAPI
++    from fastapi.testclient import TestClient
++    from backend.routers.vc_approvals import build_router as approvals_router
++    from backend.routers.vc_operations import build_router as operations_router
++    from backend.services.version_control.governance.audit import AuditService
++
++    context = setup_approval()
++    approve(context)
++    context.identity.memberships[('requester', '123')] = frozenset({'break-glass'})
++    authentication = [AuthenticatedRequest('requester', '123')]
++    app = FastAPI()
++
++    @app.middleware('http')
++    async def authenticate(request, call_next):
++        if authentication[0] is not None:
++            request.state.vc_auth = authentication[0]
++        return await call_next(request)
++
++    async def fetch(*args):
++        return []
++
++    audit = AuditService(context.facts, context.identity, context.clock.now, fetch)
++    app.include_router(approvals_router(context.service, context.identity))
++    app.include_router(operations_router(audit, context.identity))
++    client = TestClient(app)
++    response = client.get(f'/api/vc/operations/{uid(2)}')
++    assert response.status_code == 200
++    assert response.json()['status'] == 'requested'
++    override = BreakGlassRequest(context.request.identity, context.request.binding, 'incident',
++                                 NOW + timedelta(minutes=15), context.bound.preflight_evidence_digest, True)
++    response = client.post('/api/vc/break-glass', json=to_wire(override))
++    assert response.status_code == 202
++    assert response.json() == {'operation_id': uid(2), 'status': 'quarantined', 'job_run_id': None}
++    assert client.get(f'/api/vc/operations/{uid(2)}/audit').status_code == 200
++    authentication[0] = None
++    assert client.get(f'/api/vc/operations/{uid(2)}').status_code == 401
++    assert client.post('/api/vc/break-glass', json=to_wire(override)).status_code == 401
++
++
++@pytest.fixture
++def platform(request):
++    try:
++        return request.getfixturevalue('m06_platform')
++    except pytest.FixtureLookupError:
++        pytest.skip('DEPLOYMENT BLOCKER: supply the real M08 m06_platform fixture; no platform in offline sandbox')
++
++
++@pytest.mark.integration
++@pytest.mark.parametrize('kind', ['approval_request', 'receipt'])
++def test_untrusted_source_cannot_insert_target_approvals_or_receipts(platform, kind):
++    statement, parameters = platform.valid_insert(kind)
++    platform.target_sql(statement, parameters)
++    with pytest.raises(PermissionError):
++        platform.source_sql(statement, parameters)
++    with pytest.raises(PermissionError):
++        platform.source_sql(f"ALTER TABLE {platform.operations_table} SET TBLPROPERTIES ('delta.appendOnly'='false')", {})
++    assert platform.read_approved_export_as_source()
++    with pytest.raises(PermissionError):
++        platform.read_private_evidence_as_source()
++
++
++@pytest.mark.integration
++def test_real_delta_append_only_and_durable_replay(platform):
++    ledger = platform.operation_facts()
++    original = platform.valid_fact()
++    reference = ledger.append(original)
++    assert platform.operation_facts().append(original) == reference
++    assert platform.count_event(original.event_key) == 1
++    with pytest.raises(PermissionError):
++        platform.target_sql(f'DELETE FROM {platform.operations_table} WHERE event_key = :key', {'key': original.event_key})
++    with pytest.raises(PermissionError):
++        platform.target_sql(f'UPDATE {platform.operations_table} SET status = :status WHERE event_key = :key',
++                            {'status': 'confirmed', 'key': original.event_key})
++
++
++@pytest.mark.integration
++def test_real_target_sp_membership_revocation_and_human_identity(platform):
++    service, request, executor, human = platform.approved_production_request()
++    platform.identity.verify_run_as(executor.execution_ref, executor.principal_id)
++    assert platform.authenticated_human().actor_kind == 'human'
++    assert platform.authenticated_service().actor_kind == 'service'
++    assert service.authorize(request, executor).approval_id == request.approval_id
++    with platform.revoke_target_approver_membership(human):
++        with pytest.raises(PermissionError):
++            service.authorize(request, executor)
++
++
++@pytest.mark.integration
++def test_real_delta_and_evidence_volume_outage_disable_authorization(platform):
++    service, request, executor, _ = platform.approved_production_request()
++    with platform.deny_operation_reads():
++        with pytest.raises((PermissionError, OSError)):
++            service.authorize(request, executor)
++    with platform.deny_private_evidence_reads():
++        with pytest.raises((PermissionError, OSError)):
++            service.authorize(request, executor)
++
++
++def test_policy_reviewer_can_read_approval_and_invalid_inputs_are_422():
++    from fastapi import FastAPI
++    from fastapi.testclient import TestClient
++    from backend.routers.vc_approvals import build_router
++
++    context = setup_approval()
++    approval = approve(context)
++    app = FastAPI()
++
++    @app.middleware('http')
++    async def authenticate(request, call_next):
++        request.state.vc_auth = AuthenticatedRequest('human-1', '123')
++        return await call_next(request)
++
++    app.include_router(build_router(context.service, context.identity))
++    client = TestClient(app)
++    assert client.get(f'/api/vc/approvals/{approval.approval_id}').status_code == 200
++    response = client.post('/api/vc/approvals', json={**to_wire(context.bound), 'authorization_grant': {}})
++    assert response.status_code == 422
++    context.identity.memberships.clear()
++    assert client.get(f'/api/vc/approvals/{approval.approval_id}').status_code == 403
++
++    def unavailable(*args):
++        raise OSError('evidence unavailable')
++
++    context.facts.get_request = unavailable
++    response = client.get(f'/api/vc/approvals/{approval.approval_id}')
++    assert response.status_code == 503
++    assert response.json()['detail']['retryable'] is False
++    assert response.json()['detail']['stale'] is True
+diff --git a/backend/tests/test_vc_operation_facts.py b/backend/tests/test_vc_operation_facts.py
+new file mode 100644
+index 0000000..2e37ddc
+--- /dev/null
++++ b/backend/tests/test_vc_operation_facts.py
+@@ -0,0 +1,318 @@
++from dataclasses import replace
++from datetime import datetime, timezone
++from uuid import UUID, uuid5, NAMESPACE_URL
++
++import pytest
++
++from backend.services.version_control.contracts import (
++    AdmissionClaim, CreateIntentRef, FactKind, FactStatus, MutationRequest,
++    ObservationRef, OperationFact, OperationFacts, PatchStage, RequestIdentity, StageEvidence,
++    to_wire,
++)
++from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
++from backend.tests.vc_fakes.stores import (
++    CrashBoundary, FakeFactStore, InjectedCrash, ManualClock,
++)
++
++
++NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
++DIGEST = 'a' * 64
++
++
++def uid(number):
++    return str(UUID(int=number))
++
++
++def fact(**changes):
++    from backend.services.version_control.governance.facts import fact_key
++
++    values = dict(
++        event_id=uid(1), fact_kind=FactKind.OPERATION, operation_id=uid(2),
++        transition_sequence=0, event_key='', binding=binding_fixture(),
++        request=RequestIdentity(uid(2), 'client-key', DIGEST), operation_type='edit',
++        requester_id=actor_fixture().subject_id, actor=actor_fixture(),
++        status=FactStatus.REQUESTED,
++        evidence=StageEvidence('VC/1.0', PatchStage.CONFIG_PENDING, NOW, DIGEST, None),
++        recorded_at=NOW,
++    )
++    values.update(changes)
++    provisional = OperationFact(**values)
++    key = fact_key(provisional)
++    return replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key)))
++
++
++def durable(store=None, enabled=True):
++    from backend.services.version_control.governance.facts import DurableOperationFacts
++
++    store = store or FakeFactStore(ManualClock(NOW))
++
++    def read():
++        store.failures.hit(CrashBoundary.DURING_FOLLOW_UP_READ)
++        return tuple(row.payload for row in store.state.rows)
++
++    return DurableOperationFacts(read, store.append, writes_enabled=enabled), store
++
++
++def test_operation_fact_schema_and_idempotent_append_survive_response_loss():
++    ledger, store = durable()
++    original = fact()
++    store.failures.inject(CrashBoundary.AFTER_COMMIT_BEFORE_RESPONSE)
++    with pytest.raises(InjectedCrash):
++        ledger.append(original)
++    restarted, _ = durable(store)
++    reference = restarted.append(original)
++    assert reference.event_key == original.event_key
++    assert len(store.state.rows) == 1
++    with pytest.raises(ValueError, match='event key'):
++        restarted.append(replace(original, event_key='caller-controlled'))
++    with pytest.raises(ValueError, match='identity'):
++        restarted.append(fact(operation_id=uid(99)))
++    with pytest.raises(ValueError, match='conflict'):
++        restarted.append(replace(original, status=FactStatus.CONFIRMED))
++    store.failures.inject(CrashBoundary.DURING_FOLLOW_UP_READ)
++    with pytest.raises(InjectedCrash):
++        restarted.append(original)
++    assert len(store.state.rows) == 1
++
++
++def test_fact_writes_default_off():
++    from backend.services.version_control.governance.facts import DurableOperationFacts
++
++    ledger = DurableOperationFacts(lambda: (), lambda *args: pytest.fail('write'))
++    with pytest.raises(PermissionError, match='disabled'):
++        ledger.append(fact())
++
++
++def test_completed_request_and_consumed_approval_remain_after_coordination_reuse():
++    ledger, store = durable()
++    initial = fact()
++    request = MutationRequest(initial.request, initial.binding, 'edit', uid(3),
++                              DIGEST, {'instructions': []}, None, uid(4))
++    ledger.record_request(request, initial)
++    consumed = fact(fact_kind=FactKind.APPROVAL_CONSUMED, status=FactStatus.CONSUMED,
++                    approval_id=uid(4), approval_digest=DIGEST,
++                    attempt_id=uid(5), generation=1)
++    ledger.append(consumed)
++    ledger.append(fact(transition_sequence=1, status=FactStatus.CONFIRMED))
++    ledger.append(fact(operation_id=uid(6), request=RequestIdentity(uid(6), 'later', DIGEST)))
++    restarted, _ = durable(store)
++    history = restarted.lookup_request(initial.binding, 'client-key')
++    assert not history.ambiguous
++    assert any(row.status == FactStatus.CONFIRMED for row in history.facts)
++    assert restarted.get_request(uid(2)).request == request
++    use = restarted.approval_use(initial.binding, uid(4))
++    assert use.operation_ids == (uid(2),)
++    assert len(use.consumptions) == 1
++    with pytest.raises(ValueError, match='idempotency'):
++        restarted.append(fact(operation_id=uid(7), request=RequestIdentity(uid(7), 'client-key', 'b' * 64)))
++    store.seed(replace(store.state.rows[0], payload=to_wire(fact(
++        operation_id=uid(8), request=RequestIdentity(uid(8), 'client-key', 'b' * 64)))))
++    assert restarted.lookup_request(initial.binding, 'client-key').ambiguous
++
++
++def test_create_intent_is_durable_without_fake_pre_version():
++    ledger, store = durable()
++    binding = replace(binding_fixture(), space_id=None)
++    provisional = fact(binding=binding, fact_kind=FactKind.CREATE_INTENT, operation_type='create')
++    intent = CreateIntentRef(provisional.event_id, uid(2), binding.binding_id, 1, DIGEST)
++    created = replace(provisional, evidence=intent)
++    ledger.append(created)
++    restarted, _ = durable(store)
++    assert restarted.lookup_request(binding, 'client-key').facts == (created,)
++    assert created.pre_version_id is None
++    with pytest.raises(ValueError, match='create intent'):
++        durable()[0].append(replace(created, pre_version_id=uid(10)))
++    with pytest.raises(ValueError, match='create intent'):
++        durable()[0].append(replace(created, evidence=fact().evidence))
++    with pytest.raises(ValueError, match='create intent'):
++        durable()[0].append(replace(created, evidence=replace(intent, binding_revision=2)))
++
++
++class ClaimConsumer:
++    def __init__(self, facts: OperationFacts, claim):
++        self.facts = facts
++        self.claim = claim
++        self.unresolved = True
++
++    def finish(self):
++        self.facts.publish_consumption(self.claim)
++        if not self.facts.verify_flush(self.claim):
++            raise PermissionError('Unflushed claim must remain unresolved')
++        self.unresolved = False
++
++
++@pytest.mark.parametrize('boundary', list(CrashBoundary))
++def test_consumption_publish_failure_retains_unresolved_claim(boundary):
++    from backend.tests.test_vc_approvals import approve, setup_approval
++
++    context = setup_approval()
++    approve(context)
++    grant = context.service.authorize(context.request, context.executor)
++    observation = ObservationRef(uid(3), grant.binding.binding_id, 1,
++                                 context.request.expected_base, DIGEST)
++    claim = AdmissionClaim(grant.binding.binding_id, 1, uid(5), 1, 2,
++                           grant.request, observation, grant.approval_id, grant.approval_digest)
++    consumer = ClaimConsumer(context.facts, claim)
++    assert not context.facts.verify_flush(claim)
++    context.store.failures.inject(boundary)
++    with pytest.raises(InjectedCrash):
++        consumer.finish()
++    assert consumer.unresolved
++    restarted, _ = durable(context.store)
++    consumer.facts = restarted
++    consumer.finish()
++    assert not consumer.unresolved
++    assert restarted.verify_flush(claim)
++    assert len(restarted.approval_use(grant.binding, grant.approval_id).consumptions) == 1
++    assert not restarted.verify_flush(replace(claim, generation=2))
++    with pytest.raises((PermissionError, ValueError)):
++        restarted.publish_consumption(replace(claim, attempt_id=uid(55), generation=2))
++    context.service.facts = restarted
++    with pytest.raises(PermissionError, match='consumed'):
++        context.service.authorize(context.request, context.executor)
++
++
++def test_target_delta_adapter_and_owned_ddl_are_append_only_and_default_off():
++    import json
++    from pathlib import Path
++    from backend.services.version_control.governance.delta import DeltaFactStore
++
++    ddl = Path('backend/version_control_ddl/06-operations.sql').read_text()
++    volume = Path('backend/version_control_ddl/07-approval-evidence-volume.sql').read_text()
++    assert ddl.count('CREATE TABLE') == 1
++    assert "'delta.appendOnly'='true'" in ddl
++    for column in ('event_key', 'transition_sequence', 'target_workspace', 'idempotency_key',
++                   'request_digest', 'approval_digest', 'evidence_json', 'generation'):
++        assert column in ddl
++    assert 'vc_approval_evidence' in volume and volume.count('CREATE VOLUME') == 1
++    calls = []
++
++    def sql(statement, parameters):
++        calls.append((statement, parameters))
++        if statement.startswith('SELECT'):
++            return [{'evidence_json': calls[0][1]['evidence_json']}]
++        return []
++
++    store = DeltaFactStore(sql, 'catalog', 'control', '123')
++    with pytest.raises(PermissionError, match='disabled'):
++        store.append(fact().event_key, to_wire(fact()))
++    assert calls == []
++    store = DeltaFactStore(sql, 'catalog', 'control', '123', writes_enabled=True)
++    store.append(fact().event_key, to_wire(fact()))
++    assert calls[0][0].startswith('INSERT INTO `catalog`.`control`.`genie_space_operations`')
++    assert json.loads(calls[0][1]['evidence_json'])['schema_version'] == 'VC/1.0'
++    assert store.read() == (to_wire(fact()),)
++    assert all(not statement.startswith(('UPDATE', 'DELETE', 'MERGE')) for statement, _ in calls)
++    with pytest.raises(PermissionError, match='target'):
++        store.append(fact().event_key, to_wire(fact(binding=replace(binding_fixture(), workspace_id='source'))))
++    with pytest.raises(ValueError):
++        DeltaFactStore(sql, 'catalog; DROP TABLE x', 'control', '123')
++
++
++@pytest.mark.parametrize('mode', ['dev', 'break-glass'])
++def test_consumption_flush_supports_bound_dev_and_break_glass_grants(mode):
++    from datetime import timedelta
++    from backend.services.version_control.contracts import ActorContext, BreakGlassRequest
++    from backend.tests.test_vc_approvals import setup_approval, submit
++
++    context = setup_approval(environment='dev' if mode == 'dev' else 'prod')
++    submit(context)
++    if mode == 'dev':
++        grant = context.service.authorize(context.request, context.executor)
++    else:
++        actor = ActorContext('emergency-human', '123', 'human')
++        context.identity.memberships[(actor.subject_id, '123')] = frozenset({'break-glass'})
++        override = BreakGlassRequest(context.request.identity, context.request.binding, 'incident',
++                                     NOW + timedelta(minutes=15), context.bound.preflight_evidence_digest, True)
++        grant = context.service.break_glass(override, actor)
++    observation = ObservationRef(uid(3), grant.binding.binding_id, 1, context.request.expected_base, DIGEST)
++    claim = AdmissionClaim(grant.binding.binding_id, 1, uid(5), 1, 2,
++                           grant.request, observation, grant.approval_id, grant.approval_digest)
++    reference = context.facts.publish_consumption(claim)
++    restarted, _ = durable(context.store)
++    assert restarted.publish_consumption(claim) == reference
++    assert restarted.verify_flush(claim)
++    with pytest.raises(PermissionError):
++        restarted.publish_consumption(replace(claim, attempt_id=uid(55)))
++
++
++@pytest.mark.parametrize('kind', [FactKind.APPROVAL_REQUEST, FactKind.APPROVAL_VOTE,
++                                 FactKind.APPROVAL_GRANTED, FactKind.APPROVAL_INVALIDATED,
++                                 FactKind.RELEASE, FactKind.RECEIPT, FactKind.BREAK_GLASS,
++                                 FactKind.RECOVERY])
++def test_fact_kind_rejects_unrelated_typed_evidence(kind):
++    ledger, store = durable()
++    with pytest.raises(ValueError, match='evidence'):
++        ledger.append(fact(fact_kind=kind))
++    assert store.state.rows == []
++
++
++@pytest.mark.parametrize('fault', ['missing-reader', 'corrupted', 'outage', 'foreign-volume', 'traversal'])
++def test_private_evidence_loss_fails_closed_at_durable_read(fault):
++    import json
++    from hashlib import sha256
++    from backend.services.version_control.governance.delta import DeltaFactStore
++
++    content = b'private-preflight-evidence'
++    uri = '/Volumes/catalog/control/vc_approval_evidence/preflight.json'
++    evidence = fact(evidence_uri=uri, evidence_digest=sha256(content).hexdigest())
++    payload = to_wire(evidence)
++    sql = lambda *args: [{'evidence_json': json.dumps({'schema_version': 'VC/1.0', 'fact': payload})}]
++    seen = []
++
++    def read(uri):
++        seen.append(uri)
++        return content
++
++    adapter = DeltaFactStore(sql, 'catalog', 'control', '123', read_evidence=read)
++    assert adapter.read() == (payload,)
++    assert seen == [uri]
++    if fault == 'missing-reader':
++        adapter = DeltaFactStore(sql, 'catalog', 'control', '123')
++    elif fault == 'corrupted':
++        content = b'changed'
++    elif fault == 'outage':
++        def read(uri):
++            raise OSError('Volume unavailable')
++        adapter = DeltaFactStore(sql, 'catalog', 'control', '123', read_evidence=read)
++    elif fault == 'foreign-volume':
++        payload['evidence_uri'] = '/Volumes/catalog/control/export/preflight.json'
++    else:
++        payload['evidence_uri'] = uri + '/../other.json'
++    with pytest.raises((PermissionError, ValueError, OSError)):
++        adapter.read()
++
++
++@pytest.mark.parametrize('fault', ['generation', 'approval_digest', 'missing_claim'])
++def test_flush_rejects_ambiguous_or_tampered_consumption_rows(fault):
++    from backend.tests.test_vc_approvals import approve, setup_approval
++
++    context = setup_approval()
++    approve(context)
++    grant = context.service.authorize(context.request, context.executor)
++    observation = ObservationRef(uid(3), grant.binding.binding_id, 1, context.request.expected_base, DIGEST)
++    claim = AdmissionClaim(grant.binding.binding_id, 1, uid(5), 1, 2,
++                           grant.request, observation, grant.approval_id, grant.approval_digest)
++    context.facts.publish_consumption(claim)
++    committed = context.store.state.rows[-1]
++    payload = to_wire(committed.payload)
++    if fault == 'missing_claim':
++        payload.pop('admission_claim')
++    elif fault == 'generation':
++        payload['generation'] = 9
++    else:
++        payload['approval_digest'] = 'b' * 64
++    context.store.seed(replace(committed, payload=payload))
++    assert not context.facts.verify_flush(claim)
++
++
++def test_different_request_payload_is_rejected_before_any_append():
++    from backend.tests.test_vc_approvals import setup_approval
++
++    context = setup_approval()
++    before = tuple(context.store.state.rows)
++    different = replace(context.request, description='tampered')
++    with pytest.raises(ValueError, match='request'):
++        context.facts.record_request(different, fact(binding=different.binding, request=different.identity,
++                                                    transition_sequence=8))
++    assert tuple(context.store.state.rows) == before
+diff --git a/backend/version_control_ddl/06-operations.sql b/backend/version_control_ddl/06-operations.sql
+new file mode 100644
+index 0000000..3eeaa04
+--- /dev/null
++++ b/backend/version_control_ddl/06-operations.sql
+@@ -0,0 +1,45 @@
++CREATE TABLE IF NOT EXISTS ${catalog}.${control_schema}.genie_space_operations (
++  event_id STRING NOT NULL,
++  fact_kind STRING NOT NULL,
++  operation_id STRING NOT NULL,
++  transition_sequence BIGINT NOT NULL,
++  event_key STRING NOT NULL,
++  space_key STRING NOT NULL,
++  binding_id STRING NOT NULL,
++  binding_revision BIGINT NOT NULL,
++  target_workspace STRING NOT NULL,
++  idempotency_key STRING NOT NULL,
++  request_digest STRING NOT NULL,
++  operation_type STRING NOT NULL,
++  attempt_id STRING,
++  generation BIGINT,
++  coordination_backend STRING NOT NULL,
++  requested_base_fingerprint STRING,
++  desired_artifact_fingerprint STRING,
++  mapping_fingerprint STRING,
++  transformer_version STRING,
++  test_policy_fingerprint STRING,
++  pre_version_id STRING,
++  post_version_id STRING,
++  approval_id STRING,
++  approval_digest STRING,
++  approval_reference STRING,
++  release_id STRING,
++  job_run_id STRING,
++  requester_id STRING NOT NULL,
++  actor_id STRING NOT NULL,
++  actor_kind STRING NOT NULL,
++  status STRING NOT NULL,
++  drift_override BOOLEAN NOT NULL,
++  evidence_json STRING NOT NULL,
++  evidence_uri STRING,
++  evidence_digest STRING,
++  recorded_at TIMESTAMP NOT NULL,
++  CONSTRAINT operations_backend CHECK (coordination_backend = 'delta'),
++  CONSTRAINT operation_sequence CHECK (transition_sequence >= 0),
++  CONSTRAINT operation_binding_revision CHECK (binding_revision > 0),
++  CONSTRAINT operation_fact CHECK (fact_kind IN
++    ('operation','create_intent','approval_request','approval_vote',
++     'approval_granted','approval_consumed','approval_invalidated',
++     'release','receipt','acknowledgement','break_glass','recovery'))
++) USING DELTA TBLPROPERTIES ('delta.appendOnly'='true');
+diff --git a/backend/version_control_ddl/07-approval-evidence-volume.sql b/backend/version_control_ddl/07-approval-evidence-volume.sql
+new file mode 100644
+index 0000000..7ffc414
+--- /dev/null
++++ b/backend/version_control_ddl/07-approval-evidence-volume.sql
+@@ -0,0 +1 @@
++CREATE VOLUME IF NOT EXISTS ${catalog}.${control_schema}.vc_approval_evidence;

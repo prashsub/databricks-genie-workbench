@@ -1,0 +1,1735 @@
+diff --git a/backend/services/version_control/coordination/TDD.md b/backend/services/version_control/coordination/TDD.md
+new file mode 100644
+index 0000000..77f1ff4
+--- /dev/null
++++ b/backend/services/version_control/coordination/TDD.md
+@@ -0,0 +1,18 @@
++# M03 TDD execution record
++
++All pytest commands use `. .venv/bin/activate && python -m pytest`.
++
++1. `backend/tests/test_vc_coordination.py -q`: RED missing coordination package; GREEN 1 collected case passed. Enrollment is an injected serialized authority, not an informational Delta key.
++2. `backend/tests/test_vc_coordination.py -q -k test_two_concurrent_reservations_have_exactly_one_winner`: RED zero winners; GREEN full file 2 cases. Barrier race, durable loser fact, lying statement return rejected by read-back.
++3. `backend/tests/test_vc_coordination.py -q -k test_same_sp_stale_attempt_cannot_renew_or_patch`: RED missing renew (3 parameters); GREEN full file 5 cases. Attempt, generation and revision fence shared-SP workers.
++4. `backend/tests/test_vc_coordination.py -q -k test_reservation_is_not_admission_and_requires_committed_preimage`: RED missing admit; GREEN full file 7 cases, including typed provisional create intent.
++5. `backend/tests/test_vc_coordination.py -q -k test_admission_atomically_binds_key_digest_approval_and_preimage`: RED revoked grant admitted; GREEN full file 8 cases. All authorizing columns in one CAS, expired/mismatched grants and forged claims rejected.
++6. `backend/tests/test_vc_coordination.py -q -k test_same_key_different_digest_rejected_after_row_reuse`: RED missing finish; GREEN full file 9 cases. Append/read-back receipt before reuse; reconstructed service rejects changed digest using durable facts.
++7. `backend/tests/test_vc_coordination.py -q -k test_duplicate_completed_request_returns_receipt_without_admission`: RED missing ExistingReceipt; GREEN full file 10 cases. Frozen reserve return type resolved with typed ExistingReceipt carrying original durable receipt (not a new Reservation/AdmissionClaim).
++8. `backend/tests/test_vc_coordination.py -q -k test_consumed_approval_survives_row_reuse_and_crash`: RED consumption never published (3 cases); GREEN full file 13 cases. Admission publishes/flush-verifies consumption before returning; failures quarantine retained claim; finish re-verifies before release.
++9. `backend/tests/test_vc_recovery.py -q -k test_expired_lease_quarantines_without_takeover`: RED expiry left admitted row (3 cases); GREEN both unit files 16 cases. Reserve/renew/assert expiry quarantines retained attempt and emits durable fact, never takes over.
++10. `backend/tests/test_vc_recovery.py -q -k test_matching_get_after_timeout_cannot_resolve_attempt`: RED missing recover; GREEN both files 17 cases. Matching GET cannot replace trusted termination or finish a quarantined claim.
++11. `backend/tests/test_vc_recovery.py -q -k test_recovery_needs_exact_attempt_termination_and_three_post_termination_reads`: RED valid app/Job recovery unavailable (2 failed, 8 negatives already passed); GREEN both files 27 cases. Exact trusted retry/child closure or worker proof, strictly ordered post-termination stable reads spanning > deployment-verified bound; audit then generation bump. Test capability is synthetic; production default None. Refactor normalized AdmissionClaim subtype to FenceToken before recovery wire persistence.
++12. `backend/tests/test_vc_recovery.py -q -k test_unknown_request_lifetime_disables_auto_clear`: RED audited human path unavailable (1 failed, 4 negatives passed); GREEN both files 32 cases. No deployment lifetime configured: auto-clear disabled even with caller reference. Human exception requires trusted policy, reason, risk acknowledgement, exact termination and >=3 stable post-termination observations; only verified-lifetime span is waived and auditable.
++13. `backend/tests/test_vc_coordination.py -q -k "test_crashes_between_evidence_cas_consumption_patch_and_release_remain_safe or test_checkpoint" --tb=short`: RED missing stage validation port/checkpoint (21 cases); GREEN `backend/tests/test_vc_coordination.py backend/tests/test_vc_recovery.py -q --tb=short` 53 cases. Eighteen boundary cases cover evidence, CAS, consumption, intent, receipt, release; monotonic checkpoints never replay. In-flight finish quarantines even matching GET. StageEvidence has no send-response field, so injected trusted digest verifier must prove synchronous completion; absent verifier fails closed. No M04 implementation import.
++14. `backend/tests/test_vc_coordination.py -q -k test_observer_cannot_regress_or_approve_heads --tb=short`: RED missing observation lease; GREEN both files 54 cases. Observer leases serialize with managed attempts, committed version attempt/generation/parent must match, observed only, delayed holder rejected. advance_heads finalizes an observer lease; approved/deployed require injected policy and verified deployment evidence.
+diff --git a/backend/services/version_control/coordination/__init__.py b/backend/services/version_control/coordination/__init__.py
+new file mode 100644
+index 0000000..9a85b77
+--- /dev/null
++++ b/backend/services/version_control/coordination/__init__.py
+@@ -0,0 +1,4 @@
++"""VC/1.0 coordination authority. Production ports must use durable Delta storage."""
++from .service import CoordinationService, CoordinationError, ExistingReceipt
++
++__all__ = ['CoordinationService', 'CoordinationError', 'ExistingReceipt']
+diff --git a/backend/services/version_control/coordination/row.py b/backend/services/version_control/coordination/row.py
+new file mode 100644
+index 0000000..7b93c32
+--- /dev/null
++++ b/backend/services/version_control/coordination/row.py
+@@ -0,0 +1,40 @@
++"""Internal Delta row representation; no credentials or process-local authority."""
++from dataclasses import dataclass, field
++from datetime import datetime
++from backend.services.version_control.contracts import (
++    BindingRef, CoordinationState, Digest, Heads, JsonObject, NonnegativeInt,
++    PatchStage, UUIDString, WireValue,
++)
++
++
++@dataclass(frozen=True)
++class CoordinationRow(WireValue):
++    binding: BindingRef
++    updated_at: datetime
++    generation: NonnegativeInt = 0
++    row_version: NonnegativeInt = 0
++    state: CoordinationState = CoordinationState.IDLE
++    holder: str | None = None
++    attempt_id: UUIDString | None = None
++    executor_kind: str | None = None
++    executor_ref: str | None = None
++    lease_expires_at: datetime | None = None
++    active_operation_id: UUIDString | None = None
++    idempotency_key: str | None = None
++    request_digest: Digest | None = None
++    approval_id: UUIDString | None = None
++    approval_digest: Digest | None = None
++    approval_consumption_published: bool = False
++    pre_version_id: UUIDString | None = None
++    preimage_digest: Digest | None = None
++    create_intent_event_id: UUIDString | None = None
++    expected_base_fingerprint: Digest | None = None
++    admitted_at: datetime | None = None
++    mutation_stage: PatchStage | None = None
++    checkpoint: JsonObject | None = None
++    unresolved: bool = False
++    quarantine_reason: str | None = None
++    termination_evidence: JsonObject | None = None
++    heads: Heads = field(default_factory=lambda: Heads(None, None, None))
++    observed_sequence: NonnegativeInt = 0
++
+diff --git a/backend/services/version_control/coordination/service.py b/backend/services/version_control/coordination/service.py
+new file mode 100644
+index 0000000..34a0ee4
+--- /dev/null
++++ b/backend/services/version_control/coordination/service.py
+@@ -0,0 +1,476 @@
++"""Synchronous, fail-closed coordination. Never sends a Genie mutation."""
++from dataclasses import replace
++from datetime import timedelta
++from math import isfinite
++from uuid import uuid4
++
++from backend.services.version_control import contracts as c
++from .row import CoordinationRow
++
++
++class CoordinationError(RuntimeError):
++    """No write authority may be inferred from a failed coordination call."""
++
++
++class OwnershipError(CoordinationError):
++    pass
++
++
++class AuthorityUnavailable(CoordinationError):
++    pass
++
++
++class ExistingReceipt(CoordinationError):
++    """Non-admitting result channel; preserves the frozen reserve() return type."""
++
++    def __init__(self, receipt: c.OperationFact):
++        super().__init__('Request already completed; return original durable receipt')
++        self.receipt = receipt
++
++
++class CoordinationService:
++    def __init__(self, *, store, facts: c.OperationFacts, ledger: c.VersionLedger,
++                 clock, resolve_binding, verify_enrollment, insert_enrolled,
++                 validate_authorization, verify_create_intent,
++                 termination: c.TerminationEvidenceProvider,
++                 authorize_human_recovery, authorize_heads,
++                 verified_request_lifetime: tuple[float, str] | None = None,
++                 validate_stage_evidence=None):
++        self.store = store
++        self.facts = facts
++        self.ledger = ledger
++        self.clock = clock
++        self.resolve_binding = resolve_binding
++        self.verify_enrollment = verify_enrollment
++        self.insert_enrolled = insert_enrolled
++        self.validate_authorization = validate_authorization
++        self.verify_create_intent = verify_create_intent
++        self.termination = termination
++        self.authorize_human_recovery = authorize_human_recovery
++        self.authorize_heads = authorize_heads
++        self.validate_stage_evidence = validate_stage_evidence
++        # Deployment-owned verified capability, NEVER copied from RecoveryEvidence.
++        self.verified_request_lifetime = verified_request_lifetime
++
++    @staticmethod
++    def _io(call, *args, **kwargs):
++        try:
++            return call(*args, **kwargs)
++        except CoordinationError:
++            raise
++        except Exception as exc:
++            raise AuthorityUnavailable('Durable authority unavailable or ambiguous') from exc
++
++    def _current(self, binding):
++        if self._io(self.resolve_binding, binding.binding_id) != binding:
++            raise OwnershipError('Not the unique current binding/revision')
++
++    def _row(self, binding):
++        self._current(binding)
++        row = self._io(self.store.read, binding.binding_id)
++        if row is None or row.binding != binding:
++            raise OwnershipError('Missing ownership row or revision mismatch')
++        return row
++
++    def initialize(self, binding: c.BindingRef, enrollment: c.EnrollmentProof) -> None:
++        # The callback verifies a held serialized enrollment authority, including
++        # unique physical ownership. A proof string alone is not a lock.
++        if ((enrollment.binding_id, enrollment.binding_revision) !=
++                (binding.binding_id, binding.binding_revision)
++                or not self._io(self.verify_enrollment, binding, enrollment)):
++            raise OwnershipError('Serialized enrollment proof required')
++        self._current(binding)
++        row = self._io(self.store.read, binding.binding_id)
++        if row is None:
++            self._io(self.insert_enrolled, CoordinationRow(binding, self.clock.now()))
++        self._row(binding)
++
++    def _cas(self, row, predicate, **changes):
++        result = self._io(self.store.compare_and_swap, row.binding.binding_id,
++                          row.binding.binding_revision, row.row_version,
++                          row.generation, predicate, **changes)
++        if result is None:
++            raise OwnershipError('Serializable CAS lost; do not retry acquisition')
++        observed = self._row(row.binding)
++        if (observed.row_version != row.row_version + 1
++                or observed.holder != changes.get('holder', row.holder)
++                or observed.attempt_id != changes.get('attempt_id', row.attempt_id)
++                or observed.generation != changes.get('generation', row.generation)
++                or any(getattr(observed, key) != value for key, value in changes.items())):
++            raise AuthorityUnavailable('CAS read-back did not prove exact ownership/claim')
++        return observed
++
++    @staticmethod
++    def _fence(row):
++        return c.FenceToken(row.binding.binding_id, row.binding.binding_revision,
++                            row.attempt_id, row.generation, row.row_version)
++
++    def _fact(self, row, request, status, *, evidence=None, kind=c.FactKind.OPERATION,
++              post_version_id=None):
++        stage = row.mutation_stage or c.PatchStage.CONFIG_PENDING
++        if evidence is None:
++            evidence = c.StageEvidence('VC/1.0', stage, self.clock.now(),
++                c.canonical_json_hash('vc-coordination/1', {
++                    'status': status.value, 'attempt': row.attempt_id,
++                    'row_version': row.row_version}), None)
++        key = f'{request.operation_id}:{row.attempt_id}:{row.row_version}:{status.value}'
++        fact = c.OperationFact(str(uuid4()), kind, request.operation_id,
++            row.row_version, key, row.binding, request, 'coordination',
++            row.holder or 'coordination',
++            c.ActorContext(row.holder or 'coordination', row.binding.workspace_id,
++                           row.executor_kind or 'service'), status, evidence,
++            self.clock.now(), attempt_id=row.attempt_id, generation=row.generation,
++            pre_version_id=row.pre_version_id, post_version_id=post_version_id,
++            approval_id=row.approval_id, approval_digest=row.approval_digest)
++        return self._io(self.facts.append, fact)
++
++    def reserve(self, binding: c.BindingRef, operation: c.RequestIdentity,
++                executor: c.ExecutorContext) -> c.Reservation:
++        row = self._expire(self._row(binding))
++        if executor.workspace_id != binding.workspace_id or not executor.execution_ref:
++            raise OwnershipError('Explicit target-local executor required')
++        try:
++            if row.state != c.CoordinationState.IDLE or row.unresolved:
++                raise OwnershipError('An unresolved attempt already owns this binding')
++            row = self._cas(row,
++                lambda r: r.state == c.CoordinationState.IDLE and not r.unresolved,
++                state=c.CoordinationState.RESERVED, unresolved=True,
++                generation=row.generation + 1, attempt_id=str(uuid4()),
++                holder=executor.principal_id, executor_kind=executor.actor_kind,
++                executor_ref=executor.execution_ref,
++                lease_expires_at=self.clock.now() + timedelta(seconds=60),
++                active_operation_id=operation.operation_id,
++                idempotency_key=operation.idempotency_key, request_digest=operation.request_digest)
++        except OwnershipError:
++            self._fact(row, operation, c.FactStatus.CONFLICTED)
++            raise
++        history = self._history(row, operation)
++        receipts = [f for f in history.facts if f.fact_kind == c.FactKind.RECEIPT]
++        if receipts:
++            identities = {(f.operation_id, f.status, f.post_version_id) for f in receipts}
++            if len(identities) != 1:
++                raise CoordinationError('Ambiguous completed receipts')
++            self._release(row)  # This reservation never acquired write authority.
++            raise ExistingReceipt(receipts[0])
++        return c.Reservation(self._fence(row), operation, executor, row.lease_expires_at)
++
++    def _owned(self, fence, *, allow_quarantine=False):
++        binding = self._io(self.resolve_binding, fence.binding_id)
++        row = self._row(binding)
++        if not allow_quarantine:
++            row = self._expire(row)
++        if ((row.binding.binding_revision, row.attempt_id, row.generation) !=
++                (fence.binding_revision, fence.attempt_id, fence.generation)
++                or fence.row_version > row.row_version or not row.unresolved
++                or row.state == c.CoordinationState.IDLE
++                or (row.state == c.CoordinationState.QUARANTINED and not allow_quarantine)):
++            raise OwnershipError('Stale attempt/revision/generation or quarantined claim')
++        if not allow_quarantine and (row.lease_expires_at is None or
++                                    row.lease_expires_at <= self.clock.now()):
++            raise OwnershipError('Expired lease; no takeover or renewal')
++        return row
++
++    def renew(self, claim: c.FenceToken) -> c.FenceToken:
++        row = self._owned(claim)
++        updated = self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
++                           lease_expires_at=self.clock.now() + timedelta(seconds=60))
++        return self._fence(updated)
++
++    def assert_owner(self, claim: c.FenceToken) -> None:
++        row = self._owned(claim)
++        if not isinstance(claim, c.AdmissionClaim) or row.state != c.CoordinationState.ADMITTED:
++            raise OwnershipError('Reservation/observation is not write admission')
++        if (claim.request != self._request(row)
++                or (claim.approval_id, claim.approval_digest) != (row.approval_id, row.approval_digest)
++                or (isinstance(claim.preimage, c.ObservationRef) and
++                    (claim.preimage.version_id, claim.preimage.state_digest) !=
++                    (row.pre_version_id, row.preimage_digest))
++                or (isinstance(claim.preimage, c.CreateIntentRef) and
++                    claim.preimage.event_id != row.create_intent_event_id)):
++            raise OwnershipError('Admission claim differs from durable row')
++
++    @staticmethod
++    def _request(row):
++        return c.RequestIdentity(row.active_operation_id, row.idempotency_key, row.request_digest)
++
++    def admit(self, reservation: c.Reservation,
++              preimage: c.ObservationRef | c.CreateIntentRef,
++              authorization: c.AuthorizationGrant) -> c.AdmissionClaim:
++        row = self._owned(reservation.fence)
++        if row.state != c.CoordinationState.RESERVED:
++            raise OwnershipError('Only a reservation can be admitted; no replay')
++        if (reservation.request != self._request(row)
++                or reservation.executor.principal_id != row.holder
++                or reservation.executor.execution_ref != row.executor_ref
++                or authorization.binding != row.binding
++                or authorization.request != reservation.request
++                or authorization.expires_at <= self.clock.now()
++                or bool(authorization.approval_id) != bool(authorization.approval_digest)
++                or not self._io(self.validate_authorization, authorization, reservation.executor)):
++            raise CoordinationError('Authorization is stale, mismatched or revoked')
++        if (preimage.binding_id, preimage.binding_revision) != (
++                row.binding.binding_id, row.binding.binding_revision):
++            raise OwnershipError('Preimage belongs to another binding/revision')
++        if isinstance(preimage, c.ObservationRef):
++            if not self._io(self.ledger.verify_committed, preimage):
++                raise CoordinationError('Preimage not committed')
++            if preimage.state_digest != authorization.expected_base_fingerprints.state_digest:
++                self._fact(row, reservation.request, c.FactStatus.CONFLICTED)
++                raise CoordinationError('Committed preimage differs from reviewed base')
++            evidence = dict(pre_version_id=preimage.version_id,
++                            preimage_digest=preimage.state_digest, create_intent_event_id=None)
++        elif isinstance(preimage, c.CreateIntentRef):
++            if (row.binding.space_id is not None
++                    or preimage.operation_id != reservation.request.operation_id
++                    or preimage.request_digest != reservation.request.request_digest
++                    or not self._io(self.verify_create_intent, preimage)):
++                raise CoordinationError('Committed provisional create intent required')
++            evidence = dict(pre_version_id=None, preimage_digest=None,
++                            create_intent_event_id=preimage.event_id)
++        else:
++            raise CoordinationError('Unsupported committed evidence')
++        self._history(row, reservation.request)
++        if authorization.approval_id is not None:
++            use = self._io(self.facts.approval_use, row.binding, authorization.approval_id)
++            if use.ambiguous or use.consumptions or use.operation_ids:
++                raise CoordinationError('Consumed or ambiguous approval cannot authorize another attempt')
++        row = self._cas(row, lambda r: (r.state == c.CoordinationState.RESERVED
++            and r.lease_expires_at > self.clock.now()
++            and authorization.expires_at > self.clock.now()),
++            state=c.CoordinationState.ADMITTED,
++            active_operation_id=reservation.request.operation_id,
++            idempotency_key=reservation.request.idempotency_key,
++            request_digest=reservation.request.request_digest,
++            approval_id=authorization.approval_id, approval_digest=authorization.approval_digest,
++            expected_base_fingerprint=authorization.expected_base_fingerprints.state_digest,
++            admitted_at=self.clock.now(), mutation_stage=c.PatchStage.CONFIG_PENDING,
++            checkpoint={'schema_version': 'VC/1.0', 'preimage': c.to_wire(preimage)},
++            **evidence)
++        claim = c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
++            row.attempt_id, row.generation, row.row_version, reservation.request,
++            preimage, row.approval_id, row.approval_digest)
++        try:
++            self._publish_consumption(claim)
++        except CoordinationError:
++            self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
++                      state=c.CoordinationState.QUARANTINED,
++                      quarantine_reason='Consumption publication failed/ambiguous')
++            raise
++        return claim
++
++    def _publish_consumption(self, claim):
++        self._io(self.facts.publish_consumption, claim)
++        if not self._io(self.facts.verify_flush, claim):
++            raise AuthorityUnavailable('Consumption facts not durably verified')
++
++    def _history(self, row, request):
++        history = self._io(self.facts.lookup_request, row.binding, request.idempotency_key)
++        if history.ambiguous:
++            raise CoordinationError('Ambiguous durable request history')
++        if any(f.request.request_digest != request.request_digest for f in history.facts):
++            self._fact(row, request, c.FactStatus.CONFLICTED)
++            raise CoordinationError('Idempotency key already bound to a different request digest')
++        return history
++
++    def _release(self, row, *, generation=None):
++        # Never erase heads or the monotonically increasing fence/observer sequence.
++        return self._cas(row, lambda r: r.attempt_id == row.attempt_id,
++            state=c.CoordinationState.IDLE, unresolved=False,
++            generation=row.generation if generation is None else generation,
++            holder=None, attempt_id=None, executor_kind=None, executor_ref=None,
++            lease_expires_at=None, active_operation_id=None, idempotency_key=None,
++            request_digest=None, approval_id=None, approval_digest=None,
++            approval_consumption_published=False, pre_version_id=None, preimage_digest=None,
++            create_intent_event_id=None, expected_base_fingerprint=None, admitted_at=None,
++            mutation_stage=None, checkpoint=None, quarantine_reason=None, termination_evidence=None)
++
++    def finish(self, claim: c.AdmissionClaim, result: c.OperationResult) -> None:
++        self.assert_owner(claim)
++        row = self._owned(claim)
++        if (row.mutation_stage in {c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
++                or result.unresolved or result.status in {
++                    c.OperationStatus.APPLIED_UNVERIFIED, c.OperationStatus.APPLIED_PARTIAL}):
++            self._quarantine_row(row, 'Possible send remains unresolved; GET cannot prove termination')
++            raise CoordinationError('In-flight or ambiguous result cannot release the attempt')
++        if (result.operation_id != row.active_operation_id or result.preimage != claim.preimage
++                or result.unresolved or result.status not in {
++                    c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP,
++                    c.OperationStatus.CONFLICTED, c.OperationStatus.FAILED}):
++            raise CoordinationError('Not a resolved terminal result')
++        if result.postimage is not None:
++            if ((result.postimage.binding_id, result.postimage.binding_revision) !=
++                    (row.binding.binding_id, row.binding.binding_revision)
++                    or not self._io(self.ledger.verify_committed, result.postimage)):
++                raise CoordinationError('Terminal observation not committed to this binding')
++        elif result.status in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP}:
++            raise CoordinationError('Successful completion requires committed postimage')
++        self._publish_consumption(claim)
++        ref = self._fact(row, claim.request, c.FactStatus(result.status.value),
++                         kind=c.FactKind.RECEIPT,
++                         post_version_id=result.postimage.version_id if result.postimage else None)
++        history = self._history(row, claim.request)
++        if not any(f.event_id == ref.event_id for f in history.facts):
++            raise AuthorityUnavailable('Terminal receipt publication not verified')
++        self._release(row)
++
++    def _expire(self, row):
++        if (row.state not in {c.CoordinationState.IDLE, c.CoordinationState.QUARANTINED}
++                and (row.lease_expires_at is None or row.lease_expires_at <= self.clock.now())):
++            return self._quarantine_row(row, 'Lease expired; termination is unproven')
++        return row
++
++    def _quarantine_row(self, row, reason):
++        if not reason.strip():
++            raise CoordinationError('Quarantine reason is mandatory')
++        row = self._cas(row, lambda r: r.attempt_id == row.attempt_id,
++                        state=c.CoordinationState.QUARANTINED, unresolved=True,
++                        quarantine_reason=reason)
++        if row.active_operation_id is not None:
++            self._fact(row, self._request(row), c.FactStatus.QUARANTINED)
++        return row
++
++    def quarantine(self, claim: c.FenceToken, reason: str) -> None:
++        row = self._owned(claim, allow_quarantine=True)
++        self._quarantine_row(row, reason)
++
++    def recover(self, binding: c.BindingRef, evidence: c.RecoveryEvidence) -> c.RecoveryResult:
++        self._current(binding)
++        if evidence.fence.binding_id != binding.binding_id:
++            raise OwnershipError('Recovery fence belongs to another binding')
++        row = self._owned(evidence.fence, allow_quarantine=True)
++        if row.binding != binding or row.state != c.CoordinationState.QUARANTINED:
++            raise OwnershipError('Only the quarantined exact attempt can be recovered')
++        trusted = self._io(self.termination.for_attempt, row.executor_ref, row.attempt_id)
++        if (trusted is None or trusted != evidence.termination
++                or trusted.attempt_id != row.attempt_id or trusted.execution_ref != row.executor_ref):
++            raise CoordinationError('Trusted termination of the exact prior attempt is required')
++        self._validate_termination(trusted)
++        human = bool(evidence.human_authorization_reference and evidence.human_reason
++                     and evidence.human_reason.strip() and evidence.residual_risk_acknowledged
++                     and self._io(self.authorize_human_recovery, binding, evidence))
++        self._validate_samples(evidence, human=human)
++        if not evidence.checkpoint_classification.strip():
++            raise CoordinationError('Recovery checkpoint classification required')
++        if row.admitted_at is not None:
++            self._publish_consumption(self._claim_from_row(row))
++        request = self._request(row)
++        # Strip AdmissionClaim's extra fields at the frozen FenceToken wire seam.
++        evidence = replace(evidence, fence=self._fence(row))
++        ref = self._fact(row, request, c.FactStatus.CONFLICTED,
++                         evidence=evidence, kind=c.FactKind.RECOVERY)
++        history = self._history(row, request)
++        if not any(f.event_id == ref.event_id for f in history.facts):
++            raise AuthorityUnavailable('Recovery audit publication not verified')
++        released = self._release(row, generation=row.generation + 1)
++        # A recovery result is a historical fence, not a new write capability.
++        fence = c.FenceToken(binding.binding_id, binding.binding_revision,
++                            row.attempt_id, released.generation, released.row_version)
++        return c.RecoveryResult(binding, c.OperationStatus.CONFLICTED, fence, False, (ref.event_id,))
++
++    def _claim_from_row(self, row):
++        if not row.checkpoint or 'preimage' not in row.checkpoint:
++            raise CoordinationError('Missing durable admission checkpoint')
++        value_type = c.CreateIntentRef if row.create_intent_event_id else c.ObservationRef
++        preimage = c.from_wire(value_type, row.checkpoint['preimage'])
++        return c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
++            row.attempt_id, row.generation, row.row_version, self._request(row),
++            preimage, row.approval_id, row.approval_digest)
++
++    def _validate_termination(self, trusted):
++        if trusted.terminated_at > self.clock.now():
++            raise CoordinationError('Future termination evidence')
++        if trusted.source == 'job':
++            # The trusted provider must enumerate the COMPLETE retry/child closure,
++            # not merely a caller-provided list or cancellation acknowledgement.
++            refs = [e.execution_ref for e in trusted.executions]
++            if (trusted.execution_ref not in refs or len(refs) != len(set(refs))
++                    or any(e.terminal_at > trusted.terminated_at for e in trusted.executions)):
++                raise CoordinationError('Incomplete Job retry/child termination evidence')
++        elif trusted.source == 'app-worker':
++            if not trusted.app_worker_proof_digest:
++                raise CoordinationError('Positive app-worker termination proof required')
++        else:
++            raise CoordinationError('Untrusted termination source')
++
++    def _validate_samples(self, evidence, *, human=False):
++        capability = self.verified_request_lifetime
++        if not human and (capability is None or not isfinite(capability[0]) or capability[0] <= 0
++                or not capability[1] or capability != (
++                    evidence.maximum_request_lifetime_seconds, evidence.lifetime_bound_reference)):
++            raise CoordinationError('Automatic recovery disabled: request lifetime is unverified')
++        samples = evidence.samples
++        if (len(samples) < 3 or len({s.state_digest for s in samples}) != 1
++                or any(s.observed_at <= evidence.termination.terminated_at
++                       or s.observed_at > self.clock.now() for s in samples)
++                or any(a.observed_at >= b.observed_at for a, b in zip(samples, samples[1:]))
++                or (not human and (samples[-1].observed_at - samples[0].observed_at).total_seconds() <= capability[0])):
++            raise CoordinationError('Need three stable post-termination GETs spanning beyond verified lifetime')
++
++    def checkpoint(self, claim: c.AdmissionClaim, stage: c.PatchStage,
++                   evidence: c.StageEvidence) -> None:
++        self.assert_owner(claim)
++        row = self._owned(claim)
++        stages = list(c.PatchStage)
++        if (evidence.stage != stage or evidence.recorded_at > self.clock.now()
++                or evidence.recorded_at < row.admitted_at
++                or stages.index(stage) != stages.index(row.mutation_stage) + 1):
++            raise CoordinationError('Checkpoint stage must advance exactly once, never replay or skip')
++        observed = stage in {c.PatchStage.CONFIG_OBSERVED, c.PatchStage.DESCRIPTION_OBSERVED}
++        if observed:
++            if (evidence.observation is None
++                    or (evidence.observation.binding_id, evidence.observation.binding_revision) !=
++                        (row.binding.binding_id, row.binding.binding_revision)
++                    or not self._io(self.ledger.verify_committed, evidence.observation)
++                    or self.validate_stage_evidence is None
++                    or not self._io(self.validate_stage_evidence, claim, row, evidence)):
++                self._quarantine_row(row, 'GET does not prove synchronous send completion')
++                raise CoordinationError('Trusted send completion and committed observation required')
++        self._publish_consumption(claim)
++        checkpoint = dict(row.checkpoint or {})
++        checkpoint.update(evidence=c.to_wire(evidence),
++            resume_classification=('read-only-possible-send' if stage in {
++                c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
++                else 'read-only-unless-next-stage-proven-unsent'))
++        self._cas(row, lambda r: r.mutation_stage == row.mutation_stage,
++                  mutation_stage=stage, checkpoint=checkpoint,
++                  approval_consumption_published=True)
++
++    def observe_exclusively(self, binding: c.BindingRef,
++                            executor: c.ExecutorContext) -> c.ObservationLease:
++        row = self._expire(self._row(binding))
++        if (row.unresolved or row.state != c.CoordinationState.IDLE
++                or executor.workspace_id != binding.workspace_id or not executor.execution_ref):
++            raise OwnershipError('Binding busy or executor not target-local; return stale/checkpoint')
++        row = self._cas(row, lambda r: not r.unresolved and r.state == c.CoordinationState.IDLE,
++            state=c.CoordinationState.OBSERVING, unresolved=True,
++            generation=row.generation + 1, attempt_id=str(uuid4()), holder=executor.principal_id,
++            executor_kind=executor.actor_kind, executor_ref=executor.execution_ref,
++            lease_expires_at=self.clock.now() + timedelta(seconds=60),
++            observed_sequence=row.observed_sequence + 1)
++        return c.ObservationLease(self._fence(row), row.observed_sequence, row.lease_expires_at)
++
++    def advance_heads(self, fence: c.FenceToken, update: c.HeadUpdate) -> c.Heads:
++        row = self._owned(fence)
++        observing = row.state == c.CoordinationState.OBSERVING
++        if update.approved is not None or update.deployed is not None:
++            if (observing or not update.authorization_reference
++                    or not self._io(self.authorize_heads, row.binding, fence, update)):
++                raise CoordinationError('Approved/deployed heads require verified policy/deployment evidence')
++        if update.observed is not None:
++            version = self._io(self.ledger.get_version, row.binding, update.observed)
++            context = version.context
++            ref = c.ObservationRef(version.version_id, row.binding.binding_id,
++                row.binding.binding_revision, version.snapshot.state_digest,
++                version.snapshot.response_envelope_digest)
++            if (version.version_id != update.observed or context.binding != row.binding
++                    or context.attempt_id != row.attempt_id or context.generation != row.generation
++                    or context.parent_version_id != row.heads.observed
++                    or not self._io(self.ledger.verify_committed, ref)):
++                raise CoordinationError('Observation is stale, uncommitted or regresses the serialized head')
++        heads = c.Heads(update.observed or row.heads.observed,
++                        update.approved or row.heads.approved,
++                        update.deployed or row.heads.deployed)
++        row = self._cas(row, lambda r: r.attempt_id == fence.attempt_id, heads=heads)
++        if observing:
++            self._release(row)  # advance_heads is observation lease finalization.
++        return heads
+diff --git a/backend/tests/integration/__init__.py b/backend/tests/integration/__init__.py
+new file mode 100644
+index 0000000..5da401c
+--- /dev/null
++++ b/backend/tests/integration/__init__.py
+@@ -0,0 +1 @@
++"""Real-platform release gates; never substitute local fakes for these tests."""
+diff --git a/backend/tests/integration/conftest.py b/backend/tests/integration/conftest.py
+new file mode 100644
+index 0000000..f016d66
+--- /dev/null
++++ b/backend/tests/integration/conftest.py
+@@ -0,0 +1,7 @@
++"""M03-local registration; shared test configuration remains M08-owned."""
++
++
++def pytest_configure(config):
++    config.addinivalue_line(
++        "markers", "integration: requires real Databricks/Delta platform"
++    )
+diff --git a/backend/tests/integration/test_vc_delta_cas.py b/backend/tests/integration/test_vc_delta_cas.py
+new file mode 100644
+index 0000000..2d50d04
+--- /dev/null
++++ b/backend/tests/integration/test_vc_delta_cas.py
+@@ -0,0 +1,511 @@
++"""M03 task 16: REAL Delta CAS release gate, not a sandbox-green test.
++
++Deployment-only setup (no default credentials, workspace, or production schema):
++* Install databricks-sql-connector >=4,<5 in the deployment test environment.
++* Set VC_DELTA_CAS_NONPRODUCTION=YES, VC_DELTA_CAS_CATALOG,
++  VC_DELTA_CAS_SCHEMA (must start with vc_m03_test_), VC_DELTA_CAS_HOST
++  (hostname only), VC_DELTA_CAS_HTTP_PATH, and VC_DELTA_CAS_WORKSPACE_ID.
++* Set VC_DELTA_CAS_OWNER_PROFILE, VC_DELTA_CAS_EXECUTOR_A_PROFILE, and
++  VC_DELTA_CAS_EXECUTOR_B_PROFILE to explicit SDK profiles. A/B must be distinct
++  service principals; the same-SP case opens A twice. Owner must be distinct.
++  Profiles contain credentials outside the repository. Never print credentials.
++* The owner provisions disposable tables in the explicitly designated existing
++  schema and grants SELECT/UPDATE coordination and SELECT/INSERT artifacts.
++  Compute must support these fine-grained grants; no broad MODIFY fallback.
++
++Run: python -m pytest backend/tests/integration/test_vc_delta_cas.py -m integration
++Missing configuration/dependencies FAIL, not skip. Collection needs neither.
++Only uniquely named tables created here are dropped, only by the owner.
++
++The test-local SQL adapter implements M03's actual read/compare_and_swap port:
++UPDATE-only MERGE, Serializable, exact read-back, no acquisition retry. This
++branch has no M08 production SQL adapter. Persisted JSON artifacts implement the
++minimal fact/evidence ports, NOT M02/M06 production storage acceptance. A durable
++send-boundary probe is the mutation trace: this CAS test never PATCHes Genie.
++Production adapter wiring, real Genie transport, and full effective-grant tests
++remain separate deployment gates. No local run proves any real-Delta behavior.
++"""
++from concurrent.futures import ThreadPoolExecutor
++from contextlib import ExitStack
++from dataclasses import fields, replace
++from datetime import datetime, timedelta, timezone
++import json
++import os
++from pathlib import Path
++import re
++from threading import Barrier
++from types import SimpleNamespace
++from uuid import uuid4
++
++import pytest
++
++from backend.services.version_control import contracts as c
++from backend.services.version_control.coordination import (
++    CoordinationError, CoordinationService,
++)
++from backend.services.version_control.coordination.service import OwnershipError
++from backend.services.version_control.coordination.row import CoordinationRow
++
++pytestmark = pytest.mark.integration
++
++
++def uid():
++    return str(uuid4())
++
++
++class Clock:
++    def now(self):
++        return datetime.now(timezone.utc)
++
++
++def execute(connection, statement, parameters=None):
++    """One execution, no application-level retry or exception-as-success."""
++    with connection.cursor() as cursor:
++        cursor.execute(statement, parameters or {})
++        return [row.asDict() for row in cursor.fetchall()] if cursor.description else []
++
++
++def row_values(row):
++    """Flatten the real M03 row into the owned coordination DDL columns."""
++    values = {f.name: getattr(row, f.name) for f in fields(row)
++              if f.name not in {'binding', 'heads', 'checkpoint', 'termination_evidence'}}
++    values.update({f.name: getattr(row.binding, f.name) for f in fields(row.binding)
++                   if f.name != 'environment'})
++    for name in ('checkpoint', 'termination_evidence'):
++        value = getattr(row, name)
++        values[f'{name}_json'] = json.dumps(value) if value is not None else None
++    for name in ('observed', 'approved', 'deployed'):
++        values[f'{name}_head_version_id'] = getattr(row.heads, name)
++    # SQL connector uses naive UTC TIMESTAMPs; never depend on host timezone.
++    return {key: (value.astimezone(timezone.utc).replace(tzinfo=None)
++                  if isinstance(value, datetime) else value.value
++                  if isinstance(value, (c.CoordinationState, c.PatchStage)) else value)
++            for key, value in values.items()}
++
++
++class DeltaCoordinationStore:
++    """Real SQL implementation of the injected M03 store port, local to this gate."""
++    def __init__(self, connection, table, binding):
++        self.connection, self.table, self.binding = connection, table, binding
++        self.barrier = None
++        self.proposals = []
++
++    def rows(self):
++        return execute(self.connection, f'SELECT * FROM {self.table} WHERE binding_id = :id',
++                       {'id': self.binding.binding_id})
++
++    def read(self, binding_id):
++        assert binding_id == self.binding.binding_id
++        rows = self.rows()
++        if len(rows) > 1:
++            raise OwnershipError('Duplicate real Delta coordination rows')
++        if not rows:
++            return None
++        values = dict(rows[0])
++        binding_values = {f.name: values.pop(f.name) for f in fields(c.BindingRef)
++                          if f.name != 'environment'}
++        binding = c.BindingRef(**binding_values, environment=self.binding.environment)
++        heads = c.Heads(*(values.pop(f'{name}_head_version_id')
++                          for name in ('observed', 'approved', 'deployed')))
++        for name in ('checkpoint', 'termination_evidence'):
++            value = values.pop(f'{name}_json')
++            values[name] = json.loads(value) if value is not None else None
++        for key, value in values.items():
++            if isinstance(value, datetime):
++                values[key] = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
++        values['state'] = c.CoordinationState(values['state'])
++        if values['mutation_stage'] is not None:
++            values['mutation_stage'] = c.PatchStage(values['mutation_stage'])
++        return CoordinationRow(binding=binding, heads=heads, **values)
++
++    def compare_and_swap(self, binding_id, binding_revision, row_version,
++                         generation, predicate, **changes):
++        before = self.read(binding_id)
++        if (before is None or (before.binding.binding_revision, before.row_version,
++                              before.generation) != (binding_revision, row_version, generation)
++                or not predicate(before)):
++            return None
++        after = replace(before, **changes, row_version=row_version + 1,
++                        updated_at=Clock().now())
++        values = row_values(after)
++        parameters = {f'new_{key}': value for key, value in values.items()}
++        parameters.update(id=binding_id, revision=binding_revision, version=row_version,
++                          generation=generation, state=before.state.value,
++                          unresolved=before.unresolved, attempt=before.attempt_id)
++        assignments = ', '.join(f't.{key} = :new_{key}' for key in values)
++        # The Python predicate is checked on this exact version; EVERY runtime
++        # update increments row_version. SQL rechecks the fence and occupied state.
++        statement = f'''MERGE INTO {self.table} AS t
++            USING (SELECT :id AS binding_id) AS s ON t.binding_id = s.binding_id
++            WHEN MATCHED AND t.binding_revision = :revision
++              AND t.row_version = :version AND t.generation = :generation
++              AND t.state = :state AND t.unresolved = :unresolved
++              AND t.attempt_id <=> :attempt
++            THEN UPDATE SET {assignments}'''
++        if self.barrier is not None:
++            self.proposals.append((before, after))
++            barrier, self.barrier = self.barrier, None  # reservation only, never admission
++            barrier.wait(timeout=120)  # both have read the SAME existing idle version
++        try:
++            execute(self.connection, statement, parameters)
++        except Exception as exc:
++            # Only a confirmed Delta optimistic concurrency abort is a CAS loss.
++            # Timeouts, permissions, unknown/ambiguous responses MUST fail the test.
++            if re.search(r'\[DELTA_CONCURRENT_(?:APPEND|DELETE_READ|DELETE_DELETE|WRITE)(?:\.[A-Z_]+)?\]',
++                         str(exc)):
++                return None
++            raise
++        observed = self.read(binding_id)
++        return observed if observed == after else None
++
++
++class DeltaArtifacts:
++    """Append-only REAL Delta evidence/facts/trace, no fake authority fallback."""
++    def __init__(self, connection, table, binding):
++        self.connection, self.table, self.binding = connection, table, binding
++
++    def put(self, kind, key, value):
++        execute(self.connection, f'INSERT INTO {self.table} VALUES (:kind, :key, :payload)',
++                {'kind': kind, 'key': key, 'payload': json.dumps(c.to_wire(value))})
++
++    def get(self, kind, key=None):
++        clause = '' if key is None else ' AND artifact_key = :key'
++        parameters = {'kind': kind} if key is None else {'kind': kind, 'key': key}
++        rows = execute(self.connection,
++                       f'SELECT payload FROM {self.table} WHERE kind = :kind{clause}', parameters)
++        return [json.loads(row['payload']) for row in rows]
++
++    def verify_committed(self, observation):
++        return self.get('preimage', observation.version_id) == [c.to_wire(observation)]
++
++    def append(self, fact):
++        self.put('fact', fact.event_key, fact)
++        assert self.get('fact', fact.event_key) == [c.to_wire(fact)]
++        return c.FactRef(fact.event_id, fact.event_key,
++                         c.canonical_json_hash('vc-cas-test-fact/1', c.to_wire(fact)))
++
++    def lookup_request(self, binding, key):
++        facts = tuple(c.from_wire(c.OperationFact, value) for value in self.get('fact'))
++        matching = tuple(f for f in facts if f.binding == binding and f.request.idempotency_key == key)
++        return c.RequestHistory(matching, len({f.event_key for f in matching}) != len(matching))
++
++    def approval_use(self, binding, approval_id):
++        # This CAS gate uses grants without approvals; approval reuse has its own gate.
++        raise AssertionError('Approval-bearing flow not configured in this CAS test')
++
++    def publish_consumption(self, claim):
++        existing = self.get('consumption', claim.attempt_id)
++        if not existing:
++            self.put('consumption', claim.attempt_id, claim)
++        assert self.verify_flush(claim)
++
++    def verify_flush(self, claim):
++        return self.get('consumption', claim.attempt_id) == [c.to_wire(claim)]
++
++
++def deny(*args):
++    return False
++
++
++def forbidden(*args):
++    raise AssertionError('Runtime enrollment/recovery is forbidden in this test')
++
++
++def service(store, artifacts, binding, grant):
++    return CoordinationService(
++        store=store, facts=artifacts, ledger=artifacts, clock=Clock(),
++        resolve_binding=lambda binding_id: binding if binding_id == binding.binding_id else None,
++        verify_enrollment=deny, insert_enrolled=forbidden,
++        validate_authorization=lambda candidate, executor: candidate == grant,
++        verify_create_intent=deny, termination=SimpleNamespace(for_attempt=forbidden),
++        authorize_human_recovery=deny, authorize_heads=deny,
++    )
++
++
++def required(name):
++    value = os.environ.get(f'VC_DELTA_CAS_{name}')
++    if not value:
++        pytest.fail(f'Deployment BLOCKER: explicitly configure VC_DELTA_CAS_{name}', pytrace=False)
++    return value
++
++
++def identifier(value):
++    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', value):
++        pytest.fail('Deployment BLOCKER: catalog/schema must be simple SQL identifiers', pytrace=False)
++    return f'`{value}`'
++
++
++@pytest.fixture
++def delta(request):
++    if required('NONPRODUCTION') != 'YES':
++        pytest.fail('Deployment BLOCKER: explicit nonproduction opt-in required', pytrace=False)
++    catalog, schema = required('CATALOG'), required('SCHEMA')
++    if not schema.startswith('vc_m03_test_'):
++        pytest.fail('Refusing provisioning outside a vc_m03_test_* schema', pytrace=False)
++    namespace = f'{identifier(catalog)}.{identifier(schema)}'
++    host, http_path, workspace_id = required('HOST'), required('HTTP_PATH'), required('WORKSPACE_ID')
++    profiles = [required(f'{role}_PROFILE') for role in ('OWNER', 'EXECUTOR_A', 'EXECUTOR_B')]
++    try:
++        from databricks import sql
++        from databricks.sdk.core import Config
++    except ImportError:
++        pytest.fail('Deployment BLOCKER: install databricks-sql-connector >=4,<5', pytrace=False)
++
++    same_sp = getattr(request, 'param', False)
++    with ExitStack() as stack:
++        def connect(profile):
++            config = Config(profile=profile)
++            assert config.host.rstrip('/') == f'https://{host}', 'Profile targets wrong workspace'
++            connection = stack.enter_context(sql.connect(
++                server_hostname=host, http_path=http_path,
++                credentials_provider=lambda: config.authenticate,
++                session_configuration={'spark.sql.session.timeZone': 'UTC'},
++                _retry_stop_after_attempts_count=1,
++            ))
++            return connection
++
++        owner = connect(profiles[0])
++        clients = [connect(profiles[1]), connect(profiles[1] if same_sp else profiles[2])]
++        assert clients[0] is not clients[1]  # independent SQL sessions, even with the same SP
++        principals = [execute(client, 'SELECT current_user() AS principal')[0]['principal']
++                      for client in clients]
++        owner_principal = execute(owner, 'SELECT current_user() AS principal')[0]['principal']
++        assert owner_principal not in principals, 'Enrollment owner must not be a runtime executor'
++        assert (principals[0] == principals[1]) == same_sp
++        suffix = uuid4().hex
++        table, artifacts_table = (f'{namespace}.`vc_m03_{kind}_{suffix}`'
++                                  for kind in ('coordination', 'artifacts'))
++        ddl = (Path(__file__).resolve().parents[2] / 'version_control_ddl' / '05-coordination.sql').read_text()
++        ddl = ddl.replace('${catalog}.${control_schema}.genie_ops_coordination', table)
++        # Register cleanup immediately after each successful CREATE. Runtime clients
++        # never INSERT coordination, ALTER isolation, or perform destructive teardown.
++        execute(owner, ddl)
++        stack.callback(execute, owner, f'DROP TABLE {table}')
++        execute(owner, f'''CREATE TABLE {artifacts_table}
++            (kind STRING, artifact_key STRING, payload STRING) USING DELTA
++            TBLPROPERTIES ('delta.appendOnly'='true')''')
++        stack.callback(execute, owner, f'DROP TABLE {artifacts_table}')
++        for principal in set(principals):
++            grantee = '`' + principal.replace('`', '``') + '`'
++            execute(owner, f'GRANT SELECT, UPDATE ON TABLE {table} TO {grantee}')
++            execute(owner, f'GRANT SELECT, INSERT ON TABLE {artifacts_table} TO {grantee}')
++        for client in [owner, *clients]:
++            detail = execute(client, f'DESCRIBE DETAIL {table}')
++            assert len(detail) == 1 and detail[0]['format'].lower() == 'delta'
++            assert detail[0]['properties'].get('delta.isolationLevel') == 'Serializable'
++
++        binding = c.BindingRef(uid(), 1, f'cas-{suffix}', workspace_id,
++                               f'disposable-cas-{suffix}', 'test')
++        initial = CoordinationRow(binding, Clock().now())
++
++        def seed(row):
++            values = row_values(row)
++            execute(owner, f'INSERT INTO {table} ({", ".join(values)}) VALUES '
++                    f'({", ".join(":" + key for key in values)})', values)
++
++        seed(initial)  # ONE pre-existing row; reserve must never insert
++        observer = DeltaCoordinationStore(owner, table, binding)
++        assert observer.read(binding.binding_id) == initial
++        artifacts = DeltaArtifacts(owner, artifacts_table, binding)
++        fingerprints = c.Fingerprints('1' * 64, '2' * 64, '3' * 64, 'vc-c14n/1')
++        preimage = c.ObservationRef(uid(), binding.binding_id, 1,
++                                   fingerprints.state_digest, '4' * 64)
++        artifacts.put('preimage', preimage.version_id, preimage)
++        assert artifacts.verify_committed(preimage)
++        contenders = []
++        for index, connection in enumerate(clients):
++            operation = c.RequestIdentity(uid(), uid(), '5' * 64)
++            grant = c.AuthorizationGrant(binding, operation, 'cas-test-policy', fingerprints,
++                '6' * 64, Clock().now() + timedelta(hours=1), None, None)
++            executor = c.ExecutorContext(workspace_id, f'https://{host}', principals[index],
++                                          'service', None, f'cas-worker:{uid()}')
++            store = DeltaCoordinationStore(connection, table, binding)
++            ports = DeltaArtifacts(connection, artifacts_table, binding)
++            contenders.append(SimpleNamespace(store=store, artifacts=ports, request=operation,
++                grant=grant, executor=executor, service=service(store, ports, binding, grant)))
++        def expire_lease(claim):
++            # Owner-only fault injection, NOT runtime takeover or a local clock fake.
++            execute(owner, f'''UPDATE {table}
++                SET lease_expires_at = :expired, row_version = row_version + 1
++                WHERE binding_id = :binding AND attempt_id = :attempt''',
++                {'expired': (Clock().now() - timedelta(minutes=1)).replace(tzinfo=None),
++                 'binding': binding.binding_id, 'attempt': claim.attempt_id})
++            assert observer.read(binding.binding_id).lease_expires_at < Clock().now()
++
++        yield SimpleNamespace(binding=binding, initial=initial, seed=seed, observer=observer,
++                              artifacts=artifacts, preimage=preimage, contenders=contenders,
++                              expire_lease=expire_lease)
++
++
++def reserve(contender, binding):
++    try:
++        return contender.service.reserve(binding, contender.request, contender.executor)
++    except OwnershipError as exc:
++        return exc  # ONLY definite CAS/ownership losses, never outages or ambiguous SQL
++
++
++def race(delta):
++    barrier = Barrier(2)
++    for contender in delta.contenders:
++        contender.store.barrier = barrier
++    reservations_done = Barrier(2)
++
++    def run(contender):
++        result = reserve(contender, delta.binding)
++        # Both workers follow the SAME reserve -> admit -> send-boundary path.
++        # Let the losing conflict commit before testing admission publication;
++        # only the coordination-row CAS is the contested authority in this gate.
++        reservations_done.wait(timeout=120)
++        if isinstance(result, c.Reservation):
++            return result, admit_and_trace(delta, contender, result)
++        return result
++
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        results = list(pool.map(run, delta.contenders))
++    proposals = [contender.store.proposals for contender in delta.contenders]
++    assert all(len(proposal) == 1 for proposal in proposals), 'No acquisition retry allowed'
++    assert proposals[0][0][0] == proposals[1][0][0] == delta.initial
++    assert proposals[0][0][1].attempt_id != proposals[1][0][1].attempt_id
++    return results
++
++
++def assert_conflict(delta, contender):
++    history = delta.artifacts.lookup_request(delta.binding, contender.request.idempotency_key)
++    assert not history.ambiguous
++    assert len(history.facts) == 1
++    assert history.facts[0].request == contender.request
++    assert history.facts[0].status in {c.FactStatus.CONFLICTED, c.FactStatus.QUARANTINED}
++
++
++def admit_and_trace(delta, contender, reservation):
++    row = delta.observer.read(delta.binding.binding_id)  # independent connection read-back
++    assert len(delta.observer.rows()) == 1
++    assert row.state == c.CoordinationState.RESERVED and row.unresolved
++    assert (row.attempt_id, row.holder, row.generation, row.row_version) == (
++        reservation.fence.attempt_id, contender.executor.principal_id, 1, 1)
++    assert row.active_operation_id == contender.request.operation_id
++    with pytest.raises(CoordinationError):
++        contender.service.assert_owner(reservation.fence)  # reservation is NOT admission
++    claim = contender.service.admit(reservation, delta.preimage, contender.grant)
++    assert isinstance(claim, c.AdmissionClaim)
++    row = delta.observer.read(delta.binding.binding_id)
++    assert row.state == c.CoordinationState.ADMITTED and row.unresolved
++    assert (row.attempt_id, row.generation, row.row_version) == (
++        claim.attempt_id, claim.generation, claim.row_version)
++    assert (row.active_operation_id, row.idempotency_key, row.request_digest) == (
++        contender.request.operation_id, contender.request.idempotency_key, contender.request.request_digest)
++    assert (row.pre_version_id, row.preimage_digest) == (delta.preimage.version_id, delta.preimage.state_digest)
++    assert delta.artifacts.verify_flush(claim)
++    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, Clock().now(), '7' * 64, None)
++    contender.service.checkpoint(claim, send.stage, send)
++    contender.service.assert_owner(claim)
++    # A durable mutation-boundary trace, not a fake Genie PATCH or return-value count.
++    contender.artifacts.put('mutation_trace', claim.attempt_id, {
++        'attempt_id': claim.attempt_id, 'operation_id': claim.request.operation_id,
++        'stage': send.stage.value,
++    })
++    assert delta.artifacts.get('mutation_trace') == [{
++        'attempt_id': claim.attempt_id, 'operation_id': claim.request.operation_id,
++        'stage': c.PatchStage.CONFIG_IN_FLIGHT.value,
++    }]
++    assert delta.observer.read(delta.binding.binding_id).mutation_stage == c.PatchStage.CONFIG_IN_FLIGHT
++    assert len(delta.artifacts.get('consumption')) == 1
++    return claim
++
++
++def assert_one_admitted_trace(delta, results):
++    winners = [(contender, result) for contender, result in zip(delta.contenders, results)
++               if isinstance(result, tuple)]
++    assert len(winners) == 1
++    assert sum(isinstance(result, OwnershipError) for result in results) == 1
++    contender, (reservation, claim) = winners[0]
++    assert isinstance(reservation, c.Reservation) and isinstance(claim, c.AdmissionClaim)
++    loser = next(item for item in delta.contenders if item is not contender)
++    assert_conflict(delta, loser)
++    row = delta.observer.read(delta.binding.binding_id)
++    assert row.attempt_id == reservation.fence.attempt_id == claim.attempt_id
++    assert row.active_operation_id == contender.request.operation_id
++    assert len(delta.observer.rows()) == 1
++    assert delta.artifacts.get('mutation_trace') == [{
++        'attempt_id': claim.attempt_id, 'operation_id': claim.request.operation_id,
++        'stage': c.PatchStage.CONFIG_IN_FLIGHT.value,
++    }]
++    return contender, loser, claim
++
++
++def test_real_delta_same_row_cas_one_winner(delta):
++    assert_one_admitted_trace(delta, race(delta))
++
++
++@pytest.mark.parametrize('delta', [True], indirect=True, ids=['same-sp'])
++def test_real_delta_same_sp_different_attempt_is_fenced(delta):
++    winner, loser, claim = assert_one_admitted_trace(delta, race(delta))
++    assert winner.executor.principal_id == loser.executor.principal_id
++    assert winner.executor.execution_ref != loser.executor.execution_ref
++    losing_attempt = loser.store.proposals[0][1].attempt_id
++    stale = replace(claim, attempt_id=losing_attempt)
++    before = delta.observer.read(delta.binding.binding_id)
++    with pytest.raises(OwnershipError):
++        loser.service.renew(stale)
++    with pytest.raises(OwnershipError):
++        loser.service.assert_owner(stale)
++    with pytest.raises(OwnershipError):
++        loser.service.checkpoint(stale, c.PatchStage.CONFIG_IN_FLIGHT,
++            c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, Clock().now(), '8' * 64, None))
++    assert delta.observer.read(delta.binding.binding_id) == before
++    assert len(delta.artifacts.get('mutation_trace')) == 1
++
++
++@pytest.mark.parametrize('delta', [True], indirect=True, ids=['same-sp'])
++def test_real_delta_expired_lease_quarantines_without_takeover(delta):
++    original = delta.contenders[0]
++    reservation = original.service.reserve(delta.binding, original.request, original.executor)
++    claim = original.service.admit(reservation, delta.preimage, original.grant)
++    delta.expire_lease(claim)
++    expired = delta.observer.read(delta.binding.binding_id)
++    with pytest.raises(OwnershipError):
++        original.service.assert_owner(claim)  # real UPDATE to quarantine, not a renewal
++    quarantined = delta.observer.read(delta.binding.binding_id)
++    assert quarantined.state == c.CoordinationState.QUARANTINED and quarantined.unresolved
++    assert quarantined.quarantine_reason
++    assert quarantined.row_version == expired.row_version + 1
++    assert (quarantined.attempt_id, quarantined.generation, quarantined.active_operation_id,
++            quarantined.pre_version_id, quarantined.lease_expires_at) == (
++        claim.attempt_id, claim.generation, claim.request.operation_id,
++        delta.preimage.version_id, expired.lease_expires_at)
++    history = delta.artifacts.lookup_request(delta.binding, claim.request.idempotency_key)
++    assert len(history.facts) == 1 and history.facts[0].status == c.FactStatus.QUARANTINED
++    assert history.facts[0].attempt_id == claim.attempt_id
++    # Independent same-SP workers issue NEW requests, not duplicate receipts.
++    for contender in delta.contenders:
++        contender.request = c.RequestIdentity(uid(), uid(), '9' * 64)
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        results = list(pool.map(lambda contender: reserve(contender, delta.binding), delta.contenders))
++    assert all(isinstance(result, OwnershipError) for result in results)
++    for contender in delta.contenders:
++        assert_conflict(delta, contender)
++        with pytest.raises(OwnershipError):
++            contender.service.renew(claim)
++        with pytest.raises(OwnershipError):
++            contender.service.assert_owner(claim)
++    assert delta.observer.read(delta.binding.binding_id) == quarantined
++    assert len(delta.observer.rows()) == 1
++    assert delta.artifacts.verify_flush(claim)  # durable old claim survives expiry
++    assert len(delta.artifacts.get('consumption')) == 1
++    assert delta.artifacts.get('mutation_trace') == []
++
++
++def test_real_delta_seeded_duplicate_rows_block_both_clients(delta):
++    delta.seed(delta.initial)  # provisioning owner deliberately violates logical uniqueness
++    before = delta.observer.rows()
++    assert len(before) == 2
++    with pytest.raises(OwnershipError, match='Duplicate'):
++        delta.observer.read(delta.binding.binding_id)
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        results = list(pool.map(lambda contender: reserve(contender, delta.binding), delta.contenders))
++    assert all(isinstance(result, OwnershipError) for result in results)
++    assert all('Duplicate' in str(result) for result in results)
++    assert delta.observer.rows() == before  # no UPDATE or INSERT to "repair" authority
++    assert all(not contender.store.proposals for contender in delta.contenders)
++    assert delta.artifacts.get('consumption') == []
++    assert delta.artifacts.get('mutation_trace') == []
+diff --git a/backend/tests/test_vc_coordination.py b/backend/tests/test_vc_coordination.py
+new file mode 100644
+index 0000000..68979de
+--- /dev/null
++++ b/backend/tests/test_vc_coordination.py
+@@ -0,0 +1,439 @@
++"""M03 contract tests: durable fake stores, explicit clock, no Genie calls."""
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++from types import SimpleNamespace
++from unittest.mock import Mock
++from uuid import uuid4
++
++import pytest
++
++from backend.services.version_control import contracts as c
++from backend.services.version_control.coordination import CoordinationService, CoordinationError
++from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
++from backend.tests.vc_fakes.stores import (
++    CoordinationRow, FakeCoordinationStore, FakeFactStore, ManualClock,
++)
++
++
++def uid():
++    return str(uuid4())
++
++
++@pytest.fixture
++def h():
++    clock = ManualClock(datetime(2026, 9, 7, tzinfo=timezone.utc))
++    binding = binding_fixture()
++    store = FakeCoordinationStore(clock)
++    durable = FakeFactStore(clock)
++    facts = Mock(spec=c.OperationFacts)
++    facts.lookup_request.return_value = c.RequestHistory((), False)
++    facts.approval_use.side_effect = lambda b, a: c.ApprovalUse(b, a, (), (), False)
++    facts.verify_flush.return_value = True
++    ledger = Mock(spec=c.VersionLedger)
++    ledger.verify_committed.return_value = True
++    termination = Mock(spec=c.TerminationEvidenceProvider)
++    termination.for_attempt.return_value = None
++    ports = dict(store=store, facts=facts, ledger=ledger, clock=clock,
++                 resolve_binding=Mock(return_value=binding),
++                 verify_enrollment=Mock(return_value=True),
++                 insert_enrolled=store.seed, validate_authorization=Mock(return_value=True),
++                 verify_create_intent=Mock(return_value=True), termination=termination,
++                 authorize_human_recovery=Mock(return_value=False),
++                 authorize_heads=Mock(return_value=False),
++                 validate_stage_evidence=Mock(return_value=True))
++    service = CoordinationService(**ports)
++    proof = c.EnrollmentProof(uid(), binding.binding_id, 1, 'serialized-enrollment')
++    request = c.RequestIdentity(uid(), 'key-1', '1' * 64)
++    fp = c.Fingerprints('2' * 64, '3' * 64, '4' * 64, 'vc-c14n/1')
++    preimage = c.ObservationRef(uid(), binding.binding_id, 1, fp.state_digest, '5' * 64)
++    grant = c.AuthorizationGrant(binding, request, 'validated-policy', fp, '6' * 64,
++                                 clock.now() + timedelta(hours=1), uid(), '7' * 64)
++    return SimpleNamespace(**ports, service=service, binding=binding, proof=proof,
++                           request=request, preimage=preimage, grant=grant,
++                           executor=executor_fixture(), durable=durable)
++
++
++def enroll(h):
++    h.service.initialize(h.binding, h.proof)
++
++
++def reserve(h):
++    return h.service.reserve(h.binding, h.request, h.executor)
++
++
++def admit(h):
++    return h.service.admit(reserve(h), h.preimage, h.grant)
++
++
++def test_missing_or_duplicate_ownership_row_blocks_admission(h):
++    with pytest.raises(CoordinationError):
++        reserve(h)
++    assert not h.store.state.rows
++    h.verify_enrollment.return_value = False
++    with pytest.raises(CoordinationError):
++        enroll(h)
++    h.verify_enrollment.return_value = True
++    enroll(h)
++    enroll(h)  # idempotent enrollment does not INSERT twice
++    assert len(h.store.state.rows) == 1
++    h.resolve_binding.return_value = replace(h.binding, binding_revision=2)
++    with pytest.raises(CoordinationError):
++        reserve(h)
++    h.resolve_binding.return_value = h.binding
++    h.store.seed(CoordinationRow(h.binding, h.clock.now()))
++    with pytest.raises(CoordinationError):
++        reserve(h)
++
++
++def test_two_concurrent_reservations_have_exactly_one_winner(h):
++    from concurrent.futures import ThreadPoolExecutor
++    from threading import Barrier
++    enroll(h)
++    barrier = Barrier(2)
++    original = h.store.compare_and_swap
++    trace = []
++
++    def race(*args, **kwargs):
++        barrier.wait(timeout=5)
++        trace.append(kwargs)
++        return original(*args, **kwargs)
++
++    h.store.compare_and_swap = race
++
++    def run():
++        try:
++            return reserve(h)
++        except CoordinationError:
++            return None
++
++    with ThreadPoolExecutor(2) as pool:
++        results = list(pool.map(lambda _: run(), range(2)))
++    winners = [r for r in results if r is not None]
++    assert len(winners) == 1
++    row = h.store.read(h.binding.binding_id)
++    assert row.attempt_id == winners[0].fence.attempt_id
++    assert row.holder == h.executor.principal_id
++    assert row.generation == winners[0].fence.generation == 1
++    assert row.unresolved and row.state == c.CoordinationState.RESERVED
++    assert len(trace) == 2
++    h.facts.append.assert_called_once()
++    assert h.facts.append.call_args.args[0].status == c.FactStatus.CONFLICTED
++
++    # Successful statement return is NOT proof: a non-committing adapter lies.
++    other = replace(h.binding, binding_id=uid())
++    h.resolve_binding.return_value = other
++    h.store.seed(CoordinationRow(other, h.clock.now()))
++    h.store.compare_and_swap = Mock(return_value=True)
++    with pytest.raises(CoordinationError):
++        h.service.reserve(other, h.request, h.executor)
++
++
++@pytest.mark.parametrize('change', ['attempt', 'generation', 'revision'])
++def test_same_sp_stale_attempt_cannot_renew_or_patch(h, change):
++    enroll(h)
++    reservation = reserve(h)
++    renewed = h.service.renew(reservation.fence)
++    assert renewed.row_version > reservation.fence.row_version
++    row = h.store.read(h.binding.binding_id)
++    changes = {'attempt_id': uid()} if change == 'attempt' else {'generation': row.generation + 1}
++    if change == 'revision':
++        changes = {'binding': replace(h.binding, binding_revision=2)}
++        h.resolve_binding.return_value = changes['binding']
++    h.store.state.rows[:] = [replace(row, **changes)]
++    assert h.store.state.rows[0].holder == h.executor.principal_id
++    with pytest.raises(CoordinationError):
++        h.service.renew(renewed)
++    with pytest.raises(CoordinationError):
++        h.service.assert_owner(renewed)
++
++
++@pytest.mark.parametrize('kind', ['observation', 'create_intent'])
++def test_reservation_is_not_admission_and_requires_committed_preimage(h, kind):
++    if kind == 'create_intent':
++        h.binding = replace(h.binding, space_id=None)
++        h.resolve_binding.return_value = h.binding
++        h.grant = replace(h.grant, binding=h.binding)
++        h.preimage = c.CreateIntentRef(uid(), h.request.operation_id, h.binding.binding_id,
++                                       1, h.request.request_digest)
++    enroll(h)
++    reservation = reserve(h)
++    assert not isinstance(reservation, c.AdmissionClaim)
++    with pytest.raises(CoordinationError):
++        h.service.assert_owner(reservation.fence)
++    verifier = h.ledger.verify_committed if kind == 'observation' else h.verify_create_intent
++    verifier.return_value = False
++    with pytest.raises(CoordinationError):
++        h.service.admit(reservation, h.preimage, h.grant)
++    assert h.store.read(h.binding.binding_id).state == c.CoordinationState.RESERVED
++    verifier.return_value = True
++    claim = h.service.admit(reservation, h.preimage, h.grant)
++    assert isinstance(claim, c.AdmissionClaim)
++    assert claim.preimage == h.preimage
++    h.service.assert_owner(claim)
++
++
++def test_admission_atomically_binds_key_digest_approval_and_preimage(h):
++    enroll(h)
++    reservation = reserve(h)
++    original = h.store.compare_and_swap
++    h.store.compare_and_swap = Mock(wraps=original)
++    h.validate_authorization.return_value = False
++    with pytest.raises(CoordinationError):
++        h.service.admit(reservation, h.preimage, h.grant)
++    h.validate_authorization.return_value = True
++    for bad in (replace(h.grant, request=replace(h.request, idempotency_key='other')),
++                replace(h.grant, expires_at=h.clock.now()),
++                replace(h.grant, binding=replace(h.binding, binding_revision=2)),
++                replace(h.grant, approval_digest=None)):
++        with pytest.raises(CoordinationError):
++            h.service.admit(reservation, h.preimage, bad)
++    assert h.store.compare_and_swap.call_count == 0
++    claim = h.service.admit(reservation, h.preimage, h.grant)
++    assert h.store.compare_and_swap.call_count == 1
++    row = h.store.read(h.binding.binding_id)
++    assert (row.active_operation_id, row.idempotency_key, row.request_digest) == (
++        h.request.operation_id, h.request.idempotency_key, h.request.request_digest)
++    assert (row.approval_id, row.approval_digest) == (h.grant.approval_id, h.grant.approval_digest)
++    assert (row.pre_version_id, row.preimage_digest, row.expected_base_fingerprint) == (
++        h.preimage.version_id, h.preimage.state_digest, h.grant.expected_base_fingerprints.state_digest)
++    assert row.generation == claim.generation == reservation.fence.generation
++    assert row.attempt_id == claim.attempt_id
++    with pytest.raises(CoordinationError):
++        h.service.assert_owner(replace(claim, request=replace(h.request, request_digest='a' * 64)))
++
++
++def durable_facts(h):
++    def append(fact):
++        h.durable.append(fact.event_key, c.to_wire(fact))
++        return c.FactRef(fact.event_id, fact.event_key, 'd' * 64)
++
++    def lookup(binding, key):
++        rows = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
++        return c.RequestHistory(tuple(f for f in rows if f.binding == binding
++                                      and f.request.idempotency_key == key), False)
++
++    h.facts.append.side_effect = append
++    h.facts.lookup_request.side_effect = lookup
++
++    def publish(claim):
++        evidence = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_PENDING, h.clock.now(),
++                                   'd' * 64, claim.preimage if isinstance(claim.preimage, c.ObservationRef) else None)
++        fact = c.OperationFact(uid(), c.FactKind.APPROVAL_CONSUMED,
++            claim.request.operation_id, claim.row_version,
++            f'consumption:{claim.attempt_id}', h.binding, claim.request, 'coordination',
++            'target-service', c.ActorContext('target-service', h.binding.workspace_id, 'service'),
++            c.FactStatus.CONSUMED, evidence, h.clock.now(), attempt_id=claim.attempt_id,
++            generation=claim.generation, approval_id=claim.approval_id,
++            approval_digest=claim.approval_digest)
++        existing = h.durable.lookup(fact.event_key)
++        if existing:
++            old = c.from_wire(c.OperationFact, existing[0].payload)
++            return c.FactRef(old.event_id, old.event_key, 'd' * 64)
++        return append(fact)
++
++    def use(binding, approval_id):
++        rows = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
++        used = [f for f in rows if f.binding == binding and f.approval_id == approval_id
++                and f.fact_kind == c.FactKind.APPROVAL_CONSUMED]
++        return c.ApprovalUse(binding, approval_id,
++            tuple(c.FactRef(f.event_id, f.event_key, 'd' * 64) for f in used),
++            tuple(f.operation_id for f in used), False)
++
++    h.facts.publish_consumption.side_effect = publish
++    h.facts.approval_use.side_effect = use
++    h.facts.verify_flush.side_effect = lambda claim: (claim.approval_id is None or
++        claim.request.operation_id in use(h.binding, claim.approval_id).operation_ids)
++
++
++def complete(h, claim):
++    result = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
++                               claim.preimage, h.preimage, False, ('verified',))
++    h.service.finish(claim, result)
++    return result
++
++
++def test_same_key_different_digest_rejected_after_row_reuse(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    complete(h, claim)
++    assert not h.store.read(h.binding.binding_id).unresolved
++    # Reconstruct the service: all remembered authority must be in the stores.
++    h.service = CoordinationService(**{k: getattr(h, k) for k in (
++        'store', 'facts', 'ledger', 'clock', 'resolve_binding', 'verify_enrollment',
++        'insert_enrolled', 'validate_authorization', 'verify_create_intent',
++        'termination', 'authorize_human_recovery', 'authorize_heads')})
++    h.request = replace(h.request, operation_id=uid(), request_digest='a' * 64)
++    with pytest.raises(CoordinationError, match='digest'):
++        reserve(h)
++    assert h.store.read(h.binding.binding_id).state != c.CoordinationState.ADMITTED
++
++
++def test_duplicate_completed_request_returns_receipt_without_admission(h):
++    from backend.services.version_control.coordination import ExistingReceipt
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    complete(h, claim)
++    original_id = h.request.operation_id
++    h.request = replace(h.request, operation_id=uid())
++    before = h.store.read(h.binding.binding_id).generation
++    with pytest.raises(ExistingReceipt) as caught:
++        reserve(h)
++    assert caught.value.receipt.operation_id == original_id
++    assert caught.value.receipt.status == c.FactStatus.CONFIRMED
++    row = h.store.read(h.binding.binding_id)
++    assert row.generation == before + 1
++    assert not row.unresolved and row.state == c.CoordinationState.IDLE
++
++
++@pytest.mark.parametrize('crash', [None, 'before-commit', 'after-commit-before-response'])
++def test_consumed_approval_survives_row_reuse_and_crash(h, crash):
++    from backend.tests.vc_fakes.stores import CrashBoundary
++    durable_facts(h)
++    enroll(h)
++    reservation = reserve(h)
++    if crash:
++        h.durable.failures.inject(CrashBoundary(crash))
++        with pytest.raises(CoordinationError):
++            h.service.admit(reservation, h.preimage, h.grant)
++        row = h.store.read(h.binding.binding_id)
++        assert row.unresolved and row.approval_id == h.grant.approval_id
++        assert row.state == c.CoordinationState.QUARANTINED
++        with pytest.raises(CoordinationError):
++            reserve(h)
++    else:
++        claim = h.service.admit(reservation, h.preimage, h.grant)
++        h.facts.publish_consumption.assert_called_once_with(claim)
++        complete(h, claim)
++        h.request = c.RequestIdentity(uid(), 'key-2', 'a' * 64)
++        h.grant = replace(h.grant, request=h.request)
++        with pytest.raises(CoordinationError, match='approval'):
++            admit(h)
++        assert h.facts.approval_use(h.binding, h.grant.approval_id).operation_ids == (claim.request.operation_id,)
++
++
++@pytest.mark.parametrize('point', ['evidence', 'admission', 'consumption', 'intent', 'receipt', 'release'])
++@pytest.mark.parametrize('boundary', ['before-commit', 'after-commit-before-response', 'during-follow-up-read'])
++def test_crashes_between_evidence_cas_consumption_patch_and_release_remain_safe(h, point, boundary):
++    from backend.tests.vc_fakes.stores import CrashBoundary
++    durable_facts(h)
++    enroll(h)
++    reservation = reserve(h)
++    if point == 'evidence':
++        h.ledger.verify_committed.side_effect = OSError('Delta evidence unavailable')
++        action = lambda: h.service.admit(reservation, h.preimage, h.grant)
++    elif point in {'admission', 'consumption'}:
++        failures = h.store.failures if point == 'admission' else h.durable.failures
++        failures.inject(CrashBoundary(boundary))
++        action = lambda: h.service.admit(reservation, h.preimage, h.grant)
++    else:
++        claim = h.service.admit(reservation, h.preimage, h.grant)
++        if point == 'intent':
++            h.store.failures.inject(CrashBoundary(boundary))
++            action = lambda: h.service.checkpoint(claim, c.PatchStage.CONFIG_IN_FLIGHT,
++                c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None))
++        else:
++            if point == 'receipt':
++                if boundary == 'during-follow-up-read':
++                    h.facts.lookup_request.side_effect = OSError('receipt read-back unavailable')
++                else:
++                    # Consumption already durable; inject only the next append (receipt).
++                    h.durable.failures.inject(CrashBoundary(boundary))
++            else:
++                h.store.failures.inject(CrashBoundary(boundary))
++            action = lambda: complete(h, claim)
++    with pytest.raises(CoordinationError):
++        action()
++    row = h.store.read(h.binding.binding_id)
++    if row.unresolved:
++        assert row.attempt_id == reservation.fence.attempt_id
++        with pytest.raises(CoordinationError):
++            reserve(h)
++    else:
++        assert point == 'release'
++        assert any(r.payload['fact_kind'] == 'receipt' for r in h.durable.state.rows)
++
++
++def test_checkpoint_is_monotonic_and_matching_get_cannot_finish_in_flight(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
++    h.service.checkpoint(claim, send.stage, send)
++    row = h.store.read(h.binding.binding_id)
++    assert row.checkpoint['resume_classification'] == 'read-only-possible-send'
++    with pytest.raises(CoordinationError):
++        h.service.checkpoint(claim, send.stage, send)
++    with pytest.raises(CoordinationError):
++        complete(h, claim)
++    assert h.store.read(h.binding.binding_id).state == c.CoordinationState.QUARANTINED
++
++
++def test_checkpoint_observation_requires_trusted_send_completion(h):
++    enroll(h)
++    claim = admit(h)
++    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
++    h.service.checkpoint(claim, send.stage, send)
++    observed = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED, h.clock.now(), 'b' * 64, h.preimage)
++    h.validate_stage_evidence.return_value = False  # GET equality alone
++    with pytest.raises(CoordinationError):
++        h.service.checkpoint(claim, observed.stage, observed)
++    with pytest.raises(CoordinationError):
++        h.service.checkpoint(claim, c.PatchStage.DESCRIPTION_PENDING,
++            replace(observed, stage=c.PatchStage.DESCRIPTION_PENDING))
++
++
++def test_checkpoint_normal_sequence_and_flush_failure_retains_claim(h):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    for stage in list(c.PatchStage)[1:]:
++        observation = h.preimage if stage in {c.PatchStage.CONFIG_OBSERVED, c.PatchStage.DESCRIPTION_OBSERVED} else None
++        h.service.checkpoint(claim, stage,
++            c.StageEvidence('VC/1.0', stage, h.clock.now(), 'a' * 64, observation))
++    h.facts.verify_flush.side_effect = lambda _: False
++    with pytest.raises(CoordinationError):
++        complete(h, claim)
++    assert h.store.read(h.binding.binding_id).unresolved
++
++
++def test_observer_cannot_regress_or_approve_heads(h):
++    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
++    enroll(h)
++    lease = h.service.observe_exclusively(h.binding, h.executor)
++    with pytest.raises(CoordinationError):
++        reserve(h)
++    with pytest.raises(CoordinationError):
++        h.service.assert_owner(lease.fence)
++    version_id = uid()
++    for update in (c.HeadUpdate(version_id, version_id, None, 'caller-claim'),
++                   c.HeadUpdate(version_id, None, version_id, 'caller-claim')):
++        with pytest.raises(CoordinationError):
++            h.service.advance_heads(lease.fence, update)
++    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
++    context = c.CaptureContext(h.binding, 'observer-1', h.clock.now(), 'open',
++        c.ActorContext('observer', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
++        attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
++    h.ledger.get_version.return_value = c.Version(version_id, snapshot, context)
++    heads = h.service.advance_heads(lease.fence, c.HeadUpdate(version_id, None, None, None))
++    assert heads == c.Heads(version_id, None, None)
++    assert not h.store.read(h.binding.binding_id).unresolved
++    newer = h.service.observe_exclusively(h.binding, h.executor)
++    assert newer.observed_sequence > lease.observed_sequence
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(lease.fence, c.HeadUpdate(uid(), None, None, None))
++    # Even the current holder cannot attach an old observation from another lease.
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(newer.fence, c.HeadUpdate(version_id, None, None, None))
++    final_id = uid()
++    h.ledger.get_version.return_value = c.Version(final_id, snapshot,
++        replace(context, observation_key='observer-2', parent_version_id=version_id,
++                attempt_id=newer.fence.attempt_id, generation=newer.fence.generation))
++    h.service.advance_heads(newer.fence, c.HeadUpdate(final_id, None, None, None))
++    claim = admit(h)
++    with pytest.raises(CoordinationError):
++        h.service.advance_heads(claim, c.HeadUpdate(None, final_id, final_id, 'unvalidated'))
++    h.authorize_heads.return_value = True
++    heads = h.service.advance_heads(claim, c.HeadUpdate(None, final_id, final_id, 'verified-deployment-policy'))
++    assert heads == c.Heads(final_id, final_id, final_id)
+diff --git a/backend/tests/test_vc_recovery.py b/backend/tests/test_vc_recovery.py
+new file mode 100644
+index 0000000..74f0793
+--- /dev/null
++++ b/backend/tests/test_vc_recovery.py
+@@ -0,0 +1,140 @@
++"""Recovery never infers executor termination from a matching Genie GET."""
++from dataclasses import replace
++from datetime import timedelta
++
++import pytest
++
++from backend.services.version_control import contracts as c
++from backend.services.version_control.coordination import CoordinationError
++from backend.tests.test_vc_coordination import h, enroll, reserve, admit, durable_facts, uid
++
++
++@pytest.mark.parametrize('entry', ['reserve', 'renew', 'assert_owner'])
++def test_expired_lease_quarantines_without_takeover(h, entry):
++    enroll(h)
++    claim = admit(h)
++    before = h.store.read(h.binding.binding_id)
++    h.clock.advance(timedelta(seconds=61))
++    with pytest.raises(CoordinationError):
++        if entry == 'reserve':
++            reserve(h)
++        else:
++            getattr(h.service, entry)(claim)
++    row = h.store.read(h.binding.binding_id)
++    assert row.state == c.CoordinationState.QUARANTINED
++    assert row.unresolved
++    assert (row.attempt_id, row.generation, row.approval_id, row.pre_version_id) == (
++        before.attempt_id, before.generation, before.approval_id, before.pre_version_id)
++    assert any(call.args[0].status == c.FactStatus.QUARANTINED for call in h.facts.append.call_args_list)
++    with pytest.raises(CoordinationError):
++        reserve(h)
++
++
++def recovery_evidence(h, claim):
++    terminal = h.clock.now()
++    termination = c.TerminationEvidence(claim.attempt_id, h.executor.execution_ref,
++                                        'app-worker', terminal, (), 'a' * 64)
++    samples = tuple(c.RecoverySample(terminal + timedelta(seconds=i),
++                                     h.preimage.state_digest, 'b' * 64) for i in (1, 12, 23))
++    h.clock.advance(timedelta(seconds=30))
++    return c.RecoveryEvidence('VC/1.0', claim, termination, samples, 20.0,
++                              'verified-lifetime-reference', 'observed-preimage', None, None, False)
++
++
++def test_matching_get_after_timeout_cannot_resolve_attempt(h):
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'PATCH timeout; matching GET is observation only')
++    evidence = recovery_evidence(h, claim)
++    with pytest.raises(CoordinationError, match='termination'):
++        h.service.recover(h.binding, evidence)
++    with pytest.raises(CoordinationError):
++        h.service.assert_owner(claim)
++    with pytest.raises(CoordinationError):
++        h.service.finish(claim, c.OperationResult(claim.request.operation_id,
++            c.OperationStatus.CONFIRMED, claim.preimage, h.preimage, False, ('GET-matched',)))
++    assert h.store.read(h.binding.binding_id).unresolved
++
++
++@pytest.mark.parametrize('fault', [None, 'job-ok', 'wrong-attempt', 'missing-child',
++    'no-worker-proof', 'two-reads', 'pre-termination', 'unstable', 'short-span', 'future'])
++def test_recovery_needs_exact_attempt_termination_and_three_post_termination_reads(h, fault):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'unknown send outcome')
++    evidence = recovery_evidence(h, claim)
++    # Test-only verified capability. Production defaults to unavailable.
++    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
++    trusted = evidence.termination
++    if fault in {'job-ok', 'missing-child'}:
++        executions = tuple(c.ExecutionTerminalEvidence(ref, trusted.terminated_at, 'c' * 64)
++            for ref in (h.executor.execution_ref, 'job/retry', 'job/child'))
++        trusted = replace(trusted, source='job', executions=executions, app_worker_proof_digest=None)
++        evidence = replace(evidence, termination=trusted)
++    h.termination.for_attempt.return_value = trusted
++    if fault == 'wrong-attempt':
++        evidence = replace(evidence, termination=replace(trusted, attempt_id=uid()))
++    elif fault == 'missing-child':
++        evidence = replace(evidence, termination=replace(trusted, executions=trusted.executions[:-1]))
++    elif fault == 'no-worker-proof':
++        evidence = replace(evidence, termination=replace(trusted, app_worker_proof_digest=None))
++        h.termination.for_attempt.return_value = evidence.termination
++    elif fault == 'two-reads':
++        evidence = replace(evidence, samples=evidence.samples[:2])
++    elif fault == 'pre-termination':
++        evidence = replace(evidence, samples=(replace(evidence.samples[0], observed_at=trusted.terminated_at), *evidence.samples[1:]))
++    elif fault == 'unstable':
++        evidence = replace(evidence, samples=(*evidence.samples[:2], replace(evidence.samples[2], state_digest='c' * 64)))
++    elif fault == 'short-span':
++        evidence = replace(evidence, samples=(*evidence.samples[:2], replace(evidence.samples[2], observed_at=evidence.samples[0].observed_at + timedelta(seconds=20))))
++    elif fault == 'future':
++        evidence = replace(evidence, samples=(*evidence.samples[:2], replace(evidence.samples[2], observed_at=h.clock.now() + timedelta(seconds=1))))
++    if fault in {None, 'job-ok'}:
++        result = h.service.recover(h.binding, evidence)
++        assert not result.unresolved
++        assert result.fence.generation == claim.generation + 1
++        assert h.store.read(h.binding.binding_id).state == c.CoordinationState.IDLE
++        with pytest.raises(CoordinationError):
++            h.service.assert_owner(claim)
++        assert any(r.payload['fact_kind'] == 'recovery' for r in h.durable.state.rows)
++    else:
++        with pytest.raises(CoordinationError):
++            h.service.recover(h.binding, evidence)
++        assert h.store.read(h.binding.binding_id).unresolved
++
++
++@pytest.mark.parametrize('missing', [None, 'authorization', 'reason', 'risk', 'trusted-policy'])
++def test_unknown_request_lifetime_disables_auto_clear(h, missing):
++    durable_facts(h)
++    enroll(h)
++    claim = admit(h)
++    h.service.quarantine(claim, 'worker disconnected')
++    evidence = recovery_evidence(h, claim)
++    h.termination.for_attempt.return_value = evidence.termination
++    # Caller-supplied lifetime/reference cannot turn on automatic recovery.
++    with pytest.raises(CoordinationError, match='unverified'):
++        h.service.recover(h.binding, evidence)
++    evidence = replace(evidence, maximum_request_lifetime_seconds=None,
++        lifetime_bound_reference=None, human_authorization_reference='audited-operator/123',
++        human_reason='Orphan inspection complete; reconcile under new governed request',
++        residual_risk_acknowledged=True)
++    h.authorize_human_recovery.return_value = True
++    if missing == 'authorization':
++        evidence = replace(evidence, human_authorization_reference=None)
++    elif missing == 'reason':
++        evidence = replace(evidence, human_reason='')
++    elif missing == 'risk':
++        evidence = replace(evidence, residual_risk_acknowledged=False)
++    elif missing == 'trusted-policy':
++        h.authorize_human_recovery.return_value = False
++    if missing is None:
++        result = h.service.recover(h.binding, evidence)
++        assert not result.unresolved
++        audits = [r for r in h.durable.state.rows if r.payload['fact_kind'] == 'recovery']
++        assert audits[-1].payload['evidence']['residual_risk_acknowledged'] is True
++        assert audits[-1].payload['evidence']['human_authorization_reference'] == 'audited-operator/123'
++    else:
++        with pytest.raises(CoordinationError):
++            h.service.recover(h.binding, evidence)
++        assert h.store.read(h.binding.binding_id).unresolved
+diff --git a/backend/version_control_ddl/05-coordination.sql b/backend/version_control_ddl/05-coordination.sql
+new file mode 100644
+index 0000000..8fcb84e
+--- /dev/null
++++ b/backend/version_control_ddl/05-coordination.sql
+@@ -0,0 +1,39 @@
++CREATE TABLE IF NOT EXISTS ${catalog}.${control_schema}.genie_ops_coordination (
++  binding_id STRING NOT NULL,
++  binding_revision BIGINT NOT NULL,
++  space_key STRING NOT NULL,
++  workspace_id STRING NOT NULL,
++  space_id STRING,
++  generation BIGINT NOT NULL,
++  row_version BIGINT NOT NULL,
++  state STRING NOT NULL,
++  holder STRING,
++  attempt_id STRING,
++  executor_kind STRING,
++  executor_ref STRING,
++  lease_expires_at TIMESTAMP,
++  active_operation_id STRING,
++  idempotency_key STRING,
++  request_digest STRING,
++  approval_id STRING,
++  approval_digest STRING,
++  approval_consumption_published BOOLEAN NOT NULL,
++  pre_version_id STRING,
++  preimage_digest STRING,
++  create_intent_event_id STRING,
++  expected_base_fingerprint STRING,
++  admitted_at TIMESTAMP,
++  mutation_stage STRING,
++  checkpoint_json STRING,
++  unresolved BOOLEAN NOT NULL,
++  quarantine_reason STRING,
++  termination_evidence_json STRING,
++  observed_head_version_id STRING,
++  approved_head_version_id STRING,
++  deployed_head_version_id STRING,
++  observed_sequence BIGINT NOT NULL,
++  updated_at TIMESTAMP NOT NULL,
++  CONSTRAINT coordination_state CHECK (state IN
++    ('idle','observing','reserved','admitted','quarantined')),
++  CONSTRAINT nonnegative_fence CHECK (generation >= 0 AND row_version >= 0)
++) USING DELTA TBLPROPERTIES ('delta.isolationLevel'='Serializable');
