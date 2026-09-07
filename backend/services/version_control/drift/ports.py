@@ -47,6 +47,10 @@ class BundleInventory(Protocol):
 class BindingInventory(Protocol):
     def page(self, workspace_id: str, cursor: str | None, limit: int) -> vc.Page[ScanEntry]: ...
 
+    def matches(self, binding: vc.BindingRef) -> tuple[vc.BindingRef, ...]:
+        """All physical/logical identity matches across pages, including duplicate rows."""
+        ...
+
 
 class Projections(Protocol):
     def publish(self, binding: vc.BindingRef, status: vc.BindingStatus,

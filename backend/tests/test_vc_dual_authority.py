@@ -5,6 +5,7 @@ import pytest
 
 from backend.services.version_control import contracts as vc
 from backend.tests.test_vc_reconcile import NOW, observed_result, scan_entry, scan_setup
+from backend.tests.test_vc_drift import version_id
 
 
 def bundle_setup(entry=None, **options):
@@ -63,3 +64,43 @@ def test_bundle_uncertainty_is_not_clear_or_inferred_actor(failure):
     assert status.drift == (vc.DriftState.CONFLICTED if failure == "capture" else vc.DriftState.UNKNOWN)
     assert status.allowed_actions == ()
     assert status.stale
+
+
+@pytest.mark.parametrize("duplicate", ["physical", "logical", "same_id", "other_page"])
+def test_duplicate_binding_inventory_quarantines_not_name_rebinds(duplicate):
+    coordination = Mock(spec=vc.Coordination)
+    fence = vc.FenceToken(version_id(1), 1, version_id(50), 1, 1)
+    coordination.observe_exclusively.return_value = vc.ObservationLease(fence, 0, NOW)
+    service, observer, inventory, projections, bundles, entry = bundle_setup(coordination=coordination)
+    other = replace(entry.binding, binding_id=version_id(3))
+    if duplicate == "logical":
+        other = replace(other, space_id="replacement-space")
+    if duplicate == "same_id":
+        other = entry.binding
+    inventory.matches.return_value = (entry.binding, other)
+    inventory.matches.side_effect = None
+    status = service.scan("123", None).items[0]
+    assert status.quarantined
+    assert status.drift == vc.DriftState.UNKNOWN
+    assert status.allowed_actions == ()
+    assert "audited manual identity resolution" in " ".join(status.reasons)
+    coordination.quarantine.assert_called_once()
+    assert coordination.quarantine.call_args.args[0] == fence
+    assert "identity" in coordination.quarantine.call_args.args[1]
+    coordination.advance_heads.assert_not_called()
+    coordination.recover.assert_not_called()
+    observer.capture.assert_not_called()
+    bundles.for_binding.assert_not_called()
+    assert entry.binding.space_id == "space-1"
+
+
+def test_duplicate_quarantine_failure_keeps_blocked_stale_projection():
+    coordination = Mock(spec=vc.Coordination)
+    coordination.observe_exclusively.side_effect = RuntimeError("duplicate coordination rows")
+    service, observer, inventory, projections, bundles, entry = bundle_setup(coordination=coordination)
+    inventory.matches.side_effect = lambda binding: (binding, binding)
+    status = service.scan("123", None).items[0]
+    assert status.quarantined and status.stale
+    assert status.allowed_actions == ()
+    coordination.quarantine.assert_not_called()
+    observer.capture.assert_not_called()

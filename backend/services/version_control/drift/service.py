@@ -28,7 +28,7 @@ class DriftService:
                  facts: vc.OperationFacts | None = None, dispatch_enabled=False,
                  inventory: BindingInventory | None = None, projections: Projections | None = None,
                  scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30),
-                 bundles: BundleInventory | None = None):
+                 bundles: BundleInventory | None = None, coordination: vc.Coordination | None = None):
         if not 1 <= batch_size <= 100 or full_fetch_interval <= timedelta(0):
             raise ValueError("Invalid scan bounds or full-fetch interval")
         self.canonicalizer = canonicalizer
@@ -49,6 +49,7 @@ class DriftService:
         self.batch_size = batch_size
         self.full_fetch_interval = full_fetch_interval
         self.bundles = bundles
+        self.coordination = coordination
 
     def scan(self, workspace_id: str, cursor: str | None) -> vc.ReconcileBatch:
         if self.scan_enabled is not True:
@@ -69,6 +70,22 @@ class DriftService:
                         or status.binding_id != entry.binding.binding_id
                         or status.binding_revision != entry.binding.binding_revision):
                     raise PermissionError("Inventory binding scope mismatch")
+                matches = self.inventory.matches(entry.binding)
+                if len(matches) != 1 or matches[0] != entry.binding:
+                    reason = "Ambiguous binding inventory; audited manual identity resolution required"
+                    status = replace(status, drift=vc.DriftState.UNKNOWN, quarantined=True,
+                                     allowed_actions=(), reasons=(*status.reasons, reason))
+                    if self.coordination is None:
+                        raise RuntimeError("Identity quarantine coordinator unavailable")
+                    lease = self.coordination.observe_exclusively(entry.binding, self.executor)
+                    if (lease.fence.binding_id != entry.binding.binding_id
+                            or lease.fence.binding_revision != entry.binding.binding_revision):
+                        raise PermissionError("Identity quarantine fence mismatch")
+                    self.coordination.quarantine(lease.fence, reason)
+                    self.projections.publish(entry.binding, status, entry.last_full_fetch_at,
+                                             entry.previous_update_time)
+                    results.append(status)
+                    continue
                 conflicts = ()
                 if entry.governed_by == "workbench" and self.bundles is not None:
                     status = replace(status, drift=vc.DriftState.UNKNOWN, allowed_actions=())

@@ -280,6 +280,7 @@ def scan_setup(entries, **options):
 
     inventory = Mock(spec=BindingInventory)
     inventory.page.return_value = vc.Page(tuple(entries), "next")
+    inventory.matches.side_effect = lambda binding: (binding,)
     projections = Mock(spec=Projections)
     dependencies = dict(inventory=inventory, projections=projections, scan_enabled=True,
                         batch_size=2, full_fetch_interval=timedelta(minutes=30), clock=lambda: NOW)
