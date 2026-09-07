@@ -170,3 +170,40 @@ def test_consumption_publish_failure_retains_unresolved_claim(boundary):
     context.service.facts = restarted
     with pytest.raises(PermissionError, match='consumed'):
         context.service.authorize(context.request, context.executor)
+
+
+def test_target_delta_adapter_and_owned_ddl_are_append_only_and_default_off():
+    import json
+    from pathlib import Path
+    from backend.services.version_control.governance.delta import DeltaFactStore
+
+    ddl = Path('backend/version_control_ddl/06-operations.sql').read_text()
+    volume = Path('backend/version_control_ddl/07-approval-evidence-volume.sql').read_text()
+    assert ddl.count('CREATE TABLE') == 1
+    assert "'delta.appendOnly'='true'" in ddl
+    for column in ('event_key', 'transition_sequence', 'target_workspace', 'idempotency_key',
+                   'request_digest', 'approval_digest', 'evidence_json', 'generation'):
+        assert column in ddl
+    assert 'vc_approval_evidence' in volume and volume.count('CREATE VOLUME') == 1
+    calls = []
+
+    def sql(statement, parameters):
+        calls.append((statement, parameters))
+        if statement.startswith('SELECT'):
+            return [{'evidence_json': calls[0][1]['evidence_json']}]
+        return []
+
+    store = DeltaFactStore(sql, 'catalog', 'control', '123')
+    with pytest.raises(PermissionError, match='disabled'):
+        store.append(fact().event_key, to_wire(fact()))
+    assert calls == []
+    store = DeltaFactStore(sql, 'catalog', 'control', '123', writes_enabled=True)
+    store.append(fact().event_key, to_wire(fact()))
+    assert calls[0][0].startswith('INSERT INTO `catalog`.`control`.`genie_space_operations`')
+    assert json.loads(calls[0][1]['evidence_json'])['schema_version'] == 'VC/1.0'
+    assert store.read() == (to_wire(fact()),)
+    assert all(not statement.startswith(('UPDATE', 'DELETE', 'MERGE')) for statement, _ in calls)
+    with pytest.raises(PermissionError, match='target'):
+        store.append(fact().event_key, to_wire(fact(binding=replace(binding_fixture(), workspace_id='source'))))
+    with pytest.raises(ValueError):
+        DeltaFactStore(sql, 'catalog; DROP TABLE x', 'control', '123')
