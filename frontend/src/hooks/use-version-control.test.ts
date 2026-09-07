@@ -24,7 +24,7 @@ it('late_response_for_previous_binding_cannot_replace_current_heads', async () =
 })
 
 import type { VersionControlState } from './use-version-control'
-const permissive: VersionControlState = { bindingId: 'demo-binding', captured: true, loading: false, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
+const permissive: VersionControlState = { bindingId: 'demo-binding', captured: true, captureFailure: null, loading: false, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
 const blockers: [string, Partial<VersionControlState>][] = [
   ['quarantined', { status: { ...bindingFixture, quarantined: true } }],
   ['unresolved', { status: { ...bindingFixture, unresolved_operation_id: 'op-1' } }],

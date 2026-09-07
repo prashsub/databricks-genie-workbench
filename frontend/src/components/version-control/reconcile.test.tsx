@@ -45,7 +45,7 @@ it('reconcile_result_renders_operation_evidence_not_a_bare_message', async () =>
   const operation = { operation_id: 'partial-1', status: 'applied_partial', job_run_id: null, checkpoints: ['Description stopped'], audit: ['External state preserved'], receipt_references: [] }
   const transport = vi.fn(async () => new Response(JSON.stringify(operation)))
   const api = new VersionControlApi(transport)
-  const state = { bindingId: 'demo-binding', loading: false, captured: true, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
+  const state = { bindingId: 'demo-binding', loading: false, captured: true, captureFailure: null, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
   const host = document.createElement('div')
   const root = createRoot(host)
   try {
@@ -83,7 +83,7 @@ import { RestorePanel } from './restore'
 import { PromotionPanel } from './promotion'
 import { canMutate } from '@/hooks/use-version-control'
 import type { VersionControlState } from '@/hooks/use-version-control'
-const permissiveState: VersionControlState = { bindingId: 'demo-binding', loading: false, captured: true, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
+const permissiveState: VersionControlState = { bindingId: 'demo-binding', loading: false, captured: true, captureFailure: null, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
 it('reconcile_and_restore_controls_render_disabled_for_quarantined_and_partial_bindings', () => {
   const api = new VersionControlApi(vi.fn())
   for (const changes of [{ quarantined: true }, { unresolved_operation_id: 'op-1' }]) {

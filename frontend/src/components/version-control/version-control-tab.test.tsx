@@ -32,7 +32,7 @@ it('open_waits_for_capture_before_showing_reconcile_choices', async () => {
 })
 
 it('version_control_actions_are_keyboard_accessible_and_errors_announced', () => {
-  const state = { bindingId: 'demo-binding', loading: false, captured: false, busy: false, stale: true, status: bindingFixture, history: { items: [versionFixture], next_cursor: null }, error: 'Evidence unavailable' }
+  const state = { bindingId: 'demo-binding', loading: false, captured: false, captureFailure: null, busy: false, stale: true, status: bindingFixture, history: { items: [versionFixture], next_cursor: null }, error: 'Evidence unavailable' }
   const html = renderToStaticMarkup(<VersionControlView state={state} />)
   expect(html).toContain('aria-live="polite"')
   expect(html).toContain('role="alert"')
@@ -105,3 +105,33 @@ it('production_modules_do_not_import_test_fixtures', () => {
   }
 })
 import { readFileSync, readdirSync } from 'node:fs'
+
+import m02Errors from '../../../../backend/tests/fixtures/vc_contracts/api_error.json'
+it('open_distinguishes_409_conflict_423_unresolved_and_503_stale_surfaces', async () => {
+  const markups: string[] = []
+  for (const [httpStatus, kind] of [[409, 'conflict'], [423, 'unresolved'], [503, 'unavailable']] as const) {
+    const payload = m02Errors.examples[0]
+    const transport = vi.fn<typeof fetch>(async url => String(url).endsWith('/observe')
+      ? new Response(JSON.stringify(payload), { status: httpStatus })
+      : new Response(JSON.stringify({ items: [versionFixture], next_cursor: null })))
+    const api = new VersionControlApi(transport)
+    const store = createVersionControlStore(api)
+    await store.open('demo-binding')
+    const state = store.getSnapshot()
+    for (const action of bindingFixture.allowed_actions) expect(canMutate(state, action)).toBe(false)
+    const html = renderToStaticMarkup(<VersionControlView state={state} api={api} onCompare={vi.fn()} onRefresh={vi.fn()} />)
+    markups.push(html)
+    if (httpStatus === 409) {
+      expect(html).toContain('Preserved conflict'); expect(html).toContain('Compare preserved history')
+      expect(html).not.toContain('Stale history')
+    } else if (httpStatus === 423) {
+      expect(html).toContain('Quarantined / unresolved'); expect(html).toContain(payload.operation_id)
+      expect(html).not.toContain('Stale history'); expect(html).not.toMatch(/<button[^>]*>[^<]*[Rr]etry/)
+    } else {
+      expect(html).toContain('Stale history'); expect(html).toContain('Refresh captured history')
+      expect(state.history.items).toEqual([versionFixture]); expect(html).toContain('external-3')
+    }
+    expect(state.captureFailure).toMatchObject({ kind, operationId: payload.operation_id })
+  }
+  expect(new Set(markups).size).toBe(3)
+})

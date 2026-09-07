@@ -6,11 +6,12 @@ import { demoApi } from '@/components/version-control/demo-api'
 
 export interface VersionControlState {
   bindingId: string; loading: boolean; captured: boolean; busy: boolean; stale: boolean
+  captureFailure: { kind: 'conflict' | 'unresolved' | 'unavailable'; message: string; operationId?: string } | null
   status: BindingStatus | null; history: VersionPage; error: string
 }
-const initialState = (): VersionControlState => ({ bindingId: '', loading: false, captured: false, busy: false, stale: false, status: null, history: { items: [], next_cursor: null }, error: '' })
+const initialState = (): VersionControlState => ({ bindingId: '', loading: false, captured: false, busy: false, stale: false, captureFailure: null, status: null, history: { items: [], next_cursor: null }, error: '' })
 export function canMutate(state: VersionControlState, action: string) {
-  return Boolean(state.captured && !state.loading && !state.busy && !state.stale && state.status && !state.status.stale && !state.status.quarantined && !state.status.unresolved_operation_id && !['unknown', 'unreachable', 'applied_unverified', 'conflicted'].includes(state.status.drift) && state.status.allowed_actions.includes(action))
+  return Boolean(state.captured && !state.loading && !state.busy && !state.stale && !state.captureFailure && state.status && !state.status.stale && !state.status.quarantined && !state.status.unresolved_operation_id && !['unknown', 'unreachable', 'applied_unverified', 'conflicted'].includes(state.status.drift) && state.status.allowed_actions.includes(action))
 }
 export function createVersionControlStore(api: VersionControlApi) {
   let state = initialState()
@@ -26,13 +27,14 @@ export function createVersionControlStore(api: VersionControlApi) {
     const signal = controller.signal
     const updateCurrent = (changes: Partial<VersionControlState>) => { if (current === generation && !signal.aborted) update(changes) }
     if (state.bindingId !== bindingId) state = initialState()
-    updateCurrent({ bindingId, loading: true, captured: false, error: '' })
+    updateCurrent({ bindingId, loading: true, captured: false, captureFailure: null, error: '' })
     try {
       const observation = await api.observe(bindingId, reason, crypto.randomUUID())
       updateCurrent({ status: observation.status, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale })
     } catch (error) {
-      const label = error instanceof VersionControlError ? error.status === 423 ? 'Quarantined / unresolved: ' : error.status === 409 ? 'Conflicted; preserved history: ' : error.status === 503 ? 'Evidence unreachable: ' : '' : ''
-      updateCurrent({ captured: false, stale: true, error: label + (error instanceof Error ? error.message : 'Capture unavailable') })
+      const kind = error instanceof VersionControlError && error.status === 409 ? 'conflict' : error instanceof VersionControlError && error.status === 423 ? 'unresolved' : 'unavailable'
+      const message = error instanceof Error ? error.message : 'Capture unavailable'
+      updateCurrent({ captured: false, stale: true, error: message, captureFailure: { kind, message, operationId: error instanceof VersionControlError ? error.operation_id : undefined } })
     }
     if (current !== generation || signal.aborted) return
     try { updateCurrent({ history: await api.versions(bindingId, undefined, signal) }) }

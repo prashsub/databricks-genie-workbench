@@ -8,15 +8,27 @@ import { History } from './history'
 import { SemanticDiffView } from './diff'
 import { demoApi } from './demo-api'
 import { RestorePanel } from './restore'
-import { ReconcilePanel } from './reconcile'
+import { ReconcilePanel, OperationDrillThrough } from './reconcile'
 import { ApprovalsPanel } from './approvals'
 import { PromotionPanel } from './promotion'
 
-export function VersionControlView({ state, api }: { state: VersionControlState; api?: VersionControlApi }) {
-  return <section aria-label="Version Control and Promotion" aria-live="polite" className="space-y-4">
+export function VersionControlView({ state, api, onCompare, onRefresh }: { state: VersionControlState; api?: VersionControlApi; onCompare?: () => void; onRefresh?: () => void }) {
+  return <section aria-label="Version Control and Promotion" className="space-y-4">
     <h2>Version Control and Promotion</h2>
-    {state.loading && <p role="status">Capturing external history…</p>}
-    {state.stale && <p role="alert">Stale history — mutating actions disabled. {state.error}</p>}
+    {state.loading && <p role="status" aria-live="polite">Capturing external history…</p>}
+    {state.captureFailure?.kind === 'conflict' && <section aria-label="Preserved conflict">
+      <p role="alert" aria-live="polite">Preserved conflict — external state preserved; inspect and compare before reconciliation. {state.captureFailure.message}</p>
+      <button onClick={onCompare} disabled={!onCompare}>Compare preserved history</button>
+    </section>}
+    {state.captureFailure?.kind === 'unresolved' && <section aria-label="Quarantined or unresolved operation">
+      <p role="alert" aria-live="polite">Quarantined / unresolved — inspect operator evidence. No mutation replay. {state.captureFailure.message}</p>
+      {state.captureFailure.operationId && <OperationDrillThrough key={state.captureFailure.operationId} api={api} operationId={state.captureFailure.operationId} />}
+    </section>}
+    {state.stale && (!state.captureFailure || state.captureFailure.kind === 'unavailable') && <section aria-label="Stale unavailable evidence">
+      <p role="alert" aria-live="polite">Stale history — mutating actions disabled. {state.error}</p>
+      {state.captureFailure?.operationId && <OperationDrillThrough key={state.captureFailure.operationId} api={api} operationId={state.captureFailure.operationId} />}
+      <button onClick={onRefresh} disabled={!onRefresh || state.loading}>Refresh captured history</button>
+    </section>}
     {state.busy && <p role="status">Capture busy — wait for verification. No mutation retry.</p>}
     {!state.loading && !state.history.items.length && <p>No captured versions available.</p>}
     {state.status && <OverviewBadge api={api} status={state.status} />}
@@ -43,7 +55,7 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
     finally { setComparing(false) }
   }
   return <div className="space-y-6">
-    <VersionControlView api={api} state={state} />
+    <VersionControlView api={api} state={state} onRefresh={() => void state.refresh()} onCompare={state.history.items.length >= 2 ? () => void compare(state.history.items[0].version_id, state.history.items[1].version_id) : undefined} />
     <button disabled={state.loading} onClick={() => void state.refresh('history')}>Refresh captured history</button>
     <History page={state.history} loading={state.loading} onNext={() => void state.nextPage()} onSelect={setSelected} onCompare={(left, right) => void compare(left, right)} />
     {selected && <p>Selected historical version: {selected.version_id}</p>}
