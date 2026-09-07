@@ -1,11 +1,29 @@
 """Synchronous, fail-closed coordination. Never sends a Genie mutation."""
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from math import isfinite
 from uuid import uuid4
 
 from backend.services.version_control import contracts as c
 from .row import CoordinationRow
+
+
+@dataclass(frozen=True)
+class AttemptSubject:
+    """Names the attempt a fact is ABOUT; not a VC/1.0 contract type (M03-private)."""
+    attempt_id: str | None
+    generation: int | None
+    holder: str | None
+    executor_kind: str | None
+    pre_version_id: str | None
+    approval_id: str | None
+    approval_digest: str | None
+
+
+def _rejected_subject(executor):
+    """A CAS loser never acquired an attempt; attribute the fact to who tried."""
+    return AttemptSubject(None, None, executor.principal_id, executor.actor_kind,
+                          None, None, None)
 
 
 class CoordinationError(RuntimeError):
@@ -106,22 +124,26 @@ class CoordinationService:
                             row.attempt_id, row.generation, row.row_version)
 
     def _fact(self, row, request, status, *, evidence=None, kind=c.FactKind.OPERATION,
-              post_version_id=None):
+              post_version_id=None, subject=None):
+        """`subject` names the attempt this fact is ABOUT; None means row's own attempt."""
         stage = row.mutation_stage or c.PatchStage.CONFIG_PENDING
+        subject = subject or AttemptSubject(row.attempt_id, row.generation, row.holder,
+                                            row.executor_kind, row.pre_version_id,
+                                            row.approval_id, row.approval_digest)
         if evidence is None:
             evidence = c.StageEvidence('VC/1.0', stage, self.clock.now(),
                 c.canonical_json_hash('vc-coordination/1', {
-                    'status': status.value, 'attempt': row.attempt_id,
-                    'row_version': row.row_version}), None)
-        key = f'{request.operation_id}:{row.attempt_id}:{row.row_version}:{status.value}'
+                    'status': status.value, 'kind': kind.value,
+                    'attempt': subject.attempt_id, 'row_version': row.row_version}), None)
+        key = f'{request.operation_id}:{subject.attempt_id}:{kind.value}:{status.value}'
         fact = c.OperationFact(str(uuid4()), kind, request.operation_id,
             row.row_version, key, row.binding, request, 'coordination',
-            row.holder or 'coordination',
-            c.ActorContext(row.holder or 'coordination', row.binding.workspace_id,
-                           row.executor_kind or 'service'), status, evidence,
-            self.clock.now(), attempt_id=row.attempt_id, generation=row.generation,
-            pre_version_id=row.pre_version_id, post_version_id=post_version_id,
-            approval_id=row.approval_id, approval_digest=row.approval_digest)
+            subject.holder or 'coordination',
+            c.ActorContext(subject.holder or 'coordination', row.binding.workspace_id,
+                           subject.executor_kind or 'service'), status, evidence,
+            self.clock.now(), attempt_id=subject.attempt_id, generation=subject.generation,
+            pre_version_id=subject.pre_version_id, post_version_id=post_version_id,
+            approval_id=subject.approval_id, approval_digest=subject.approval_digest)
         return self._io(self.facts.append, fact)
 
     def reserve(self, binding: c.BindingRef, operation: c.RequestIdentity,
@@ -142,7 +164,8 @@ class CoordinationService:
                 active_operation_id=operation.operation_id,
                 idempotency_key=operation.idempotency_key, request_digest=operation.request_digest)
         except OwnershipError:
-            self._fact(row, operation, c.FactStatus.CONFLICTED)
+            self._fact(row, operation, c.FactStatus.CONFLICTED,
+                       subject=_rejected_subject(executor))
             raise
         history = self._history(row, operation)
         receipts = [f for f in history.facts if f.fact_kind == c.FactKind.RECEIPT]

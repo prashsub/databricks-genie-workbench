@@ -85,6 +85,78 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+def test_conflict_facts_carry_the_rejected_requests_own_identity(h):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    durable_facts(h)
+    enroll(h)
+    reqs = [c.RequestIdentity(uid(), f'key-{i}', f'{i}' * 64) for i in (1, 2)]
+    execs = [replace(h.executor, principal_id=f'principal-{i}',
+                     execution_ref=f'job/{i}') for i in (1, 2)]
+    barrier = Barrier(2)
+    original = h.store.compare_and_swap
+
+    def race(*args, **kwargs):
+        barrier.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    h.store.compare_and_swap = race
+
+    def run(i):
+        try:
+            return i, h.service.reserve(h.binding, reqs[i], execs[i])
+        except CoordinationError:
+            return i, None
+
+    with ThreadPoolExecutor(2) as pool:
+        results = dict(pool.map(lambda i: run(i), range(2)))
+    h.store.compare_and_swap = original  # race barrier is done; single-threaded now
+    winners = [(i, r) for i, r in results.items() if r is not None]
+    assert len(winners) == 1
+    win_i, winner = winners[0]
+    lose_i = 1 - win_i
+    winner_executor, loser_executor = execs[win_i], execs[lose_i]
+    loser_request = reqs[lose_i]
+    row = h.store.read(h.binding.binding_id)
+    assert row.attempt_id == winner.fence.attempt_id
+    assert row.holder == winner_executor.principal_id
+
+    all_facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
+    loser_facts = [f for f in all_facts if f.request == loser_request]
+    assert len(loser_facts) == 1
+    lf = loser_facts[0]
+    assert lf.actor.subject_id == loser_executor.principal_id
+    assert lf.requester_id == loser_executor.principal_id
+    assert lf.attempt_id != winner.fence.attempt_id
+    assert lf.approval_id is None and lf.pre_version_id is None
+    # No key collision; the loser's key is not ambiguous.
+    assert len({f.event_key for f in all_facts}) == len(all_facts)
+    assert h.facts.lookup_request(h.binding, loser_request.idempotency_key).ambiguous is False
+
+    # fact_kind participates in the key.
+    op_ref = h.service._fact(row, loser_request, c.FactStatus.CONFLICTED,
+                             kind=c.FactKind.OPERATION)
+    rc_ref = h.service._fact(row, loser_request, c.FactStatus.CONFLICTED,
+                             kind=c.FactKind.RECEIPT)
+    op_key = next(r.event_key for r in h.durable.state.rows
+                  if r.payload['event_id'] == op_ref.event_id)
+    rc_key = next(r.event_key for r in h.durable.state.rows
+                  if r.payload['event_id'] == rc_ref.event_id)
+    assert op_key != rc_key
+
+    # Key is stable across an unrelated CAS (renew bumps row_version).
+    reservation = c.Reservation(winner.fence, reqs[win_i], winner_executor, winner.lease_expires_at)
+    stable_req = c.RequestIdentity(uid(), 'key-stable', 'a' * 64)
+    r1 = h.service._fact(h.store.read(h.binding.binding_id), stable_req, c.FactStatus.CONFLICTED)
+    key1 = next(r.event_key for r in h.durable.state.rows if r.payload['event_id'] == r1.event_id)
+    h.service.renew(reservation.fence)
+    r2 = h.service._fact(h.store.read(h.binding.binding_id), stable_req, c.FactStatus.CONFLICTED)
+    key2 = next(r.event_key for r in h.durable.state.rows if r.payload['event_id'] == r2.event_id)
+    assert key1 == key2
+    # The winner still holds the row.
+    assert h.store.read(h.binding.binding_id).unresolved
+
+
 def test_two_concurrent_reservations_have_exactly_one_winner(h):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
