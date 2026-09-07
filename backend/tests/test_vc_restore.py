@@ -64,7 +64,7 @@ def test_restore_rejects_invalid_job_or_historical_payload(restore_rig, invalid)
     rig.transport.patch_config_once.assert_not_called()
 
 
-@pytest.mark.parametrize("case", ["authorized", "no_policy", "external_drift", "ambiguous"])
+@pytest.mark.parametrize("case", ["authorized", "no_policy", "external_drift", "ambiguous", "stale_post_stage"])
 def test_compensation_requires_preauthorization_and_unchanged_post_stage(restore_rig, case):
     rig, service, original, dispatcher, identity, validate = restore_rig
     applied = service.run(original.identity.operation_id, rig.executor)
@@ -72,6 +72,8 @@ def test_compensation_requires_preauthorization_and_unchanged_post_stage(restore
     compensation = replace(original, identity=vc.RequestIdentity(uid(), "compensate", "b" * 64),
         source_version_id=applied.preimage.version_id, expected_base=applied.postimage.state_digest,
         serialized_space=rig.before.serialized_space, description="old")
+    if case == "stale_post_stage":
+        compensation = replace(compensation, expected_base=applied.preimage.state_digest)
     approval = Mock(spec=vc.ApprovalRecord)
     approval.request = Mock(spec=vc.ApprovalRequest)
     approval.request.requested_at = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -86,7 +88,10 @@ def test_compensation_requires_preauthorization_and_unchanged_post_stage(restore
         False) if key == original.identity.idempotency_key else vc.RequestHistory((), False)
     if case == "external_drift":
         rig.state["description"] = "external edit after restore"
-    if case in {"no_policy", "ambiguous"}:
+    if case == "stale_post_stage":
+        with pytest.raises(PermissionError, match="exact original post-stage"):
+            service.compensate(original.identity.operation_id, compensation.identity.operation_id, rig.executor)
+    elif case in {"no_policy", "ambiguous"}:
         with pytest.raises(PermissionError):
             service.compensate(original.identity.operation_id, compensation.identity.operation_id, rig.executor)
     else:
