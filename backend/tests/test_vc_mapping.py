@@ -27,3 +27,16 @@ def test_structured_tables_metric_views_catalogs_schemas_map_exactly(package_rig
     assert sources['tables'][0]['description'] == 'dev.sales.orders'
     assert rendered.description == 'dev.sales'
     assert artifact == original
+
+
+def test_sql_identifier_mapping_preserves_literals_comments_and_instruction_prose(package_rig):
+    rig = package_rig
+    sql = "SELECT 'dev.sales.orders', total FROM `dev`.`sales`.`orders` -- dev.sales.orders\n/* dev.sales.orders */"
+    artifact = {'serialized_space': {'instructions': {
+        'example_question_sqls': [{'sql': [sql]}],
+        'text_instructions': [{'content': ['Use dev.sales.orders as an example.']}]},
+        'benchmarks': {'questions': [{'answer': [{'format': 'SQL', 'content': ['SELECT * FROM dev.sales.orders']}]}]}}}
+    result = MappingTransformer().render(artifact, rig.mapping, rig.target).serialized_space
+    assert result['instructions']['example_question_sqls'][0]['sql'] == [sql.replace('`dev`.`sales`.`orders`', '`prod`.`sales`.`orders`')]
+    assert result['benchmarks']['questions'][0]['answer'][0]['content'] == ['SELECT * FROM prod.sales.orders']
+    assert result['instructions']['text_instructions'] == artifact['serialized_space']['instructions']['text_instructions']
