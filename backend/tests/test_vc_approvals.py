@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.services.version_control.contracts import (
-    ActorContext, ApprovalInputs, ApprovalUse, ApprovalVote, AuthenticatedRequest,
+    ActorContext, ApprovalInputs, ApprovalUse, ApprovalVote, AuthenticatedRequest, BreakGlassRequest,
     FactKind, FactStatus, Fingerprints, MutationRequest, ObservationRef, PatchStage, RequestHistory, StageEvidence,
     RequestIdentity, canonical_json_hash, from_wire, to_wire,
 )
@@ -357,3 +357,44 @@ def test_adopt_and_reapply_need_new_approval_for_newly_captured_base(action):
         context.service.request(new_inputs, context.identity.actors['requester'])
     with pytest.raises((ValueError, PermissionError)):
         context.service.authorize(new_request, context.executor)
+
+
+@pytest.mark.parametrize('fault', ['group', 'reason', 'expiry', 'over-24h', 'scope', 'evidence', 'acknowledgement', 'outage', 'none'])
+def test_break_glass_requires_group_reason_expiry_and_cannot_skip_evidence(fault):
+    context = setup_approval()
+    approve(context)
+    actor = ActorContext('emergency-human', '123', 'human')
+    context.identity.memberships[(actor.subject_id, '123')] = frozenset({'break-glass'})
+    request = BreakGlassRequest(context.request.identity, context.request.binding, 'incident-42',
+                                NOW + timedelta(minutes=15), context.bound.preflight_evidence_digest, True)
+    if fault == 'group':
+        context.identity.memberships[(actor.subject_id, '123')] = frozenset({'approvers'})
+    elif fault == 'reason':
+        request = replace(request, reason='  ')
+    elif fault == 'expiry':
+        request = replace(request, expires_at=NOW)
+    elif fault == 'over-24h':
+        request = replace(request, expires_at=NOW + timedelta(hours=25))
+    elif fault == 'scope':
+        request = replace(request, binding=replace(request.binding, workspace_id='other'))
+    elif fault == 'evidence':
+        request = replace(request, evidence_digest='b' * 64)
+    elif fault == 'acknowledgement':
+        request = replace(request, residual_risk_acknowledged=False)
+    elif fault == 'outage':
+        def unavailable(*args):
+            raise OSError('Delta unavailable')
+        context.facts.append = unavailable
+    if fault != 'none':
+        with pytest.raises((PermissionError, ValueError, OSError)):
+            context.service.break_glass(request, actor)
+    else:
+        grant = context.service.break_glass(request, actor)
+        assert grant.authorization_reference.startswith('break-glass:')
+        assert grant.expected_base_fingerprints == context.bound.expected_base_fingerprints
+        assert context.service.suspended(request.binding)
+        assert context.service.break_glass(request, actor) == grant
+        with pytest.raises(PermissionError, match='reconciliation'):
+            context.service.authorize(context.request, context.executor)
+        assert any(row.payload['drift_override'] and row.payload['status'] == 'quarantined'
+                   for row in context.store.state.rows)

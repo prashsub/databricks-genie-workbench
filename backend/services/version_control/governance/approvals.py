@@ -6,7 +6,8 @@ from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
     ApprovalRecord, ApprovalRequest, ApprovalVote, AuthorizationGrant, FactKind, FactStatus,
-    IdentityProvider, OperationFact, OperationFacts, Registry, StageEvidence, canonical_json_hash, to_wire,
+    IdentityProvider, OperationFact, OperationFacts, Registry, RequestIdentity,
+    StageEvidence, canonical_json_hash, to_wire,
 )
 from .facts import fact_key
 
@@ -87,6 +88,8 @@ class ApprovalService:
             raise PermissionError('Approval must review newly captured base')
 
     def _unused(self, request, approval_id):
+        if self.suspended(request.binding):
+            raise PermissionError('Break-glass suspension requires mandatory reconciliation')
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
         if (history.ambiguous or not history.facts
                 or any(row.request != request.identity for row in history.facts)):
@@ -189,3 +192,54 @@ class ApprovalService:
         return AuthorizationGrant(inputs.target_binding, request.identity, record.request.approval_id,
                                   inputs.expected_base_fingerprints, inputs.rendered_target_digest,
                                   inputs.expires_at, record.request.approval_id, record.approval_digest)
+
+    def suspended(self, binding):
+        history = self.facts.lookup_request(binding, 'vc:break-glass-suspension')
+        return history.ambiguous or bool(history.facts)
+
+    def break_glass(self, request, actor):
+        self._enabled()
+        if (actor.actor_kind != 'human' or actor.workspace_id != request.binding.workspace_id
+                or 'break-glass' not in self.identity.groups(actor.subject_id, request.binding.workspace_id)):
+            raise PermissionError('Separate break-glass group and target human identity required')
+        if not request.reason.strip() or not request.residual_risk_acknowledged:
+            raise PermissionError('Break-glass reason and residual risk acknowledgement required')
+        stored = self.facts.get_request(request.identity.operation_id)
+        record = self.get(request.identity.operation_id)
+        inputs = record.request.inputs
+        self._fresh(inputs, record.request.requested_at)
+        self._bound(stored.request, inputs)
+        self._captured_base(stored.request, record.request.requested_at)
+        if (request.identity != stored.request.identity or request.binding != stored.request.binding
+                or request.evidence_digest != inputs.preflight_evidence_digest):
+            raise ValueError('Break-glass scope and evidence must match immutable request')
+        if not self.now() < request.expires_at <= min(inputs.expires_at, self.now() + timedelta(hours=24)):
+            raise PermissionError('Invalid break-glass expiry')
+        use = self.facts.approval_use(request.binding, record.request.approval_id)
+        if use.ambiguous or use.consumptions or use.operation_ids:
+            raise PermissionError('Break-glass cannot reuse consumed evidence')
+        scope_digest = canonical_json_hash('vc-break-glass-scope/1', to_wire(request.binding))
+        scope_id = str(uuid5(NAMESPACE_URL, scope_digest))
+        override_digest = canonical_json_hash('vc-break-glass/1', {'request': to_wire(request), 'actor': to_wire(actor)})
+        provisional = OperationFact(
+            event_id=scope_id, fact_kind=FactKind.BREAK_GLASS, operation_id=scope_id,
+            transition_sequence=0, event_key='', binding=request.binding,
+            request=RequestIdentity(scope_id, 'vc:break-glass-suspension', scope_digest),
+            operation_type='break_glass', requester_id=inputs.requester_id, actor=actor,
+            status=FactStatus.QUARANTINED, evidence=request, recorded_at=self.now(),
+            approval_id=record.request.approval_id, approval_digest=override_digest,
+            approval_reference=request.identity.operation_id, drift_override=True,
+        )
+        key = fact_key(provisional)
+        history = self.facts.lookup_request(request.binding, 'vc:break-glass-suspension')
+        if history.ambiguous:
+            raise PermissionError('Ambiguous break-glass evidence')
+        if history.facts:
+            existing = history.facts[0]
+            if existing.evidence != request or existing.actor != actor:
+                raise PermissionError('Existing suspension requires reconciliation')
+        else:
+            self.facts.append(replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key))))
+        return AuthorizationGrant(request.binding, request.identity, f'break-glass:{key}',
+                                  inputs.expected_base_fingerprints, inputs.rendered_target_digest,
+                                  request.expires_at, record.request.approval_id, override_digest)
