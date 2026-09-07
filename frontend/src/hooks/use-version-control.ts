@@ -14,39 +14,54 @@ export function canMutate(state: VersionControlState, action: string) {
 }
 export function createVersionControlStore(api: VersionControlApi) {
   let state = initialState()
+  let generation = 0
+  let controller = new AbortController()
   const listeners = new Set<() => void>()
   const update = (changes: Partial<VersionControlState>) => { state = { ...state, ...changes }; listeners.forEach(listener => listener()) }
+  const open = async (bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return' = 'open') => {
+    generation += 1
+    const current = generation
+    controller.abort()
+    controller = new AbortController()
+    const signal = controller.signal
+    const updateCurrent = (changes: Partial<VersionControlState>) => { if (current === generation && !signal.aborted) update(changes) }
+    if (state.bindingId !== bindingId) state = initialState()
+    updateCurrent({ bindingId, loading: true, captured: false, error: '' })
+    try {
+      const observation = await api.observe(bindingId, reason, crypto.randomUUID())
+      updateCurrent({ status: observation.status, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale })
+    } catch (error) {
+      const label = error instanceof VersionControlError ? error.status === 423 ? 'Quarantined / unresolved: ' : error.status === 409 ? 'Conflicted; preserved history: ' : error.status === 503 ? 'Evidence unreachable: ' : '' : ''
+      updateCurrent({ captured: false, stale: true, error: label + (error instanceof Error ? error.message : 'Capture unavailable') })
+    }
+    if (current !== generation || signal.aborted) return
+    try { updateCurrent({ history: await api.versions(bindingId, undefined, signal) }) }
+    catch (error) { updateCurrent({ stale: true, captured: false, error: `${state.error} History unavailable: ${String(error)}` }) }
+    finally { updateCurrent({ loading: false }) }
+  }
   return {
     getSnapshot: () => state,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     async nextPage() {
       if (!state.history.next_cursor || state.loading) return
+      const current = generation
+      const signal = controller.signal
       update({ loading: true })
       try {
-        const page = await api.versions(state.bindingId, state.history.next_cursor)
-        update({ history: { items: [...state.history.items, ...page.items], next_cursor: page.next_cursor } })
-      } catch (error) { update({ error: String(error), stale: true }) }
-      finally { update({ loading: false }) }
+        const page = await api.versions(state.bindingId, state.history.next_cursor, signal)
+        if (current === generation && !signal.aborted) update({ history: { items: [...state.history.items, ...page.items], next_cursor: page.next_cursor } })
+      } catch (error) { if (current === generation && !signal.aborted) update({ error: String(error), stale: true }) }
+      finally { if (current === generation && !signal.aborted) update({ loading: false }) }
     },
-    async open(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return' = 'open') {
-      update({ bindingId, loading: true, captured: false, error: '' })
-      try {
-        const observation = await api.observe(bindingId, reason, crypto.randomUUID())
-        update({ status: observation.status, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale })
-      } catch (error) {
-        const label = error instanceof VersionControlError ? error.status === 423 ? 'Quarantined / unresolved: ' : error.status === 409 ? 'Conflicted; preserved history: ' : error.status === 503 ? 'Evidence unreachable: ' : '' : ''
-        update({ captured: false, stale: true, error: label + (error instanceof Error ? error.message : 'Capture unavailable') })
-      }
-      try { update({ history: await api.versions(bindingId) }) }
-      catch (error) { update({ stale: true, captured: false, error: `${state.error} History unavailable: ${String(error)}` }) }
-      finally { update({ loading: false }) }
-    },
+    open,
+    invalidate: () => open(state.bindingId, 'refresh'),
+    dispose: () => { generation += 1; controller.abort() },
   }
 }
 export function useVersionControl(bindingId: string, api: VersionControlApi = demoApi) {
-  const store = useMemo(() => createVersionControlStore(api), [api])
+  const store = useMemo(() => createVersionControlStore(api), [api, bindingId])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  useEffect(() => { void store.open(bindingId) }, [store, bindingId])
+  useEffect(() => { void store.open(bindingId); return () => store.dispose() }, [store, bindingId])
   useEffect(() => {
     const onReturn = () => { void store.open(bindingId, 'return') }
     window.addEventListener('focus', onReturn)
