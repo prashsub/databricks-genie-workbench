@@ -8,6 +8,7 @@ from backend.services.version_control.contracts import (
     DiffChange,
     DiffItem,
     Snapshot,
+    canonical_json_hash,
     to_wire,
 )
 
@@ -72,7 +73,9 @@ def _index(value: Any, identity: str) -> dict | None:
 
 def _walk(before: Any, after: Any, path: tuple[str, ...], field: str | None,
           category: DiffCategory | None, items: list[DiffItem]) -> None:
-    if before == after:
+    if before is not _MISSING and after is not _MISSING and canonical_json_hash(
+        "vc-diff-value/1", {"value": before}
+    ) == canonical_json_hash("vc-diff-value/1", {"value": after}):
         return
     if isinstance(before, dict) and isinstance(after, dict):
         for key in sorted(before.keys() | after.keys()):
@@ -83,6 +86,9 @@ def _walk(before: Any, after: Any, path: tuple[str, ...], field: str | None,
     if identity:
         left_index, right_index = _index(before, identity), _index(after, identity)
         if left_index is not None and right_index is not None:
+            if not left_index and not right_index:
+                _emit(before, after, path, category, items)
+                return
             for key in sorted(left_index.keys() | right_index.keys()):
                 left_value, right_value = left_index.get(key, _MISSING), right_index.get(key, _MISSING)
                 if left_value is _MISSING or right_value is _MISSING:

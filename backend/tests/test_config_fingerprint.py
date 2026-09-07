@@ -223,6 +223,45 @@ def test_cross_canonicalizer_comparison_is_unknown_without_dual_compute() -> Non
         Canonicalizer(dual_compute_version="vc-c14n/99")
 
 
+def test_canonicalizer_is_idempotent_and_hash_is_domain_separated() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+    from backend.services.version_control.contracts import Fingerprints, from_wire
+
+    adapter = Canonicalizer()
+    fixture_root = Path(__file__).parent / "fixtures"
+    golden = json.loads((fixture_root / "vc_canonicalization/readback.json").read_text())
+    for payload in (golden["submitted"], golden["observed"], _space()):
+        original = adapter.observe({"serialized_space": payload, "description": "Résumé"})
+        canonical = to_wire(original.canonical_state)
+        repeated = adapter.observe({
+            "serialized_space": {**canonical["config"], "benchmarks": canonical["benchmark"]},
+            **canonical["metadata"],
+        })
+        assert original.canonical_state == repeated.canonical_state
+        assert original.fingerprints == repeated.fingerprints
+        assert adapter.semantic_diff(original, repeated) == []
+        for component in ("config", "benchmark", "metadata"):
+            assert getattr(original.fingerprints, component) == canonical_json_hash(
+                f"vc-{component}/1", {"value": canonical[component]}
+            )
+    shared = json.loads((fixture_root / "vc_contracts/fingerprints.json").read_text())
+    fingerprints = from_wire(Fingerprints, shared["examples"][0])
+    assert fingerprints.state_digest == canonical_json_hash("vc-state/1", to_wire(fingerprints))
+    assert canonical_json_hash("vc-state/1", {"config": "ab", "benchmark": "c"}) != (
+        canonical_json_hash("vc-state/1", {"config": "a", "benchmark": "bc"})
+    )
+    assert canonical_json_hash("vc-config/1", {"value": {}}) != canonical_json_hash("vc-benchmark/1", {"value": {}})
+    for before, after in ((False, 0), (1, 1.0), ({}, {"text_instructions": []})):
+        left = adapter.observe({"instructions": {}, "future": before})
+        right = adapter.observe({"instructions": {}, "future": after})
+        assert left.state_digest != right.state_digest
+        assert adapter.semantic_diff(left, right)
+    absent = adapter.observe({"instructions": {}})
+    empty = adapter.observe({"instructions": {"text_instructions": []}})
+    assert absent.state_digest != empty.state_digest
+    assert adapter.semantic_diff(absent, empty)
+
+
 def test_unwrap_bare_serialized_space() -> None:
     assert unwrap_serialized_space(_space()) == _space()
 
