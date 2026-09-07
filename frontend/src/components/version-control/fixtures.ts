@@ -1,4 +1,4 @@
-import type { BindingStatus, Fingerprints, VersionSummary } from '@/types/version-control'
+import type { ApprovalInputs, ApprovalRecord, BindingStatus, Fingerprints, VersionSummary } from '@/types/version-control'
 
 export const fingerprints: Fingerprints = { config: 'config-3', benchmark: 'benchmark-1', metadata: 'metadata-2', canonicalizer_version: 'VC/1.0' }
 export const bindingFixture: BindingStatus = {
@@ -12,4 +12,15 @@ export const versionFixture: VersionSummary = {
   version_id: 'external-3', binding_id: 'demo-binding', observed_at: '2026-09-07T00:00:00Z', origin: 'external',
   observed_by: 'capturing-user', parent_version_id: 'approved-2', restored_from_version_id: null,
   fingerprints, optimizer_run_id: null, champion_id: null,
+}
+export const approvalInputsFixture: ApprovalInputs = {
+  schema_version: 'VC/1.0', operation_id: 'demo-operation', operation_type: 'adopt', source_version_id: 'external-3',
+  raw_source_digest: 'raw-3', source_fingerprints: fingerprints, rendered_target_digest: 'rendered-3',
+  canonicalizer_version: 'VC/1.0', target_binding: 'demo-binding', expected_base_fingerprints: fingerprints,
+  validation_policy_digest: 'validation-1', benchmark_policy_digest: 'benchmark-policy-1', preflight_evidence_digest: 'preflight-1',
+  thresholds: { minimum_accuracy: 0.9 }, requester_id: 'demo-requester', recovery_policy: 'quarantine', expires_at: '2026-09-07T23:00:00Z',
+}
+export const approvalFixture: ApprovalRecord = {
+  approval_id: 'demo-approval', inputs: approvalInputsFixture, approval_digest: 'approval-digest-1', valid: false,
+  invalidation_reasons: ['Base changed after capture'], allowed_actions: ['vote'], votes: [],
 }
