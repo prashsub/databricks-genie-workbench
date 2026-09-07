@@ -1,4 +1,6 @@
-"""Lazy, explicitly injected VC composition. No global clients or router mounts."""
+"""Fail-closed VC/1.0 platform adapters; no ambient credentials."""
+
+from .bundles import guard_bundle
 
 from collections.abc import Callable
 from threading import RLock
