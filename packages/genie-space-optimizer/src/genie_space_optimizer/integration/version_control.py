@@ -99,6 +99,9 @@ class ChampionRun:
         self.receipt = receipt
         self.pre_version = receipt.preimage
         self.evidence_references = receipt.evidence_references
+        if receipt.status == "noop" and not receipt.unresolved:
+            self.post_version = None
+            return receipt
         if receipt.status != "confirmed" or receipt.unresolved or receipt.postimage is None:
             raise RuntimeError("Champion has no verified final post-version")
         self.post_version = receipt.postimage

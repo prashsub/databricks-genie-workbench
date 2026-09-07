@@ -50,3 +50,17 @@ def test_external_preimage_at_champion_apply_is_preserved_without_iteration_vers
     assert [version.origin for version in (run.pre_version, run.post_version)].count("optimizer") == 1
     assert len(run.iterations) == 5
     adapter.apply.assert_called_once()
+
+
+def test_noop_champion_has_receipt_but_no_new_optimizer_version():
+    adapter = Mock()
+    existing = SimpleNamespace(version_id="existing")
+    adapter.apply.return_value = SimpleNamespace(status="noop", preimage=existing,
+                                                postimage=existing, unresolved=False,
+                                                evidence_references=("existing",), operation_id="noop-operation")
+    run = ChampionRun("run", adapter)
+    receipt = run.apply("champion", "binding", "base", "job")
+    assert receipt.operation_id == "noop-operation"
+    assert run.receipt is receipt
+    assert run.pre_version is existing
+    assert run.post_version is None
