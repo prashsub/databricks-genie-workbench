@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -36,3 +37,40 @@ def test_existing_optimizer_bundle_and_app_deploy_paths_remain_accounted_for():
     assert all((ROOT / entry.path).is_file() and entry.transition for entry in entries)
     assert sum(entry.authoritative_optimizer for entry in entries) == 1
     assert all(entry.governed_content is False for entry in entries)
+
+
+def test_ddl_migrations_are_owned_ordered_idempotent_and_not_content_deploys():
+    run = getattr(platform, "provision", None)
+    assert callable(run), "Provisioning must validate owner manifests before executing"
+    runner = Mock()
+    manifests = [
+        {"owner": owner, "kind": kind, "name": name, "idempotent": True, "revision": "sha256:" + "a" * 64}
+        for owner, kind, name in [
+            ("M02", "table", "genie_space_versions"),
+            ("M02", "table", "genie_space_registry"),
+            ("M03", "table", "genie_ops_coordination"),
+            ("M06", "table", "genie_space_operations"),
+            ("M02", "volume", "vc_snapshots"),
+            ("M07", "volume", "vc_outbound_packages"),
+            ("M06", "volume", "vc_approval_evidence"),
+            ("M07", "volume", "vc_target_receipts"),
+        ]
+    ]
+    runner.validate_owner_spec.return_value = True
+    run(list(reversed(manifests)), runner)
+    assert [call.args[0]["kind"] for call in runner.apply_owner_spec.call_args_list] == ["table"] * 4 + ["volume"] * 4
+    runner.apply_grants.assert_called_once_with()
+    runner.reset_mock()
+    for invalid in [manifests[:-1], manifests + [manifests[0]],
+                    [dict(manifests[0], owner="M08")] + manifests[1:],
+                    [dict(manifests[0], idempotent=False)] + manifests[1:],
+                    [dict(manifests[0], revision="unverified")] + manifests[1:],
+                    [dict(manifests[0], kind="genie_spaces")] + manifests[1:]]:
+        with pytest.raises(ValueError):
+            run(invalid, runner)
+    runner.apply_owner_spec.assert_not_called()
+    runner.apply_grants.assert_not_called()
+    runner.validate_owner_spec.return_value = False
+    with pytest.raises(ValueError, match="owner"):
+        run(manifests, runner)
+    runner.apply_owner_spec.assert_not_called()

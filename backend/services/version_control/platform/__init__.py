@@ -1,6 +1,7 @@
 """Fail-closed VC/1.0 platform adapters; no ambient credentials."""
 
 from .bundles import deployment_inventory, guard_bundle
+from .provisioning import provision
 
 from collections.abc import Callable
 from threading import RLock
