@@ -66,6 +66,8 @@ source "$SCRIPT_DIR/deploy-config.sh"
 # shellcheck source=preflight.sh
 source "$SCRIPT_DIR/preflight.sh"
 
+_preflight_check_vc_bundle_content
+
 # ═══════════════════════════════════════════════════════════════════════════
 # DESTROY MODE
 # ═══════════════════════════════════════════════════════════════════════════
@@ -122,6 +124,7 @@ for j in (jobs if isinstance(jobs, list) else jobs.get('jobs', [])):
     # ── Step 2: Destroy bundle-managed optimization job ───────────────
     echo ""
     echo "▸ Step 2/3: Destroying bundle-managed optimization job..."
+    _preflight_check_vc_bundle_content
     if (cd "$PROJECT_DIR" && databricks bundle destroy -t app \
         --var="catalog=${CATALOG}" \
         --var="warehouse_id=${WAREHOUSE_ID:-placeholder}" \
@@ -308,9 +311,6 @@ fi
 #   - Builds the GSO wheel (artifacts block)
 #   - Syncs job notebooks to workspace
 #   - Creates/updates the optimization job (Terraform-managed)
-# run_as is NOT set in the bundle — the app self-heals it at startup
-# via _ensure_gso_job_run_as() in backend/main.py (avoids needing
-# servicePrincipal.user role on the deployer).
 # The "app" target uses mode: development (per-deployer Terraform state)
 # with presets.name_prefix: "" (clean job names, no [dev] prefix).
 
@@ -323,6 +323,7 @@ rm -f "$PROJECT_DIR/.databricks/bundle/app/sync-snapshots/"*.json 2>/dev/null ||
 
 set +e
 BUNDLE_OUTPUT=$(cd "$PROJECT_DIR" && databricks bundle deploy -t app \
+    --var="gso_run_as_principal=$SP_CLIENT_ID" \
     --var="catalog=$CATALOG" \
     --var="warehouse_id=$WAREHOUSE_ID" \
     --var="llm_model=$LLM_MODEL" \
@@ -480,11 +481,17 @@ fi
 
 rm -f "${PATCHED_APP_YAML}.bak"
 
-# Validate all placeholders were resolved
+# Validate all placeholders were resolved. A half-configured app.yaml (e.g. an
+# unresolved __GSO_JOB_ID__) must NEVER be imported to the workspace — abort the
+# deploy non-zero instead of only warning. This is the root cause of the total
+# app-boot failure the identity guard defends in depth against.
 UNRESOLVED=$(grep -c '__[A-Z_]*__' "$PATCHED_APP_YAML" || true)
 if [ "$UNRESOLVED" -gt 0 ]; then
-    echo "  ⚠ app.yaml has $UNRESOLVED unresolved placeholder(s):"
+    echo "  ✗ app.yaml has $UNRESOLVED unresolved placeholder(s):"
     grep '__[A-Z_]*__' "$PATCHED_APP_YAML" | sed 's/^/      /'
+    echo "  ✗ Refusing to import a half-configured app.yaml; deploy aborted."
+    rm -f "$PATCHED_APP_YAML"
+    exit 1
 fi
 
 databricks workspace import "$WS_PATH/app.yaml" \
