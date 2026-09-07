@@ -147,3 +147,26 @@ def test_two_patch_happy_path_checkpoints_and_reasserts_each_send(rig):
     assert version.context.attempt_id == rig.fence.attempt_id
     assert version.context.generation == rig.fence.generation
     assert version.snapshot.fingerprints == rig.desired.fingerprints
+
+
+@pytest.mark.parametrize("drift", ["config", "benchmark", "metadata"])
+def test_description_requires_expected_config_and_approved_metadata_preimage(rig, drift):
+    def interfering_patch(*args):
+        rig.config(*args)
+        if drift == "metadata":
+            rig.state["description"] = "external"
+        else:
+            rig.state["serialized_space"]["benchmarks" if drift == "benchmark" else "instructions"] = {"external": True}
+    rig.transport.patch_config_once.side_effect = interfering_patch
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.status == vc.OperationStatus.APPLIED_PARTIAL
+    assert result.unresolved
+    rig.transport.patch_description_once.assert_not_called()
+    rig.coordination.quarantine.assert_called_once()
+
+
+def test_final_readback_must_match_all_fingerprints(rig):
+    rig.transport.patch_description_once.side_effect = lambda *args: None
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.status == vc.OperationStatus.APPLIED_PARTIAL
+    assert result.unresolved

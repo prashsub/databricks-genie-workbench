@@ -39,15 +39,27 @@ class MutationGate:
         checkpoint = self.canonicalizer.observe(self.transport.get(request.binding, executor))
         middle = self._capture(request, executor, claim, checkpoint, "config_checkpoint", preimage.version_id)
         self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, middle)
+        if (checkpoint.fingerprints.config != desired.fingerprints.config
+                or checkpoint.fingerprints.benchmark != desired.fingerprints.benchmark
+                or checkpoint.fingerprints.metadata != snapshot.fingerprints.metadata
+                or checkpoint.fingerprints.canonicalizer_version != desired.fingerprints.canonicalizer_version):
+            return self._partial(request, claim, middle, "Config or approved metadata checkpoint changed")
         if request.description is not None and snapshot.fingerprints.metadata != desired.fingerprints.metadata:
             self.coordination.assert_owner(claim)
             self.transport.patch_description_once(request.binding, request.description, claim)
             final = self.canonicalizer.observe(self.transport.get(request.binding, executor))
             postimage = self._capture(request, executor, claim, final, "postimage", preimage.version_id)
             self._checkpoint(claim, vc.PatchStage.DESCRIPTION_OBSERVED, postimage)
+            if self.canonicalizer.compare(final, desired) != vc.Comparison.EQUAL:
+                return self._partial(request, claim, postimage, "Final state differs from desired")
         else:
             postimage = middle
         return self._finish(request, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
+
+    def _partial(self, request, claim, observation, reason):
+        self.coordination.quarantine(claim, reason)
+        return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_PARTIAL,
+                                  claim.preimage, observation, True, (reason,))
 
     def _checkpoint(self, claim, stage, observation):
         self.coordination.checkpoint(claim, stage, vc.StageEvidence(
