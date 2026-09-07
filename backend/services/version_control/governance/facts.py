@@ -27,6 +27,8 @@ def fact_key(fact: OperationFact) -> str:
     }
     if fact.fact_kind == FactKind.APPROVAL_VOTE:
         payload['voter'] = fact.actor.subject_id
+    if fact.fact_kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY) and fact.approval_reference is not None:
+        payload['approval_reference'] = fact.approval_reference
     return canonical_json_hash('vc-fact-key/1', payload)
 
 
@@ -76,6 +78,12 @@ class DurableOperationFacts:
             raise PermissionError('Fact writes disabled')
         fact = from_wire(OperationFact, to_wire(fact))
         validate_evidence(fact)
+        if (fact.fact_kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY)
+                and fact.approval_reference is not None):
+            incidents = self.binding_facts(fact.binding.binding_id, FactKind.BREAK_GLASS)
+            incident = next((row for row in incidents if row.event_id == fact.approval_reference), None)
+            if incident is None or not self._authorized_reconciliation(fact, incident):
+                raise PermissionError('Fresh reconciliation authorization required')
         if fact.operation_id != fact.request.operation_id:
             raise ValueError('Operation identity mismatch')
         if fact.fact_kind == FactKind.CREATE_INTENT:
@@ -135,6 +143,43 @@ class DurableOperationFacts:
                      for row in unique.values())
         return ApprovalUse(binding, approval_id, refs, operations, ambiguous)
 
+    def binding_facts(self, binding_id, fact_kind=None):
+        unique = {}
+        for row in self._rows():
+            if row.binding.binding_id != binding_id or (fact_kind is not None and row.fact_kind != fact_kind):
+                continue
+            if row.event_key in unique and unique[row.event_key] != row:
+                raise ValueError('Ambiguous binding evidence')
+            unique[row.event_key] = row
+        return tuple(sorted(unique.values(), key=lambda row: (row.recorded_at, row.event_key)))
+
+    def _authorized_reconciliation(self, fact, incident):
+        if (fact.approval_reference != incident.event_id
+                or fact.binding.binding_id != incident.binding.binding_id
+                or fact.recorded_at <= incident.recorded_at
+                or fact.operation_type not in ('adopt', 'reapply')
+                or fact.status != FactStatus.ACKNOWLEDGED
+                or fact.approval_id is None or fact.approval_id == incident.approval_id):
+            return False
+        grants = self.binding_facts(fact.binding.binding_id, FactKind.APPROVAL_GRANTED)
+        return any(
+            grant.binding == fact.binding and grant.request == fact.request
+            and grant.actor == fact.actor and grant.actor.actor_kind == 'service'
+            and grant.operation_type == fact.operation_type
+            and grant.approval_id == fact.approval_id and grant.approval_digest == fact.approval_digest
+            and grant.status == FactStatus.APPROVED
+            and isinstance(grant.evidence, ApprovalRecord)
+            and incident.recorded_at < grant.evidence.request.requested_at <= grant.recorded_at <= fact.recorded_at
+            and fact.recorded_at < grant.evidence.request.inputs.expires_at
+            and (fact.fact_kind == FactKind.RECOVERY or fact.evidence == grant.evidence)
+            for grant in grants
+        )
+
+    def reconciled(self, incident):
+        return any(self._authorized_reconciliation(row, incident)
+                   for kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY)
+                   for row in self.binding_facts(incident.binding.binding_id, kind))
+
     def get_request(self, operation_id):
         requests = []
         for row in self._read():
@@ -150,7 +195,8 @@ class DurableOperationFacts:
         if history.ambiguous or not history.facts:
             raise ValueError('Ambiguous or missing approval evidence')
         records = [row for row in history.facts if row.operation_id == operation_id
-                   and isinstance(row.evidence, ApprovalRecord) and row.fact_kind != FactKind.APPROVAL_VOTE]
+                   and isinstance(row.evidence, ApprovalRecord)
+                   and row.fact_kind not in (FactKind.APPROVAL_VOTE, FactKind.ACKNOWLEDGEMENT)]
         records.sort(key=lambda row: row.transition_sequence)
         if records and any(row.transition_sequence == records[-1].transition_sequence
                            and row.evidence != records[-1].evidence for row in records):
@@ -232,8 +278,8 @@ class DurableOperationFacts:
             normal = (record.request.approval_id == claim.approval_id
                       and record.approval_digest == claim.approval_digest and record.status == FactStatus.APPROVED)
             if not normal:
-                overrides = [row for row in self.lookup_request(request.binding, 'vc:break-glass-suspension').facts
-                             if row.fact_kind == FactKind.BREAK_GLASS and row.approval_id == claim.approval_id
+                overrides = [row for row in self.binding_facts(request.binding.binding_id, FactKind.BREAK_GLASS)
+                             if row.approval_id == claim.approval_id
                              and row.approval_digest == claim.approval_digest
                              and row.evidence.identity == claim.request and row.evidence.binding == request.binding]
                 if len(overrides) != 1:

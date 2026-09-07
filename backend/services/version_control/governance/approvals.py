@@ -92,8 +92,8 @@ class ApprovalService:
                 or (request.operation_type == 'adopt' and request.source_version_id != observation.version_id)):
             raise PermissionError('Approval must review newly captured base')
 
-    def _unused(self, request, approval_id):
-        if self.suspended(request.binding):
+    def _unused(self, request, approval_id, *, reconciliation=False):
+        if not reconciliation and self.suspended(request.binding):
             raise PermissionError('Break-glass suspension requires mandatory reconciliation')
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
         if (history.ambiguous or not history.facts
@@ -169,6 +169,9 @@ class ApprovalService:
         return updated
 
     def authorize(self, request, executor):
+        return self._authorize(request, executor)
+
+    def _authorize(self, request, executor, *, reconciliation=False):
         self._enabled()
         record = self.get(request.approval_id)
         if record.status not in (FactStatus.REQUESTED, FactStatus.APPROVED):
@@ -180,7 +183,7 @@ class ApprovalService:
             raise ValueError('Immutable request identity or digest mismatch')
         self._bound(request, inputs)
         self._captured_base(request, record.request.requested_at)
-        self._unused(request, record.request.approval_id)
+        self._unused(request, record.request.approval_id, reconciliation=reconciliation)
         if executor.workspace_id != inputs.target_binding.workspace_id or executor.actor_kind != 'service':
             raise PermissionError('Target service executor required')
         target = self.target_identity(executor)
@@ -219,8 +222,37 @@ class ApprovalService:
                      FactKind.APPROVAL_GRANTED)
 
     def suspended(self, binding):
-        history = self.facts.lookup_request(binding, 'vc:break-glass-suspension')
-        return history.ambiguous or bool(history.facts)
+        return any(not self.facts.reconciled(incident)
+                   for incident in self.facts.binding_facts(binding.binding_id, FactKind.BREAK_GLASS))
+
+    def reconcile(self, incident_reference, request, executor):
+        self._enabled()
+        incidents = self.facts.binding_facts(request.binding.binding_id, FactKind.BREAK_GLASS)
+        incident = next((row for row in incidents if row.event_id == incident_reference), None)
+        record = self.get(request.approval_id)
+        if (incident is None or request.operation_type not in ('adopt', 'reapply')
+                or record.request.requested_at <= incident.recorded_at
+                or record.request.approval_id == incident.approval_id):
+            raise PermissionError('Fresh reconciliation authorization required')
+        grant = self._authorize(request, executor, reconciliation=True)
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        existing = next((row for row in history.facts if row.fact_kind == FactKind.ACKNOWLEDGEMENT
+                         and row.approval_reference == incident_reference), None)
+        if existing is not None:
+            return self.facts.append(existing)
+        provisional = OperationFact(
+            event_id=request.identity.operation_id, fact_kind=FactKind.ACKNOWLEDGEMENT,
+            operation_id=request.identity.operation_id,
+            transition_sequence=1 + max(row.transition_sequence for row in history.facts),
+            event_key='', binding=request.binding, request=request.identity, operation_type=request.operation_type,
+            requester_id=record.request.inputs.requester_id,
+            actor=ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
+            status=FactStatus.ACKNOWLEDGED, evidence=self.get(request.approval_id), recorded_at=self.now(),
+            approval_id=grant.approval_id, approval_digest=grant.approval_digest,
+            approval_reference=incident_reference,
+        )
+        key = fact_key(provisional)
+        return self.facts.append(replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key))))
 
     def break_glass(self, request, actor):
         self._enabled()
@@ -243,20 +275,23 @@ class ApprovalService:
         use = self.facts.approval_use(request.binding, record.request.approval_id)
         if use.ambiguous or use.consumptions or use.operation_ids:
             raise PermissionError('Break-glass cannot reuse consumed evidence')
-        scope_digest = canonical_json_hash('vc-break-glass-scope/1', to_wire(request.binding))
+        scope_digest = canonical_json_hash('vc-break-glass-scope/1', {
+            'binding': to_wire(request.binding), 'operation_id': request.identity.operation_id,
+        })
         scope_id = str(uuid5(NAMESPACE_URL, scope_digest))
+        incident_key = f'vc:break-glass:{request.identity.operation_id}'
         override_digest = canonical_json_hash('vc-break-glass/1', {'request': to_wire(request), 'actor': to_wire(actor)})
         provisional = OperationFact(
             event_id=scope_id, fact_kind=FactKind.BREAK_GLASS, operation_id=scope_id,
             transition_sequence=0, event_key='', binding=request.binding,
-            request=RequestIdentity(scope_id, 'vc:break-glass-suspension', scope_digest),
+            request=RequestIdentity(scope_id, incident_key, scope_digest),
             operation_type='break_glass', requester_id=inputs.requester_id, actor=actor,
             status=FactStatus.QUARANTINED, evidence=request, recorded_at=self.now(),
             approval_id=record.request.approval_id, approval_digest=override_digest,
             approval_reference=request.identity.operation_id, drift_override=True,
         )
         key = fact_key(provisional)
-        history = self.facts.lookup_request(request.binding, 'vc:break-glass-suspension')
+        history = self.facts.lookup_request(request.binding, incident_key)
         if history.ambiguous:
             raise PermissionError('Ambiguous break-glass evidence')
         if history.facts:

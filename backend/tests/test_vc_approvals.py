@@ -7,7 +7,7 @@ import pytest
 from backend.services.version_control.contracts import (
     ActorContext, ApprovalInputs, ApprovalUse, ApprovalVote, AuthenticatedRequest, BreakGlassRequest,
     FactKind, FactStatus, Fingerprints, MutationRequest, ObservationRef, PatchStage, RequestHistory, StageEvidence,
-    RequestIdentity, canonical_json_hash, from_wire, to_wire,
+    OperationFact, RequestIdentity, canonical_json_hash, from_wire, to_wire,
 )
 from backend.tests.test_vc_operation_facts import NOW, DIGEST, durable, fact, uid
 from backend.tests.vc_fakes.fixtures import FakeIdentityProvider, binding_fixture, executor_fixture
@@ -447,6 +447,95 @@ def test_break_glass_requires_group_reason_expiry_and_cannot_skip_evidence(fault
             context.service.authorize(context.request, context.executor)
         assert any(row.payload['drift_override'] and row.payload['status'] == 'quarantined'
                    for row in context.store.state.rows)
+
+
+def followup_approval(context, number, operation_type='edit', binding=None):
+    from backend.services.version_control.governance.approvals import request_digest
+
+    binding = binding or context.request.binding
+    request = replace(context.request, identity=RequestIdentity(uid(number), f'key-{number}', DIGEST),
+                      approval_id=uid(number), binding=binding, operation_type=operation_type)
+    request = replace(request, identity=replace(request.identity, request_digest=request_digest(request)))
+    bound = replace(context.bound, operation_id=uid(number), target_binding=binding,
+                    operation_type=operation_type)
+    context.facts.record_request(request, fact(operation_id=uid(number), binding=binding,
+                                              request=request.identity, operation_type=operation_type))
+    if operation_type in ('adopt', 'reapply'):
+        observation = ObservationRef(uid(3), binding.binding_id, binding.binding_revision,
+                                     request.expected_base, DIGEST)
+        context.facts.append(fact(
+            operation_id=uid(number), binding=binding, request=request.identity,
+            operation_type=operation_type, transition_sequence=1, status=FactStatus.PREIMAGE_CAPTURED,
+            pre_version_id=observation.version_id, recorded_at=context.clock.now(),
+            evidence=StageEvidence('VC/1.0', PatchStage.CONFIG_PENDING, context.clock.now(), DIGEST, observation),
+        ))
+    followup = SimpleNamespace(**{**vars(context), 'request': request, 'bound': bound})
+    approve(followup)
+    return followup
+
+
+def emergency_incident(context):
+    actor = ActorContext('emergency-human', '123', 'human')
+    context.identity.memberships[(actor.subject_id, '123')] = frozenset({'break-glass'})
+    request = BreakGlassRequest(context.request.identity, context.request.binding, 'incident',
+                                context.clock.now() + timedelta(minutes=15),
+                                context.bound.preflight_evidence_digest, True)
+    context.service.break_glass(request, actor)
+    payload = next(row.payload for row in reversed(context.store.state.rows)
+                   if row.payload['fact_kind'] == FactKind.BREAK_GLASS.value)
+    return from_wire(OperationFact, payload)
+
+
+def test_break_glass_suspension_is_cleared_only_by_authorized_reconciliation():
+    context = setup_approval()
+    approve(context)
+    incident = emergency_incident(context)
+    with pytest.raises(PermissionError, match='reconciliation'):
+        context.service.authorize(context.request, context.executor)
+    context.clock.advance(timedelta(seconds=1))
+    second = followup_approval(context, 22)
+    second_incident = emergency_incident(second)
+    assert second_incident.request.idempotency_key != incident.request.idempotency_key
+    context.clock.advance(timedelta(seconds=1))
+    reconciliation = followup_approval(context, 23, 'adopt')
+    unauthorized = fact(
+        fact_kind=FactKind.ACKNOWLEDGEMENT, operation_id=uid(23), transition_sequence=10,
+        binding=reconciliation.request.binding, request=reconciliation.request.identity,
+        operation_type='adopt', approval_reference=incident.event_id,
+        recorded_at=context.clock.now(),
+    )
+    with pytest.raises(PermissionError, match='authorization'):
+        context.facts.append(unauthorized)
+    context.target_identity.memberships.clear()
+    with pytest.raises(PermissionError, match='Target-side'):
+        context.service.reconcile(incident.event_id, reconciliation.request, context.executor)
+    assert context.service.suspended(context.request.binding)
+    context.target_identity.memberships[('human-1', '123')] = frozenset({'target-approvers'})
+    context.service.reconcile(incident.event_id, reconciliation.request, context.executor)
+    assert context.service.suspended(context.request.binding)
+    with pytest.raises(PermissionError, match='reconciliation'):
+        context.service.authorize(context.request, context.executor)
+    context.service.reconcile(second_incident.event_id, reconciliation.request, context.executor)
+    assert not context.service.suspended(context.request.binding)
+    assert context.service.authorize(context.request, context.executor).approval_id == uid(2)
+    closures = [row.payload for row in context.store.state.rows
+                if row.payload['fact_kind'] == FactKind.ACKNOWLEDGEMENT.value]
+    assert {row['approval_reference'] for row in closures} == {incident.event_id, second_incident.event_id}
+    assert all(row['approval_id'] == uid(23) and row['approval_digest'] for row in closures)
+    context.clock.advance(timedelta(hours=2))
+    assert not context.service.suspended(context.request.binding)
+
+
+def test_rebind_does_not_lift_unreconciled_break_glass_suspension():
+    context = setup_approval()
+    approve(context)
+    emergency_incident(context)
+    rebound = replace(context.request.binding, binding_revision=2)
+    context.registry.binding = rebound
+    assert context.service.suspended(rebound)
+    followup = followup_approval(context, 22, binding=rebound)
+    with pytest.raises(PermissionError, match='reconciliation'):
+        context.service.authorize(followup.request, context.executor)
 
 
 def test_authorization_publishes_durable_grant_before_return_and_invalidations_block():
