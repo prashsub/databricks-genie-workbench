@@ -55,6 +55,31 @@ class ApprovalService:
             raise LookupError('Approval evidence unavailable')
         return record
 
+    def _bound(self, request, inputs):
+        rendered = canonical_json_hash('vc-rendered-target/1', {
+            'serialized_space': request.serialized_space, 'description': request.description,
+        })
+        if (request.identity.request_digest != request_digest(request)
+                or request.identity.operation_id != inputs.operation_id
+                or request.binding != inputs.target_binding or request.operation_type != inputs.operation_type
+                or request.source_version_id != inputs.source_version_id
+                or request.expected_base != inputs.expected_base_fingerprints.state_digest
+                or rendered != inputs.rendered_target_digest):
+            raise ValueError('Request is not bound to reviewed immutable inputs')
+
+    def _unused(self, request, approval_id):
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        if (history.ambiguous or not history.facts
+                or any(row.request != request.identity for row in history.facts)):
+            raise ValueError('Missing or conflicting idempotency evidence')
+        if any(row.fact_kind == FactKind.OPERATION and row.status in (
+                FactStatus.CONFIRMED, FactStatus.NOOP, FactStatus.COMPENSATED, FactStatus.FAILED)
+               for row in history.facts):
+            raise PermissionError('Completed request cannot authorize a new mutation')
+        use = self.facts.approval_use(request.binding, approval_id)
+        if use.ambiguous or use.consumptions or use.operation_ids:
+            raise PermissionError('Approval consumed; only existing-claim verification/publication may recover')
+
     def _record(self, record, actor, kind):
         inputs = record.request.inputs
         request = self.facts.get_request(inputs.operation_id).request
@@ -75,6 +100,7 @@ class ApprovalService:
             raise PermissionError('Authenticated requester mismatch')
         self._fresh(inputs, self.now())
         stored = self.facts.get_request(inputs.operation_id)
+        self._bound(stored.request, inputs)
         if stored.approval is not None:
             if stored.approval.request.inputs != inputs:
                 raise ValueError('Approval inputs are immutable')
@@ -111,6 +137,11 @@ class ApprovalService:
         record = self.get(request.approval_id)
         inputs = record.request.inputs
         self._fresh(inputs, record.request.requested_at)
+        stored = self.facts.get_request(inputs.operation_id)
+        if request != stored.request:
+            raise ValueError('Immutable request identity or digest mismatch')
+        self._bound(request, inputs)
+        self._unused(request, record.request.approval_id)
         if executor.workspace_id != inputs.target_binding.workspace_id or executor.actor_kind != 'service':
             raise PermissionError('Target service executor required')
         target = self.target_identity(executor)

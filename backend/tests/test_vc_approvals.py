@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from backend.services.version_control.contracts import (
-    ActorContext, ApprovalInputs, ApprovalVote, AuthenticatedRequest, Fingerprints, MutationRequest,
+    ActorContext, ApprovalInputs, ApprovalUse, ApprovalVote, AuthenticatedRequest,
+    FactKind, FactStatus, Fingerprints, MutationRequest, RequestHistory,
     RequestIdentity, canonical_json_hash, from_wire, to_wire,
 )
 from backend.tests.test_vc_operation_facts import NOW, DIGEST, durable, fact, uid
@@ -280,3 +281,49 @@ def test_dev_grant_requires_requester_edit_right_but_release_requires_policy_gro
     release.target_identity.memberships.clear()
     with pytest.raises(PermissionError, match='Target-side'):
         release.service.authorize(release.request, release.executor)
+
+
+@pytest.mark.parametrize('fault', ['consumed', 'different-digest', 'same-key-new-operation',
+                                  'payload', 'metadata', 'ambiguous', 'missing', 'outage', 'completed'])
+def test_historical_approval_reuse_and_different_request_digest_are_rejected(fault):
+    context = setup_approval()
+    approval = approve(context)
+    request = context.request
+    if fault == 'consumed':
+        record = context.service.get(approval.approval_id)
+        context.facts.append(fact(
+            binding=request.binding, request=request.identity, requester_id='requester',
+            fact_kind=FactKind.APPROVAL_CONSUMED, status=FactStatus.CONSUMED,
+            approval_id=approval.approval_id, approval_digest=record.approval_digest,
+            attempt_id=uid(5), generation=1, evidence=record,
+        ))
+        context.facts.append(fact(binding=request.binding, operation_id=uid(20),
+                                 request=RequestIdentity(uid(20), 'successor', DIGEST)))
+    elif fault == 'different-digest':
+        request = replace(request, identity=replace(request.identity, request_digest='b' * 64))
+    elif fault == 'same-key-new-operation':
+        request = replace(request, identity=replace(request.identity, operation_id=uid(20)))
+    elif fault == 'payload':
+        request = replace(request, serialized_space={'tampered': True})
+    elif fault == 'metadata':
+        request = replace(request, description='unreviewed')
+    elif fault == 'ambiguous':
+        context.facts.approval_use = lambda binding, approval_id: ApprovalUse(binding, approval_id, (), (), True)
+    elif fault == 'missing':
+        context.facts.lookup_request = lambda *args: RequestHistory((), False)
+    elif fault == 'outage':
+        def unavailable(*args):
+            raise OSError('fact evidence unavailable')
+        context.facts.approval_use = unavailable
+    else:
+        context.facts.append(fact(binding=request.binding, request=request.identity,
+                                 transition_sequence=10, status=FactStatus.CONFIRMED))
+    with pytest.raises((PermissionError, ValueError, OSError)):
+        context.service.authorize(request, context.executor)
+
+
+def test_approval_request_rejects_inputs_not_bound_to_durable_request():
+    context = setup_approval()
+    with pytest.raises(ValueError, match='bound'):
+        context.service.request(replace(context.bound, rendered_target_digest='b' * 64),
+                                context.identity.actors['requester'])
