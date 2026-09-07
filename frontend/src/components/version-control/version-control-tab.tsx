@@ -11,6 +11,7 @@ import { RestorePanel } from './restore'
 import { ReconcilePanel } from './reconcile'
 import { ApprovalsPanel } from './approvals'
 import { approvalInputsFixture } from './fixtures'
+import { PromotionPanel } from './promotion'
 
 export function VersionControlView({ state }: { state: VersionControlState }) {
   return <section aria-label="Version Control and Promotion" className="space-y-4">
@@ -55,5 +56,6 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
     {diff && <SemanticDiffView diff={diff} />}
     {base && <ReconcilePanel api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
     <ApprovalsPanel api={api} approvalId={approvalId} inputs={inputs} disabled={!canMutate(state, 'adopt')} onApproval={setApprovalId} onRecord={setApproval} />
+    <PromotionPanel key={`${bindingId}-${selected?.version_id ?? ''}-${state.status?.binding_revision}`} api={api} bindingId={bindingId} sourceVersionId={selected?.version_id ?? ''} inputs={inputs} disabled={!canMutate(state, 'promote')} />
   </div>
 }
