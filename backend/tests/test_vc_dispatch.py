@@ -51,6 +51,7 @@ def test_duplicate_dispatch_or_job_retry_does_not_replay_mutation(promotion_rig,
         fact.status = vc.FactStatus.APPLIED_UNVERIFIED
     if retry == 'changed_digest':
         fact.request = replace(rig.request.identity, request_digest='e' * 64)
+    rig.facts.lookup_request.side_effect = None
     rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), retry == 'ambiguous')
     if retry in {'changed_digest', 'ambiguous'}:
         with pytest.raises(ValueError):

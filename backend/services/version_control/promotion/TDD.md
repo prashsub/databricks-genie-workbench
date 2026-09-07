@@ -17,3 +17,4 @@ All commands run from the m07 worktree. Each numbered task is committed separate
 | 10 | 7 DID NOT RAISE failures: missing/revised binding, drift, busy/stale/quarantine/unknown | Promotion: 26 passed |
 | 11 | Named polling test: NotImplementedError | Dispatch: 1 passed |
 | 12 | 4 retry assertions failed; Job stub raised NotImplementedError | Dispatch: 6 passed |
+| 13 | Named receipt test returned OperationResult, not DeploymentReceipt | Promotion + dispatch: 33 passed |

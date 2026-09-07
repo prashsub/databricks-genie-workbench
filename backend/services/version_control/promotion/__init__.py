@@ -7,6 +7,7 @@ import json
 from backend.services.version_control import contracts as vc
 from backend.services.version_control.platform.identity import canonical_host
 from .packages import build, digest, encode, immutable_put, mapping_digest, policy_digests, portable
+from . import receipts
 
 
 class PromotionService:
@@ -79,7 +80,8 @@ class PromotionService:
                 or inputs.permission_policy_digest != evidence.permission_policy_digest):
             raise ValueError('Target preflight evidence changed')
         self.approvals.authorize(request, executor)
-        return self.gate.execute(request, executor)
+        result = self.gate.execute(request, executor)
+        return receipts.record(self, operation, release, manifest, rendered, policy, result, executor)
 
     def _executor(self, executor):
         selection = self.target_selection
