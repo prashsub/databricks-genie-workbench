@@ -38,9 +38,11 @@ from copy import deepcopy
 from typing import Any
 
 from backend.services.version_control.contracts import (
+    Comparison,
     Fingerprints,
     Snapshot,
     canonical_json_hash,
+    to_wire,
 )
 
 # Recognized as a bare serialized_space object when any of these keys is present.
@@ -76,7 +78,15 @@ _BOUNDARY_SINGLE_QUOTE_RE = re.compile(r"(?<![A-Za-z0-9])'|'(?![A-Za-z0-9])")
 class Canonicalizer:
     """VC/1.0 adapter extending the legacy fingerprint entry point."""
 
+    def __init__(self, *, dual_compute_version: str | None = None) -> None:
+        self._versions = {"vc-c14n/1": _canonical_state_v1}
+        if dual_compute_version is not None and dual_compute_version not in self._versions:
+            raise ValueError("Unsupported dual-compute canonicalizer version")
+        self._dual_compute_version = dual_compute_version
+
     def observe(self, envelope: dict, version: str = "vc-c14n/1") -> Snapshot:
+        if version not in self._versions:
+            raise ValueError(f"Unsupported canonicalizer version: {version}")
         if not isinstance(envelope, dict):
             raise ValueError("envelope must be a JSON object")
         response = deepcopy(envelope)
@@ -84,11 +94,7 @@ class Canonicalizer:
         metadata = {key: response[key] for key in ("description",) if key in response}
         if "description" in metadata and metadata["description"] is not None and not isinstance(metadata["description"], str):
             raise ValueError("description must be a string or null")
-        canonical = {
-            "config": _canonical_config(serialized),
-            "benchmark": _canonical_benchmark(serialized),
-            "metadata": metadata,
-        }
+        canonical = self._versions[version](serialized, metadata)
         fingerprints = Fingerprints(
             config=canonical_json_hash("vc-config/1", {"value": canonical["config"]}),
             benchmark=canonical_json_hash("vc-benchmark/1", {"value": canonical["benchmark"]}),
@@ -107,6 +113,39 @@ class Canonicalizer:
             fingerprints=fingerprints,
             state_digest=fingerprints.state_digest,
         )
+
+    def compare(self, left: Snapshot, right: Snapshot) -> Comparison:
+        pair = self._comparable_pair(left, right)
+        if pair is None:
+            return Comparison.UNKNOWN
+        left, right = pair
+        return Comparison.EQUAL if left.fingerprints == right.fingerprints else Comparison.DIFFERENT
+
+    def _comparable_pair(self, left: Snapshot, right: Snapshot) -> tuple[Snapshot, Snapshot] | None:
+        left_version = left.fingerprints.canonicalizer_version
+        right_version = right.fingerprints.canonicalizer_version
+        if left_version == right_version and left_version in self._versions:
+            return left, right
+        if self._dual_compute_version is None:
+            return None
+        try:
+            for snapshot in (left, right):
+                if canonical_json_hash("vc-envelope/1", {"envelope": snapshot.response_envelope}) != snapshot.response_envelope_digest:
+                    return None
+            return (
+                self.observe(to_wire(left.response_envelope), self._dual_compute_version),
+                self.observe(to_wire(right.response_envelope), self._dual_compute_version),
+            )
+        except (ValueError, TypeError):
+            return None
+
+
+def _canonical_state_v1(serialized: dict, metadata: dict) -> dict:
+    return {
+        "config": _canonical_config(serialized),
+        "benchmark": _canonical_benchmark(serialized),
+        "metadata": metadata,
+    }
 
 
 def _extract_restorable_space(response: dict) -> dict:

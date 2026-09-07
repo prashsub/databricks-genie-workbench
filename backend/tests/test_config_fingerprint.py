@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from backend.services.version_control.contracts import canonical_json_hash, to_wire
+from backend.services.version_control.contracts import Comparison, canonical_json_hash, to_wire
 
 from backend.services.config_fingerprint import (
     benchmark_fingerprint,
@@ -195,6 +196,31 @@ def test_malformed_serialized_space_is_rejected_not_empty(envelope: dict) -> Non
     with pytest.raises(ValueError, match="serialized_space|description|envelope"):
         Canonicalizer().observe(envelope)
     assert Canonicalizer().observe({"serialized_space": {"instructions": {}}})
+
+
+def test_cross_canonicalizer_comparison_is_unknown_without_dual_compute() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    original = adapter.observe({"serialized_space": _space(), "description": "Original"})
+    changed = adapter.observe({"serialized_space": _space(), "description": "Changed"})
+    historical_fingerprints = replace(original.fingerprints, canonicalizer_version="vc-c14n/99")
+    historical = replace(original, fingerprints=historical_fingerprints, state_digest=historical_fingerprints.state_digest)
+    assert adapter.compare(original, original) is Comparison.EQUAL
+    assert adapter.compare(original, changed) is Comparison.DIFFERENT
+    assert adapter.compare(original, historical) is Comparison.UNKNOWN
+    assert adapter.compare(historical, historical) is Comparison.UNKNOWN
+    with pytest.raises(ValueError, match="canonicalizer"):
+        adapter.observe(_space(), version="vc-c14n/99")
+    dual = Canonicalizer(dual_compute_version="vc-c14n/1")
+    before = to_wire(historical)
+    assert dual.compare(original, historical) is Comparison.EQUAL
+    assert dual.compare(changed, historical) is Comparison.DIFFERENT
+    assert to_wire(historical) == before
+    missing_raw = replace(historical, response_envelope={})
+    assert dual.compare(original, missing_raw) is Comparison.UNKNOWN
+    with pytest.raises(ValueError, match="canonicalizer"):
+        Canonicalizer(dual_compute_version="vc-c14n/99")
 
 
 def test_unwrap_bare_serialized_space() -> None:
