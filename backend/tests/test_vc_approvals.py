@@ -178,3 +178,42 @@ def test_production_requires_two_distinct_nonrequester_humans(invalid):
         assert grant.binding == context.bound.target_binding
         assert grant.request == context.request.identity
         assert grant.expected_base_fingerprints == context.bound.expected_base_fingerprints
+
+
+def approve(context):
+    approval = submit(context)
+    for subject in ('human-1', 'human-2'):
+        context.service.vote(approval.approval_id, 'approve', context.identity.actors[subject])
+    return approval
+
+
+@pytest.mark.parametrize('fault', ['revoked', 'source-only', 'wrong-workspace', 'wrong-run-as', 'human-executor', 'outage'])
+def test_target_membership_rechecked_by_target_executor_at_execution(fault):
+    context = setup_approval()
+    approve(context)
+    seen = []
+
+    def target_provider(executor):
+        seen.append(executor)
+        return context.target_identity
+
+    context.service.target_identity = target_provider
+    context.target_identity.memberships.pop(('human-2', '123'))
+    assert context.service.authorize(context.request, context.executor).approval_id == uid(2)
+    assert seen == [context.executor]
+    executor = context.executor
+    if fault in ('revoked', 'source-only'):
+        context.target_identity.memberships.clear()
+        context.identity.memberships[('human-1', 'source')] = frozenset({'target-approvers'})
+    elif fault == 'wrong-workspace':
+        executor = replace(executor, workspace_id='source')
+    elif fault == 'wrong-run-as':
+        context.target_identity.run_as[executor.execution_ref] = 'another-service'
+    elif fault == 'human-executor':
+        executor = replace(executor, actor_kind='human')
+    else:
+        def unavailable(*args):
+            raise OSError('identity evidence unavailable')
+        context.target_identity.groups = unavailable
+    with pytest.raises((PermissionError, OSError)):
+        context.service.authorize(context.request, executor)
