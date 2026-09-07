@@ -1,5 +1,7 @@
 """Synchronous, fail-closed coordination. Never sends a Genie mutation."""
+from dataclasses import replace
 from datetime import timedelta
+from math import isfinite
 from uuid import uuid4
 
 from backend.services.version_control import contracts as c
@@ -31,7 +33,8 @@ class CoordinationService:
                  clock, resolve_binding, verify_enrollment, insert_enrolled,
                  validate_authorization, verify_create_intent,
                  termination: c.TerminationEvidenceProvider,
-                 authorize_human_recovery, authorize_heads):
+                 authorize_human_recovery, authorize_heads,
+                 verified_request_lifetime: tuple[float, str] | None = None):
         self.store = store
         self.facts = facts
         self.ledger = ledger
@@ -44,6 +47,8 @@ class CoordinationService:
         self.termination = termination
         self.authorize_human_recovery = authorize_human_recovery
         self.authorize_heads = authorize_heads
+        # Deployment-owned verified capability, NEVER copied from RecoveryEvidence.
+        self.verified_request_lifetime = verified_request_lifetime
 
     @staticmethod
     def _io(call, *args, **kwargs):
@@ -265,10 +270,11 @@ class CoordinationService:
             raise CoordinationError('Idempotency key already bound to a different request digest')
         return history
 
-    def _release(self, row):
+    def _release(self, row, *, generation=None):
         # Never erase heads or the monotonically increasing fence/observer sequence.
         return self._cas(row, lambda r: r.attempt_id == row.attempt_id,
             state=c.CoordinationState.IDLE, unresolved=False,
+            generation=row.generation if generation is None else generation,
             holder=None, attempt_id=None, executor_kind=None, executor_ref=None,
             lease_expires_at=None, active_operation_id=None, idempotency_key=None,
             request_digest=None, approval_id=None, approval_digest=None,
@@ -331,4 +337,61 @@ class CoordinationService:
         if (trusted is None or trusted != evidence.termination
                 or trusted.attempt_id != row.attempt_id or trusted.execution_ref != row.executor_ref):
             raise CoordinationError('Trusted termination of the exact prior attempt is required')
-        raise CoordinationError('Automatic recovery disabled pending verified request lifetime')
+        self._validate_termination(trusted)
+        self._validate_samples(evidence)
+        if not evidence.checkpoint_classification.strip():
+            raise CoordinationError('Recovery checkpoint classification required')
+        if row.admitted_at is not None:
+            self._publish_consumption(self._claim_from_row(row))
+        request = self._request(row)
+        # Strip AdmissionClaim's extra fields at the frozen FenceToken wire seam.
+        evidence = replace(evidence, fence=self._fence(row))
+        ref = self._fact(row, request, c.FactStatus.CONFLICTED,
+                         evidence=evidence, kind=c.FactKind.RECOVERY)
+        history = self._history(row, request)
+        if not any(f.event_id == ref.event_id for f in history.facts):
+            raise AuthorityUnavailable('Recovery audit publication not verified')
+        released = self._release(row, generation=row.generation + 1)
+        # A recovery result is a historical fence, not a new write capability.
+        fence = c.FenceToken(binding.binding_id, binding.binding_revision,
+                            row.attempt_id, released.generation, released.row_version)
+        return c.RecoveryResult(binding, c.OperationStatus.CONFLICTED, fence, False, (ref.event_id,))
+
+    def _claim_from_row(self, row):
+        if not row.checkpoint or 'preimage' not in row.checkpoint:
+            raise CoordinationError('Missing durable admission checkpoint')
+        value_type = c.CreateIntentRef if row.create_intent_event_id else c.ObservationRef
+        preimage = c.from_wire(value_type, row.checkpoint['preimage'])
+        return c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
+            row.attempt_id, row.generation, row.row_version, self._request(row),
+            preimage, row.approval_id, row.approval_digest)
+
+    def _validate_termination(self, trusted):
+        if trusted.terminated_at > self.clock.now():
+            raise CoordinationError('Future termination evidence')
+        if trusted.source == 'job':
+            # The trusted provider must enumerate the COMPLETE retry/child closure,
+            # not merely a caller-provided list or cancellation acknowledgement.
+            refs = [e.execution_ref for e in trusted.executions]
+            if (trusted.execution_ref not in refs or len(refs) != len(set(refs))
+                    or any(e.terminal_at > trusted.terminated_at for e in trusted.executions)):
+                raise CoordinationError('Incomplete Job retry/child termination evidence')
+        elif trusted.source == 'app-worker':
+            if not trusted.app_worker_proof_digest:
+                raise CoordinationError('Positive app-worker termination proof required')
+        else:
+            raise CoordinationError('Untrusted termination source')
+
+    def _validate_samples(self, evidence):
+        capability = self.verified_request_lifetime
+        if (capability is None or not isfinite(capability[0]) or capability[0] <= 0
+                or not capability[1] or capability != (
+                    evidence.maximum_request_lifetime_seconds, evidence.lifetime_bound_reference)):
+            raise CoordinationError('Automatic recovery disabled: request lifetime is unverified')
+        samples = evidence.samples
+        if (len(samples) < 3 or len({s.state_digest for s in samples}) != 1
+                or any(s.observed_at <= evidence.termination.terminated_at
+                       or s.observed_at > self.clock.now() for s in samples)
+                or any(a.observed_at >= b.observed_at for a, b in zip(samples, samples[1:]))
+                or (samples[-1].observed_at - samples[0].observed_at).total_seconds() <= capability[0]):
+            raise CoordinationError('Need three stable post-termination GETs spanning beyond verified lifetime')
