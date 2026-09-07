@@ -155,6 +155,18 @@ class CoordinationService:
         row = self._owned(claim)
         if not isinstance(claim, c.AdmissionClaim) or row.state != c.CoordinationState.ADMITTED:
             raise OwnershipError('Reservation/observation is not write admission')
+        if (claim.request != self._request(row)
+                or (claim.approval_id, claim.approval_digest) != (row.approval_id, row.approval_digest)
+                or (isinstance(claim.preimage, c.ObservationRef) and
+                    (claim.preimage.version_id, claim.preimage.state_digest) !=
+                    (row.pre_version_id, row.preimage_digest))
+                or (isinstance(claim.preimage, c.CreateIntentRef) and
+                    claim.preimage.event_id != row.create_intent_event_id)):
+            raise OwnershipError('Admission claim differs from durable row')
+
+    @staticmethod
+    def _request(row):
+        return c.RequestIdentity(row.active_operation_id, row.idempotency_key, row.request_digest)
 
     def admit(self, reservation: c.Reservation,
               preimage: c.ObservationRef | c.CreateIntentRef,
@@ -162,6 +174,15 @@ class CoordinationService:
         row = self._owned(reservation.fence)
         if row.state != c.CoordinationState.RESERVED:
             raise OwnershipError('Only a reservation can be admitted; no replay')
+        if (reservation.request != self._request(row)
+                or reservation.executor.principal_id != row.holder
+                or reservation.executor.execution_ref != row.executor_ref
+                or authorization.binding != row.binding
+                or authorization.request != reservation.request
+                or authorization.expires_at <= self.clock.now()
+                or bool(authorization.approval_id) != bool(authorization.approval_digest)
+                or not self._io(self.validate_authorization, authorization, reservation.executor)):
+            raise CoordinationError('Authorization is stale, mismatched or revoked')
         if (preimage.binding_id, preimage.binding_revision) != (
                 row.binding.binding_id, row.binding.binding_revision):
             raise OwnershipError('Preimage belongs to another binding/revision')
@@ -183,7 +204,9 @@ class CoordinationService:
                             create_intent_event_id=preimage.event_id)
         else:
             raise CoordinationError('Unsupported committed evidence')
-        row = self._cas(row, lambda r: r.state == c.CoordinationState.RESERVED,
+        row = self._cas(row, lambda r: (r.state == c.CoordinationState.RESERVED
+            and r.lease_expires_at > self.clock.now()
+            and authorization.expires_at > self.clock.now()),
             state=c.CoordinationState.ADMITTED,
             active_operation_id=reservation.request.operation_id,
             idempotency_key=reservation.request.idempotency_key,

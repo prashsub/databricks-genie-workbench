@@ -169,3 +169,33 @@ def test_reservation_is_not_admission_and_requires_committed_preimage(h, kind):
     assert isinstance(claim, c.AdmissionClaim)
     assert claim.preimage == h.preimage
     h.service.assert_owner(claim)
+
+
+def test_admission_atomically_binds_key_digest_approval_and_preimage(h):
+    enroll(h)
+    reservation = reserve(h)
+    original = h.store.compare_and_swap
+    h.store.compare_and_swap = Mock(wraps=original)
+    h.validate_authorization.return_value = False
+    with pytest.raises(CoordinationError):
+        h.service.admit(reservation, h.preimage, h.grant)
+    h.validate_authorization.return_value = True
+    for bad in (replace(h.grant, request=replace(h.request, idempotency_key='other')),
+                replace(h.grant, expires_at=h.clock.now()),
+                replace(h.grant, binding=replace(h.binding, binding_revision=2)),
+                replace(h.grant, approval_digest=None)):
+        with pytest.raises(CoordinationError):
+            h.service.admit(reservation, h.preimage, bad)
+    assert h.store.compare_and_swap.call_count == 0
+    claim = h.service.admit(reservation, h.preimage, h.grant)
+    assert h.store.compare_and_swap.call_count == 1
+    row = h.store.read(h.binding.binding_id)
+    assert (row.active_operation_id, row.idempotency_key, row.request_digest) == (
+        h.request.operation_id, h.request.idempotency_key, h.request.request_digest)
+    assert (row.approval_id, row.approval_digest) == (h.grant.approval_id, h.grant.approval_digest)
+    assert (row.pre_version_id, row.preimage_digest, row.expected_base_fingerprint) == (
+        h.preimage.version_id, h.preimage.state_digest, h.grant.expected_base_fingerprints.state_digest)
+    assert row.generation == claim.generation == reservation.fence.generation
+    assert row.attempt_id == claim.attempt_id
+    with pytest.raises(CoordinationError):
+        h.service.assert_owner(replace(claim, request=replace(h.request, request_digest='a' * 64)))
