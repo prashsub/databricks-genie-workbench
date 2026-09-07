@@ -273,3 +273,84 @@ def test_comparison_is_scoped_and_incompatible_is_unknown(failure):
     else:
         with pytest.raises(PermissionError):
             service.compare(binding_fixture(), version_id(1), version_id(2), actor_fixture())
+
+
+def scan_setup(entries, **options):
+    from backend.services.version_control.drift.ports import BindingInventory, Projections
+
+    inventory = Mock(spec=BindingInventory)
+    inventory.page.return_value = vc.Page(tuple(entries), "next")
+    projections = Mock(spec=Projections)
+    dependencies = dict(inventory=inventory, projections=projections, scan_enabled=True,
+                        batch_size=2, full_fetch_interval=timedelta(minutes=30), clock=lambda: NOW)
+    dependencies.update(options)
+    service, observer = setup_service(**dependencies)
+    return service, observer, inventory, projections
+
+
+def scan_entry(number=1, **changes):
+    from backend.services.version_control.drift.ports import ScanEntry
+
+    binding = replace(binding_fixture(), binding_id=version_id(number), space_id=f"space-{number}")
+    status = observed_result(binding).status
+    return replace(ScanEntry(binding, status, NOW, NOW, NOW - timedelta(hours=1)), **changes)
+
+
+def test_reconcile_scan_paginates_isolates_failures_and_periodically_full_fetches():
+    first, second = scan_entry(), scan_entry(2)
+    service, observer, inventory, projections = scan_setup([first, second])
+    observer.capture.side_effect = [RuntimeError("binding failed"), observed_result(second.binding)]
+    batch = service.scan("123", "cursor")
+    inventory.page.assert_called_once_with("123", "cursor", 2)
+    assert batch.next_cursor == "next"
+    assert len(batch.items) == 2
+    assert batch.items[0].stale and batch.items[0].allowed_actions == ()
+    assert batch.items[1].heads.observed == version_id(2)
+    assert batch.items[1].drift == vc.DriftState.EXTERNAL_AHEAD
+    assert observer.capture.call_count == 2
+    assert projections.publish.call_count == 2
+    fresh = replace(first, last_full_fetch_at=NOW)
+    inventory.page.return_value = vc.Page((fresh,), None)
+    observer.capture.reset_mock(side_effect=True)
+    batch = service.scan("123", "next")
+    observer.capture.assert_not_called()
+    assert batch.next_cursor is None
+    inventory.page.return_value = vc.Page((replace(fresh, api_update_time=NOW + timedelta(seconds=1)),), None)
+    observer.capture.return_value = observed_result(first.binding)
+    service.scan("123", None)
+    observer.capture.assert_called_once()
+    observer.capture.reset_mock()
+    inventory.page.return_value = vc.Page((fresh,), None)
+    service.clock = lambda: NOW + timedelta(minutes=31)
+    service.scan("123", None)
+    observer.capture.assert_called_once()
+
+
+def test_scan_default_off_bounds_scope_and_job_executor():
+    from backend.jobs.vc_reconcile import run_scan
+
+    service, observer, inventory, projections = scan_setup([], scan_enabled=False)
+    with pytest.raises(PermissionError):
+        service.scan("123", None)
+    inventory.page.assert_not_called()
+    service.scan_enabled = True
+    with pytest.raises(PermissionError):
+        service.scan("other", None)
+    inventory.page.return_value = vc.Page((scan_entry(), scan_entry(2), scan_entry(3)), None)
+    with pytest.raises(ValueError, match="bound"):
+        service.scan("123", None)
+    observer.capture.assert_not_called()
+    with pytest.raises(PermissionError):
+        run_scan("123", None, service=service, executor=replace(executor_fixture(), execution_ref="app/1"))
+
+
+def test_scan_projection_failure_isolated_without_advancing_full_fetch_watermark():
+    first, second = scan_entry(), scan_entry(2)
+    service, observer, inventory, projections = scan_setup([first, second])
+    observer.capture.side_effect = [observed_result(first.binding), observed_result(second.binding)]
+    projections.publish.side_effect = [RuntimeError("projection unavailable"), None]
+    batch = service.scan("123", None)
+    assert batch.items[0].stale
+    assert batch.items[0].heads == observed_result(first.binding).status.heads
+    assert not batch.items[1].stale
+    assert observer.capture.call_count == 2

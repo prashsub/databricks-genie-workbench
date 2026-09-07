@@ -1,12 +1,12 @@
 """VC/1.0 orchestration; dependencies are injected domain ports."""
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
 
-from .ports import ReconcilePolicy
+from .ports import BindingInventory, Projections, ReconcilePolicy
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,11 @@ class DriftService:
                  policy: ReconcilePolicy | None = None, approvals: vc.ApprovalService | None = None,
                  identity: vc.IdentityProvider | None = None, reconcile_enabled=False,
                  clock=None, dispatcher: vc.JobDispatcher | None = None,
-                 facts: vc.OperationFacts | None = None, dispatch_enabled=False):
+                 facts: vc.OperationFacts | None = None, dispatch_enabled=False,
+                 inventory: BindingInventory | None = None, projections: Projections | None = None,
+                 scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30)):
+        if not 1 <= batch_size <= 100 or full_fetch_interval <= timedelta(0):
+            raise ValueError("Invalid scan bounds or full-fetch interval")
         self.canonicalizer = canonicalizer
         self.observer = observer
         self.executor = executor
@@ -38,6 +42,56 @@ class DriftService:
         self.dispatcher = dispatcher
         self.facts = facts
         self.dispatch_enabled = dispatch_enabled
+        self.inventory = inventory
+        self.projections = projections
+        self.scan_enabled = scan_enabled
+        self.batch_size = batch_size
+        self.full_fetch_interval = full_fetch_interval
+
+    def scan(self, workspace_id: str, cursor: str | None) -> vc.ReconcileBatch:
+        if self.scan_enabled is not True:
+            raise PermissionError("VC scheduled observation disabled")
+        if self.executor is None or self.executor.workspace_id != workspace_id:
+            raise PermissionError("Scan executor workspace mismatch")
+        if self.inventory is None or self.projections is None or self.observer is None:
+            raise RuntimeError("Scan inventory, projection or observer unavailable")
+        page = self.inventory.page(workspace_id, cursor, self.batch_size)
+        if len(page.items) > self.batch_size:
+            raise ValueError("Inventory exceeded scan bound")
+        results = []
+        for entry in page.items:
+            status = entry.status
+            full_fetch_at = entry.last_full_fetch_at
+            try:
+                if (entry.binding.workspace_id != workspace_id
+                        or status.binding_id != entry.binding.binding_id
+                        or status.binding_revision != entry.binding.binding_revision):
+                    raise PermissionError("Inventory binding scope mismatch")
+                due = (status.stale or full_fetch_at is None or full_fetch_at > self.clock()
+                       or self.clock() - full_fetch_at >= self.full_fetch_interval
+                       or entry.api_update_time is None or entry.api_update_time != entry.previous_update_time)
+                if due:
+                    captured = self.observer.capture(entry.binding, "scheduled_reconcile", self.executor)
+                    status = captured.status
+                    if (status.binding_id != entry.binding.binding_id
+                            or status.binding_revision != entry.binding.binding_revision):
+                        status = entry.status
+                        raise PermissionError("Observation binding scope mismatch")
+                    if captured.busy or status.stale:
+                        raise RuntimeError("Observation busy or unavailable")
+                    full_fetch_at = self.clock()
+                self.projections.publish(entry.binding, status, full_fetch_at, entry.api_update_time)
+            except Exception:
+                status = replace(status, stale=True, allowed_actions=(),
+                                 reasons=(*status.reasons, "Reconciliation evidence unavailable; no mutation replay"))
+                if full_fetch_at == entry.last_full_fetch_at:
+                    try:
+                        self.projections.publish(entry.binding, status, entry.last_full_fetch_at,
+                                                 entry.previous_update_time)
+                    except Exception:
+                        pass
+            results.append(status)
+        return vc.ReconcileBatch(tuple(results), page.next_cursor)
 
     def reconcile(self, binding: vc.BindingRef, action: vc.ReconcileRequest,
                   actor: vc.ActorContext) -> vc.OperationHandle:
