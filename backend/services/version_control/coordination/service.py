@@ -588,7 +588,15 @@ class CoordinationService:
 
     def advance_heads(self, fence: c.FenceToken, update: c.HeadUpdate) -> c.Heads:
         row = self._owned(fence)
+        if update.observed is None and update.approved is None and update.deployed is None:
+            raise CoordinationError('Empty head update')
         observing = row.state == c.CoordinationState.OBSERVING
+        if not observing:
+            # Any non-observer head write requires a verified admission. assert_owner
+            # re-checks AdmissionClaim + ADMITTED + request/approval/preimage vs row.
+            if not isinstance(fence, c.AdmissionClaim):
+                raise OwnershipError('Head updates require an observation lease or an admission claim')
+            self.assert_owner(fence)
         if update.approved is not None or update.deployed is not None:
             if (observing or not update.authorization_reference
                     or not self._io(self.authorize_heads, row.binding, fence, update)):

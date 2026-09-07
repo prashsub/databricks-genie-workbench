@@ -85,6 +85,65 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+@pytest.mark.parametrize('head', ['observed', 'approved', 'deployed'])
+def test_reservation_fence_cannot_advance_any_head(h, head):
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    v = uid()
+    h.authorize_heads.return_value = True  # policy is NOT the missing gate.
+    update = {
+        'observed': c.HeadUpdate(v, None, None, 'ref'),
+        'approved': c.HeadUpdate(None, v, None, 'ref'),
+        'deployed': c.HeadUpdate(None, None, v, 'ref'),
+    }[head]
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(reservation.fence, update)
+    # 2. no partial write.
+    assert h.store.read(h.binding.binding_id).heads == c.Heads(None, None, None)
+    # 3. authority precedes the policy callback.
+    if head in {'approved', 'deployed'}:
+        h.authorize_heads.assert_not_called()
+
+
+def test_empty_head_update_rejected_and_lease_retained(h):
+    enroll(h)
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(lease.fence, c.HeadUpdate(None, None, None, None))
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.OBSERVING and row.unresolved
+
+
+def test_admission_claim_can_advance_heads_positive_control(h):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+    durable_facts(h)
+    enroll(h)
+    # Establish an observed head first via an observer lease.
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
+    v = uid()
+    context = c.CaptureContext(h.binding, 'observer-1', h.clock.now(), 'open',
+        c.ActorContext('observer', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
+        attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
+    h.ledger.get_version.return_value = c.Version(v, snapshot, context)
+    h.service.advance_heads(lease.fence, c.HeadUpdate(v, None, None, None))
+    h.service.quarantine(h.service.observe_exclusively(h.binding, h.executor).fence, 'reset')
+    h.store.state.rows[:] = [replace(h.store.state.rows[0],
+        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
+        active_operation_id=None, idempotency_key=None, request_digest=None,
+        lease_expires_at=None, mutation_stage=None, checkpoint=None)]
+    claim = admit(h)
+    # 5. positive control: admitted claim + authorized policy succeeds.
+    h.authorize_heads.return_value = True
+    heads = h.service.advance_heads(claim, c.HeadUpdate(None, v, v, 'verified-deployment'))
+    assert heads == c.Heads(v, v, v)
+    # 6. assert_owner durable-row comparison is on the path.
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(replace(claim, request=replace(h.request, request_digest='f' * 64)),
+                                c.HeadUpdate(None, v, v, 'verified-deployment'))
+
+
 @pytest.mark.parametrize('shape', ['config-only', 'description-only', 'config-and-description'])
 def test_checkpoint_stage_machine_is_scoped_to_the_admitted_operation(h, shape):
     durable_facts(h)
