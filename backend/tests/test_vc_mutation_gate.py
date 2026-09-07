@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control import platform
 from backend.services.version_control.coordination import CoordinationService
 from backend.services.version_control.mutation_gate import MutationGate
 from backend.tests.vc_fakes.fixtures import FakeCanonicalizer, binding_fixture, executor_fixture
@@ -96,6 +97,23 @@ def test_gate_has_no_transport_write_before_reserve_evidence_and_admit(rig):
     rig.gate.execute(rig.request, rig.executor)
     assert rig.trace[:6] == ["reserve", "get", "commit:preimage", "verify_commit", "authorize", "admit"]
     assert rig.trace.index("admit") < rig.trace.index("patch_config")
+
+
+def test_m08_service_executor_passes_m04_governed_write_identity_check(rig):
+    client = Mock()
+    client.config.host = "https://example.invalid"
+    client.config.auth_type = "oauth-m2m"
+    client.get_workspace_id.return_value = "123"
+    client.current_user.me.return_value = SimpleNamespace(application_id="target-service", id="scim-id")
+    client.api_client.do.return_value = {
+        "userName": "target-service",
+        "id": "scim-id",
+        "X-Databricks-Org-Id": "123",
+    }
+    provider = platform.PlatformIdentityProvider(profiles={"target-test": lambda: client})
+    executor = provider.executor(vc.ExplicitExecutorSelection(
+        "123", "https://example.invalid", "target-service", "job/456", "target-test"))
+    rig.gate._enabled(rig.binding, executor, "promotion")
 
 
 @pytest.mark.parametrize("failure", ["reserve", "append_observation", "verify_committed", "authorize", "admit"])
