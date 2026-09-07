@@ -194,3 +194,44 @@ create specifically).
     rollback. Fix two pre-existing bugs first: create session identity binding and
     create idempotency keys.
 
+## Round 3 — coexistence with in-flight branches (MVA, ontology, VC)
+
+Question: how does the extraction coexist with three in-flight features, and should
+we wait for all to merge? Grounded in verified branch ancestry + per-file diffs.
+
+**Verified structure:** ontology is built ON TOP OF metric-view-advisor (MVA is its
+git ancestor); VC is docs-only and headless was cut from it (shared lineage);
+optimizer-v2 already merged. So the real contention is two MVA-owned files
+(`auto_optimize.py` +2,782, `models.py` +735) plus one primitive all four edit
+independently: `auth.py` / identity.
+
+**Both heads converged:** reject "wait for all three"; do **(c) influence unmerged
+branches now + (b) plan now**, with **(a) wait applying to only two files**. One
+coordinated core, three feature surfaces + headless adapters. `auth.py` /
+`WorkbenchContext` is the one mandatory pre-PR coordination (three independent edits
+= three identity models = VC's audit ledger becomes fiction); `Operation` /
+`operation_id` is the close second.
+
+**astra** emphasized governance: assign a single *owner* + prerequisite PR for the
+auth bridge (a doc alone is insufficient); read ontology's delta from MVA (not main);
+a clear interrupt-or-not table (interrupt for identity/Operation/fingerprint
+signature; don't interrupt for schema cleanup); don't force ordinary ontology reads
+into an operation framework; no mandatory ontology-before-VC ordering.
+
+**opus** added the decisive reframe — **partition by contention, not by branch** —
+and two contention-driven reorderings: (1) `auth.py` has zero open-PR contention →
+land the ContextVar inversion THIS WEEK, before ontology's PR; (2) the entire
+create-flow surface is uncontended → **move conversational-create-headless to the
+FRONT of the queue** (biggest new piece, zero merge risk). Plus concrete per-branch
+asks and a full merge train.
+
+**Diagnostic run to settle the MVA question:** MVA's ~2,782 router lines = 15 route
+decorators + ~60 business-derivation helpers (`_build_semantic_graph`,
+`_curated_sql_measures`, `_mv_proposal_from_row`, …) — so it is **mostly inline
+derivation, not thin glue.** Therefore the `routers/metric_view.py` endpoint split is
+only a partial win; the go-forward tool is the **moratorium** + lifting helpers into
+the existing `mv_*.py` services *after* MVA merges, with the author's agreement —
+never as an admission price.
+
+Captured in README §14 (coexistence, sequencing & ready-to-execute plan).
+

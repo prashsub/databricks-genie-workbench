@@ -496,3 +496,182 @@ plan.
 5. **UC Skills publication format.** Exact packaging contract for
    `catalog.schema.skill` and how `gwb skills publish` should render a SKILL.md
    bundle into it.
+
+## 14. Coexistence, sequencing & ready-to-execute plan (in-flight branches)
+
+This section is the merge/sequencing strategy for landing the headless extraction
+amid three other in-flight features. It is grounded in a verified collision
+analysis (branch ancestry + per-file diffs against `upstream/main`), stress-tested
+by both debate heads. **No file has been moved; this is a plan, not an execution.**
+
+### 14.1 The in-flight features (verified ancestry)
+
+| Feature | State | Relationship |
+|---|---|---|
+| `feature/metric-view-advisor` (MVA) | **PR open, in human testing** | Baseline of the stack. |
+| `ontology` | In development, no PR | **Built on top of MVA** (MVA is its git ancestor). Beyond MVA it adds only new files (`backend/ontology/*`, ~20 files) + surgical edits to `auth.py` (+53), `routers/auth.py` (+16), `lakebase.py` (+176). |
+| `version-control-cicd` (VC) | In development, **docs-only today** | **`feature/headless-cli-mcp` was cut from it** — headless already contains it. VC code (~10 modules) is almost entirely new files. |
+| `feature/headless-cli-mcp` | This work | Descendant of VC. |
+
+**Key insight: this is not three independent branches — it's a stack.** ontology =
+MVA + additive; VC and headless share one lineage. `optimizer-v2` is already merged
+and is not a concern.
+
+### 14.2 Contention map — partition by file, not by branch
+
+| File | Open-PR contention | Pre-PR contention | Verdict |
+|---|---|---|---|
+| `routers/auto_optimize.py` | **MVA (+2,782)** | VC (2 drift edits) | **WAIT for MVA.** The only true merge blocker. |
+| `models.py` | **MVA (+735)** | ontology slice, VC | **WAIT**, then split into a `models/` package. |
+| `scanner.py`, `lakebase.py` | MVA / ontology (light) | — | Wait, but trivial (append-only). |
+| **`services/auth.py`** | **none** | ontology (+53), VC | **GO NOW** — highest-leverage move (§14.4). |
+| **`create_agent*.py`, `routers/create.py`** | **none** | **none** | **GO NOW — fully uncontended (§14.4).** |
+| `genie_client.py`, `config_fingerprint.py` | none | VC (extend in place) | Wrap-and-assert now; physical move last. |
+| `main.py` | none | ontology, VC (composition) | Append-only, fine. |
+
+**Only two files are genuinely contended** (`auto_optimize.py`, `models.py`), and
+both are owned by MVA. Everything else headless needs is open road today.
+
+### 14.3 Recommendation — do NOT wait for all three
+
+The blend, weighted to act now:
+
+- **(c) Influence the unmerged branches — primary play (~70%).** ontology and VC
+  have no PR yet. Landing the shared `auth.py` / `WorkbenchContext` contract before
+  they harden costs days now and saves a multi-week retrofit later. **This window
+  closes the moment ontology opens a PR.**
+- **(b) Wait-but-plan (~25%).** For `auto_optimize.py` specifically: read MVA's diff
+  now, build the route-table–driven fixture/effect harness now, freeze the golden
+  *values* the day MVA merges.
+- **(a) Wait-for-merge (~5%).** Applies to exactly two files (`auto_optimize.py`,
+  `models.py`) and to every physical `git mv`. Nothing else.
+
+Waiting for all three would idle headless for months **and** let VC — whose code
+doesn't exist yet — be written against the pre-extraction shape we are trying to
+leave. That is the worst outcome on the board.
+
+### 14.4 The two contention-driven reorderings
+
+1. **`auth.py` / `WorkbenchContext` is the one mandatory coordination — land it
+   first.** It is edited by the MVA-chain (ontology +53), by VC
+   (`initiated_by` / `executed_as`), and by headless (the ContextVar inversion).
+   Three independent edits to one 15-call-site ambient global produce **three
+   identity models, and VC's audit ledger — whose entire value is "who did this" —
+   becomes fiction.** It currently has **zero open-PR contention**, so the inversion
+   can land this week, in place, with the deprecated-reader bridge, and become the
+   thing ontology and VC are *written against*. **Assign a single named owner to the
+   auth bridge and a prerequisite PR** — a design doc alone is insufficient (teams
+   would each implement it differently). `Operation` / `operation_id` is the close
+   second: VC's durable unit and headless's non-blocking MCP handle must be **one
+   object**, or MCP cannot poll VC operations.
+
+2. **Conversational-create-headless moves to the FRONT of the queue.** The entire
+   create surface (`create_agent*.py`, `routers/create.py`) is **uncontended** by all
+   three branches. So the biggest *new* mandated piece — the `run_turn` lift,
+   `SessionStore` port, cassette harness, session↔identity binding, idempotency keys,
+   two-phase safe apply — has zero merge risk and should start immediately. This
+   inverts the earlier phasing (§8a/§12): create goes first *because* it is the only
+   large piece of the refactor nobody else is standing on.
+
+### 14.5 The MVA `auto_optimize.py` collision — diagnosis
+
+A classification of MVA's ~2,782 added router lines: **15 route decorators**, ~75 new
+`def`s, of which only ~6 match the classic `_build_/_derive_/_patch_` pattern — but
+by content **~60 are business-derivation helpers** (`_build_semantic_graph`,
+`_curated_sql_measures`, `_governed_measures_from_yamls`, `_mv_proposal_from_row`,
+`_parse_join_columns`, measure synthesis, provenance indexing, YAML parsing). So the
+addition is **mostly inline derivation, not thin endpoint glue.**
+
+Consequences:
+- A `routers/metric_view.py` **endpoint split captures only ~15 endpoints** — a
+  smaller, optional win, not the whole fix.
+- The ~60 helpers **belong in the existing `mv_*.py` service files**, but asking MVA
+  to relocate them **while it is under human test is not worth the risk.**
+- **Go-forward tool = the moratorium** (no *new* business logic or `_build_*`/
+  `_derive_*` helpers in `auto_optimize.py`), enforced by CODEOWNERS.
+- **For MVA's existing additions:** land as-is, **characterize with the effect-trace
+  harness**, and lift the `mv_*` helpers into their services *after* merge, with the
+  author's agreement — never as an admission price for the PR.
+
+### 14.6 Pre-PR asks (surgical — do not refactor their features)
+
+**To ontology (MVA-descendant, no PR yet):**
+1. **Rebase onto the `auth.py` inversion**; no new `get_workspace_client()` call
+   sites inside services — take an explicit client/context param at service entry.
+2. Keep endpoints in `routers/ontology/*` (already doing this); add nothing to
+   `auto_optimize.py`.
+3. `models.py`: **append-only**, no reordering/reformatting of existing classes;
+   adopt `models/ontology.py` if the split lands first.
+4. `lakebase.py` (+176): put it in `lakebase_ontology.py`, don't grow the base file.
+5. Merge `main` continuously so you land as **MVA-delta only** (near-free merge).
+
+**To VC (shares core with headless, no PR yet):**
+1. Import `WorkbenchContext` / `IdentityProvider` from core — **do not build a
+   second identity model**; `initiated_by` / `executed_as` come from the context.
+2. Use core's `Operation` / `operation_id`; `vc_operations` + the CAS row become a
+   `Ledger` adapter **behind the port**, not a parallel lifecycle.
+3. `config_fingerprint.py`: **additive-only in shape** — keep `canonicalize(config)
+   -> dict` and the existing fingerprint signature stable; manifest/version
+   fingerprints as *new* functions. Do not move the file (§14.7).
+4. `genie_client.py`: no new ambient `call_with_sp_fallback`; the
+   fingerprint-precondition PATCH lives in core's `GenieTransport`.
+5. Its 2 `auto_optimize.py` drift edits: make them one-line delegations to core's
+   drift use-case. Land VC as **10 incremental PRs**, not one mega-PR.
+
+**To everyone, now:** CODEOWNERS on the 7 hot files + `test_scanner_parity.py`, and a
+declared **"no new business logic in `auto_optimize.py`"** moratorium — justified on
+`3,849 + 2,782 ≈ 6,600` lines in one router, not on unblocking a refactor.
+
+### 14.7 config_fingerprint — wrap now, move last (do NOT `git mv` before VC lands)
+
+VC's implementation plan references `backend/services/config_fingerprint.py` **by
+path** across its module docs; moving it now would point VC's authors at a dead path.
+
+- **Phase A (now):** nothing moves. Core wraps it:
+  `domain/fingerprint.py` imports `canonicalize`, `compute_fingerprint` from
+  `backend/services/config_fingerprint.py`, guarded by a `test_scanner_parity`-style
+  identity assertion (`assert domain.canonicalize is config_fingerprint.canonicalize`
+  + byte-identical fixtures). VC extends the file in place, additive-only.
+- **Phase B (dead last, after VC modules land):** `git mv` to
+  `domain/fingerprint.py`; `backend/services/config_fingerprint.py` becomes a 3-line
+  re-export shim so every VC/MVA/straggler import keeps working. The parity tests
+  already proved core ≡ backend, so it is a no-behavior-change PR.
+
+Same treatment for `genie_client.py` / `scanner.py`. **`auth.py` is the exception** —
+its inversion is not deferrable (VC's identity model depends on it; `run_in_context`
+is the hinge), so it lands in Phase A, in place, with the deprecated-reader bridge.
+
+### 14.8 Merge train
+
+```
+NOW  (parallel, zero conflict)
+  ├─ merge version-control-cicd DOCS to main            (free, de-dups the spec)
+  ├─ CODEOWNERS + auto_optimize moratorium declared
+  ├─ PR-A: auth.py ContextVar inversion + core contracts ← LAND BEFORE ONTOLOGY'S PR
+  ├─ PR-B: create-flow seam (run_turn, SessionStore, identity binding, cassettes)
+  ├─ PR-C: workbench-core wrap-and-assert + read CLI/MCP (dark, flagged)
+  └─ PR-D: fixture/effect-log harness (route-table–driven, no frozen values yet)
+
+1. MVA merges  ── finish human testing; ask for routers/metric_view.py ONLY if cheap.
+                  If the PR is imminent, take it as-is. Headless rebases onto MVA.
+2. models/ package split (tiny PR, __init__ re-exports for back-compat)
+3. Freeze auto_optimize goldens  ── ontology adds nothing there, so this need NOT
+                                    wait for ontology
+4. ontology PRs and merges        (MVA-delta only ⇒ near-free)
+5. VC modules 01–10, incrementally, written on the core
+6. headless Phase B: git mv + 3-line shims, one 24–48h hot-file freeze
+```
+
+**While waiting, each branch does:** MVA — finish testing, keep `models.py` appends
+clean. ontology — rebase onto PR-A, keep new logic in new files, merge `main` weekly.
+VC — write module specs against core's `WorkbenchContext` / `Operation` /
+`GenieTransport` instead of `backend/services/*`; sequence its fingerprint module
+after PR-A. headless — everything in the NOW block; **do not open a single line of
+`auto_optimize.py`.**
+
+### 14.9 What to say no to
+
+Holding MVA's PR for a router split it doesn't want; letting ontology or VC open a PR
+with its own identity handling; writing VC's 10 modules against `backend/services/*`
+paths; freezing goldens before MVA merges; and any physical `git mv` before VC code
+exists.
