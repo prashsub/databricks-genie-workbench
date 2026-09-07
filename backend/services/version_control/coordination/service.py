@@ -119,7 +119,7 @@ class CoordinationService:
 
     def reserve(self, binding: c.BindingRef, operation: c.RequestIdentity,
                 executor: c.ExecutorContext) -> c.Reservation:
-        row = self._row(binding)
+        row = self._expire(self._row(binding))
         if executor.workspace_id != binding.workspace_id or not executor.execution_ref:
             raise OwnershipError('Explicit target-local executor required')
         try:
@@ -150,6 +150,8 @@ class CoordinationService:
     def _owned(self, fence, *, allow_quarantine=False):
         binding = self._io(self.resolve_binding, fence.binding_id)
         row = self._row(binding)
+        if not allow_quarantine:
+            row = self._expire(row)
         if ((row.binding.binding_revision, row.attempt_id, row.generation) !=
                 (fence.binding_revision, fence.attempt_id, fence.generation)
                 or fence.row_version > row.row_version or not row.unresolved
@@ -297,3 +299,23 @@ class CoordinationService:
         if not any(f.event_id == ref.event_id for f in history.facts):
             raise AuthorityUnavailable('Terminal receipt publication not verified')
         self._release(row)
+
+    def _expire(self, row):
+        if (row.state not in {c.CoordinationState.IDLE, c.CoordinationState.QUARANTINED}
+                and (row.lease_expires_at is None or row.lease_expires_at <= self.clock.now())):
+            return self._quarantine_row(row, 'Lease expired; termination is unproven')
+        return row
+
+    def _quarantine_row(self, row, reason):
+        if not reason.strip():
+            raise CoordinationError('Quarantine reason is mandatory')
+        row = self._cas(row, lambda r: r.attempt_id == row.attempt_id,
+                        state=c.CoordinationState.QUARANTINED, unresolved=True,
+                        quarantine_reason=reason)
+        if row.active_operation_id is not None:
+            self._fact(row, self._request(row), c.FactStatus.QUARANTINED)
+        return row
+
+    def quarantine(self, claim: c.FenceToken, reason: str) -> None:
+        row = self._owned(claim, allow_quarantine=True)
+        self._quarantine_row(row, reason)
