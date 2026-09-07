@@ -234,3 +234,42 @@ def test_acknowledgement_requires_policy_reason_and_durable_fact(failure):
     with pytest.raises((PermissionError, ValueError, RuntimeError)):
         service.reconcile(binding_fixture(), request, actor_fixture())
     approvals.request.assert_not_called()
+
+
+def test_manual_merge_sql_changes_require_reviewed_new_payload():
+    service, observer, ledger, policy, approvals, identity = reconcile_setup()
+    service.canonicalizer = Mock(spec=vc.Canonicalizer)
+    service.canonicalizer.compare.return_value = vc.Comparison.DIFFERENT
+    service.canonicalizer.semantic_diff.return_value = [
+        vc.DiffItem(vc.DiffCategory.SQL, "/instructions/sql", vc.DiffChange.MODIFIED,
+                    "SELECT old", "SELECT new", False)]
+    result = service.compare(binding_fixture(), version_id(1), version_id(2), actor_fixture())
+    assert result.comparison == vc.Comparison.DIFFERENT
+    assert result.items[0].review_required is True
+    assert result.items[0].before == "SELECT old"
+    observer.capture.assert_not_called()
+    for payload in ({"automatic_merge": True}, {"merged_payload": {"sql": "SELECT merged"}},
+                    {"serialized_space": {}}, {"sql": "SELECT new"}):
+        with pytest.raises(ValueError, match="reviewed new payload"):
+            service.reconcile(binding_fixture(), reconcile_request(policy_inputs=payload), actor_fixture())
+    approvals.request.assert_not_called()
+    ledger.append_observation.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["denied", "scope", "incompatible"])
+def test_comparison_is_scoped_and_incompatible_is_unknown(failure):
+    service, observer, ledger, policy, approvals, identity = reconcile_setup()
+    if failure == "denied":
+        identity.can_edit.return_value = False
+    if failure == "scope":
+        original = ledger.get_version.side_effect
+        ledger.get_version.side_effect = lambda *args: replace(original(*args), context=replace(
+            original(*args).context, binding=replace(binding_fixture(), space_id="other")))
+    if failure == "incompatible":
+        service.canonicalizer = Mock(spec=vc.Canonicalizer)
+        service.canonicalizer.compare.return_value = vc.Comparison.UNKNOWN
+        assert service.compare(binding_fixture(), version_id(1), version_id(2), actor_fixture()) == vc.SemanticDiff(vc.Comparison.UNKNOWN, ())
+        service.canonicalizer.semantic_diff.assert_not_called()
+    else:
+        with pytest.raises(PermissionError):
+            service.compare(binding_fixture(), version_id(1), version_id(2), actor_fixture())

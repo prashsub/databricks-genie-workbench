@@ -48,6 +48,8 @@ class DriftService:
             raise PermissionError("Reconciliation requires target edit permission")
         if action.binding_revision != binding.binding_revision:
             raise ValueError("Binding revision changed")
+        if {"automatic_merge", "merged_payload", "serialized_space", "sql"} & action.policy_inputs.keys():
+            raise ValueError("Manual merge requires a reviewed new payload through the gated edit flow")
         if action.action not in ("adopt", "reapply", "acknowledge"):
             raise ValueError("Unsupported reconciliation action")
         if action.action == "reapply" and (self.dispatch_enabled is not True or self.dispatcher is None):
@@ -100,6 +102,25 @@ class DriftService:
         if action.action == "reapply":
             return self.dispatcher.submit_local(action.identity.operation_id, "reconcile")
         return vc.OperationHandle(action.identity.operation_id, vc.OperationStatus.REQUESTED, None)
+
+    def compare(self, binding: vc.BindingRef, left: str, right: str,
+                actor: vc.ActorContext) -> vc.SemanticDiff:
+        if (self.identity is None or actor.workspace_id != binding.workspace_id
+                or self.identity.can_edit(actor.subject_id, binding) is not True):
+            raise PermissionError("Comparison scope denied")
+        if self.ledger is None:
+            raise RuntimeError("History unavailable")
+        versions = [self.ledger.get_version(binding, reference) for reference in (left, right)]
+        if any(version.context.binding != binding or version.version_id != reference
+               for version, reference in zip(versions, (left, right))):
+            raise PermissionError("Comparison history binding mismatch")
+        before, after = (version.snapshot for version in versions)
+        comparison = self.canonicalizer.compare(before, after)
+        if comparison == vc.Comparison.UNKNOWN:
+            return vc.SemanticDiff(comparison, ())
+        items = self.canonicalizer.semantic_diff(before, after)
+        return vc.SemanticDiff(comparison, tuple(replace(item, review_required=True)
+                                                if item.category == vc.DiffCategory.SQL else item for item in items))
 
     def with_acknowledgement(self, status: vc.BindingStatus, fact: vc.OperationFact) -> vc.BindingStatus:
         evidence = fact.evidence
