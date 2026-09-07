@@ -220,6 +220,11 @@ class CoordinationService:
                             create_intent_event_id=preimage.event_id)
         else:
             raise CoordinationError('Unsupported committed evidence')
+        self._history(row, reservation.request)
+        if authorization.approval_id is not None:
+            use = self._io(self.facts.approval_use, row.binding, authorization.approval_id)
+            if use.ambiguous or use.consumptions or use.operation_ids:
+                raise CoordinationError('Consumed or ambiguous approval cannot authorize another attempt')
         row = self._cas(row, lambda r: (r.state == c.CoordinationState.RESERVED
             and r.lease_expires_at > self.clock.now()
             and authorization.expires_at > self.clock.now()),
@@ -230,10 +235,24 @@ class CoordinationService:
             approval_id=authorization.approval_id, approval_digest=authorization.approval_digest,
             expected_base_fingerprint=authorization.expected_base_fingerprints.state_digest,
             admitted_at=self.clock.now(), mutation_stage=c.PatchStage.CONFIG_PENDING,
+            checkpoint={'schema_version': 'VC/1.0', 'preimage': c.to_wire(preimage)},
             **evidence)
-        return c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
+        claim = c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
             row.attempt_id, row.generation, row.row_version, reservation.request,
             preimage, row.approval_id, row.approval_digest)
+        try:
+            self._publish_consumption(claim)
+        except CoordinationError:
+            self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
+                      state=c.CoordinationState.QUARANTINED,
+                      quarantine_reason='Consumption publication failed/ambiguous')
+            raise
+        return claim
+
+    def _publish_consumption(self, claim):
+        self._io(self.facts.publish_consumption, claim)
+        if not self._io(self.facts.verify_flush, claim):
+            raise AuthorityUnavailable('Consumption facts not durably verified')
 
     def _history(self, row, request):
         history = self._io(self.facts.lookup_request, row.binding, request.idempotency_key)
@@ -270,6 +289,7 @@ class CoordinationService:
                 raise CoordinationError('Terminal observation not committed to this binding')
         elif result.status in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP}:
             raise CoordinationError('Successful completion requires committed postimage')
+        self._publish_consumption(claim)
         ref = self._fact(row, claim.request, c.FactStatus(result.status.value),
                          kind=c.FactKind.RECEIPT,
                          post_version_id=result.postimage.version_id if result.postimage else None)

@@ -214,6 +214,35 @@ def durable_facts(h):
     h.facts.append.side_effect = append
     h.facts.lookup_request.side_effect = lookup
 
+    def publish(claim):
+        evidence = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_PENDING, h.clock.now(),
+                                   'd' * 64, claim.preimage if isinstance(claim.preimage, c.ObservationRef) else None)
+        fact = c.OperationFact(uid(), c.FactKind.APPROVAL_CONSUMED,
+            claim.request.operation_id, claim.row_version,
+            f'consumption:{claim.attempt_id}', h.binding, claim.request, 'coordination',
+            'target-service', c.ActorContext('target-service', h.binding.workspace_id, 'service'),
+            c.FactStatus.CONSUMED, evidence, h.clock.now(), attempt_id=claim.attempt_id,
+            generation=claim.generation, approval_id=claim.approval_id,
+            approval_digest=claim.approval_digest)
+        existing = h.durable.lookup(fact.event_key)
+        if existing:
+            old = c.from_wire(c.OperationFact, existing[0].payload)
+            return c.FactRef(old.event_id, old.event_key, 'd' * 64)
+        return append(fact)
+
+    def use(binding, approval_id):
+        rows = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
+        used = [f for f in rows if f.binding == binding and f.approval_id == approval_id
+                and f.fact_kind == c.FactKind.APPROVAL_CONSUMED]
+        return c.ApprovalUse(binding, approval_id,
+            tuple(c.FactRef(f.event_id, f.event_key, 'd' * 64) for f in used),
+            tuple(f.operation_id for f in used), False)
+
+    h.facts.publish_consumption.side_effect = publish
+    h.facts.approval_use.side_effect = use
+    h.facts.verify_flush.side_effect = lambda claim: (claim.approval_id is None or
+        claim.request.operation_id in use(h.binding, claim.approval_id).operation_ids)
+
 
 def complete(h, claim):
     result = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
@@ -255,3 +284,29 @@ def test_duplicate_completed_request_returns_receipt_without_admission(h):
     row = h.store.read(h.binding.binding_id)
     assert row.generation == before + 1
     assert not row.unresolved and row.state == c.CoordinationState.IDLE
+
+
+@pytest.mark.parametrize('crash', [None, 'before-commit', 'after-commit-before-response'])
+def test_consumed_approval_survives_row_reuse_and_crash(h, crash):
+    from backend.tests.vc_fakes.stores import CrashBoundary
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    if crash:
+        h.durable.failures.inject(CrashBoundary(crash))
+        with pytest.raises(CoordinationError):
+            h.service.admit(reservation, h.preimage, h.grant)
+        row = h.store.read(h.binding.binding_id)
+        assert row.unresolved and row.approval_id == h.grant.approval_id
+        assert row.state == c.CoordinationState.QUARANTINED
+        with pytest.raises(CoordinationError):
+            reserve(h)
+    else:
+        claim = h.service.admit(reservation, h.preimage, h.grant)
+        h.facts.publish_consumption.assert_called_once_with(claim)
+        complete(h, claim)
+        h.request = c.RequestIdentity(uid(), 'key-2', 'a' * 64)
+        h.grant = replace(h.grant, request=h.request)
+        with pytest.raises(CoordinationError, match='approval'):
+            admit(h)
+        assert h.facts.approval_use(h.binding, h.grant.approval_id).operation_ids == (claim.request.operation_id,)
