@@ -104,7 +104,9 @@ def test_expired_admitted_lease_still_quarantines(h):
                for call in h.facts.append.call_args_list)
 
 
-def recovery_evidence(h, claim):
+def recovery_evidence(h, claim, classification='read-only-presend'):
+    # BLOCK-11: recovery classification must equal the derived durable checkpoint
+    # classification. An admit+quarantine (no checkpoint) path derives 'read-only-presend'.
     terminal = h.clock.now()
     termination = c.TerminationEvidence(claim.attempt_id, h.executor.execution_ref,
                                         'app-worker', terminal, (), 'a' * 64)
@@ -112,7 +114,7 @@ def recovery_evidence(h, claim):
                                      h.preimage.state_digest, 'b' * 64) for i in (1, 12, 23))
     h.clock.advance(timedelta(seconds=30))
     return c.RecoveryEvidence('VC/1.0', claim, termination, samples, 20.0,
-                              'verified-lifetime-reference', 'observed-preimage', None, None, False)
+                              'verified-lifetime-reference', classification, None, None, False)
 
 
 def test_matching_get_after_timeout_cannot_resolve_attempt(h):
@@ -176,6 +178,62 @@ def test_recovery_needs_exact_attempt_termination_and_three_post_termination_rea
         with pytest.raises(CoordinationError):
             h.service.recover(h.binding, evidence)
         assert h.store.read(h.binding.binding_id).unresolved
+
+
+@pytest.mark.parametrize('stage', ['never-admitted', 'admitted-presend',
+                                    'config-in-flight', 'config-observed'])
+def test_recovery_classification_is_derived_from_durable_state(h, stage):
+    durable_facts(h)
+    enroll(h)
+    expected = {
+        'never-admitted': 'read-only-never-admitted',
+        'admitted-presend': 'read-only-presend',
+        'config-in-flight': 'read-only-possible-send',
+        'config-observed': 'read-only-unless-next-stage-proven-unsent',
+    }[stage]
+    if stage == 'never-admitted':
+        reservation = reserve(h)
+        fence = reservation.fence
+        h.service.quarantine(reservation.fence, 'worker lost')
+    else:
+        claim = admit(h)
+        if stage in {'config-in-flight', 'config-observed'}:
+            h.service.checkpoint(claim, c.PatchStage.CONFIG_IN_FLIGHT,
+                c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None))
+        if stage == 'config-observed':
+            h.service.checkpoint(claim, c.PatchStage.CONFIG_OBSERVED,
+                c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED, h.clock.now(), 'a' * 64, h.preimage))
+        fence = claim
+        h.service.quarantine(claim, 'worker lost')
+
+    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
+
+    def evidence_with(classification):
+        ev = recovery_evidence(h, fence, classification)
+        h.termination.for_attempt.return_value = ev.termination
+        return ev
+
+    # 1/2. a wrong (mismatched) classification is rejected; row stays quarantined.
+    wrong = 'read-only-possible-send' if expected != 'read-only-possible-send' \
+        else 'read-only-presend'
+    with pytest.raises(CoordinationError, match='classification'):
+        h.service.recover(h.binding, evidence_with(wrong))
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.QUARANTINED and row.unresolved
+    assert not any(r.payload['fact_kind'] == 'recovery' for r in h.durable.state.rows)
+
+    # 4/5. the diff's free-form value and blanks are rejected.
+    for bad in ('observed-preimage', '', '   '):
+        with pytest.raises(CoordinationError):
+            h.service.recover(h.binding, evidence_with(bad))
+
+    # 3/6. the correct derived value (even with whitespace) succeeds and the fact
+    # records the DERIVED string.
+    result = h.service.recover(h.binding, evidence_with('  ' + expected + '  '))
+    assert not result.unresolved
+    recov = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows
+             if r.payload['fact_kind'] == 'recovery']
+    assert recov and recov[-1].evidence.checkpoint_classification == expected
 
 
 @pytest.mark.parametrize('path', ['automatic', 'human'])

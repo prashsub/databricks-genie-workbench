@@ -319,6 +319,20 @@ class CoordinationService:
         return (row.mutation_stage in {None, c.PatchStage.CONFIG_PENDING}
                 and 'resume_classification' not in (row.checkpoint or {}))
 
+    @staticmethod
+    def _classification(row):
+        """The only authority on what a quarantined attempt may have sent."""
+        recorded = (row.checkpoint or {}).get('resume_classification')
+        if recorded is not None:
+            return recorded
+        if row.mutation_stage in {c.PatchStage.CONFIG_IN_FLIGHT,
+                                  c.PatchStage.DESCRIPTION_IN_FLIGHT}:
+            # In-flight without a recorded classification: fail closed (C5.7 default).
+            return 'read-only-possible-send'
+        if row.admitted_at is None:
+            return 'read-only-never-admitted'
+        return 'read-only-presend'
+
     def _history_raw(self, row, idempotency_key):
         """lookup_request + ambiguity check ONLY. No digest predicate, so _reject can call it."""
         history = self._io(self.facts.lookup_request, row.binding, idempotency_key)
@@ -448,8 +462,11 @@ class CoordinationService:
                      and evidence.human_reason.strip() and evidence.residual_risk_acknowledged
                      and self._io(self.authorize_human_recovery, binding, evidence))
         self._validate_samples(evidence, human=human)
-        if not evidence.checkpoint_classification.strip():
-            raise CoordinationError('Recovery checkpoint classification required')
+        derived = self._classification(row)
+        if evidence.checkpoint_classification.strip() != derived:
+            raise CoordinationError(
+                f'Recovery classification must equal the durable checkpoint classification ({derived})')
+        evidence = replace(evidence, checkpoint_classification=derived)
         if row.admitted_at is not None:
             row = self._publish_consumption(self._claim_from_row(row), row)
         request = self._request(row)
