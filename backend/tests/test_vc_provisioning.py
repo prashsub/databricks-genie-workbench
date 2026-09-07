@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 import os
 import re
 import shlex
@@ -388,8 +389,31 @@ def test_integration_gate_command_collects_every_integration_test():
     assert result.returncode == 0, (
         f"Integration collection errored:\n{result.stdout}\n{result.stderr}")
     collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
-    assert len(collected) == 5, (
-        f"Expected exactly 5 integration tests collected, saw {len(collected)}:\n{result.stdout}")
+    declared_count = 0
+    for path in (ROOT / "backend" / "tests" / "integration").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = {
+                ast.unparse(decorator.func if isinstance(decorator, ast.Call) else decorator): decorator
+                for decorator in node.decorator_list
+            }
+            if "pytest.mark.integration" not in decorators:
+                continue
+            case_count = 1
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or ast.unparse(decorator.func) != "pytest.mark.parametrize":
+                    continue
+                values = (decorator.args[1] if len(decorator.args) > 1 else
+                          next(keyword.value for keyword in decorator.keywords if keyword.arg == "argvalues"))
+                assert isinstance(values, (ast.List, ast.Tuple)), (
+                    f"{path}::{node.name}: integration parameters must be declared as a literal list or tuple")
+                case_count *= len(values.elts)
+            declared_count += case_count
+    assert len(collected) == declared_count, (
+        f"Expected all {declared_count} declared integration cases collected, saw {len(collected)}:\n{result.stdout}")
+    assert len(collected) >= 5, (
+        f"Expected at least 5 baseline integration tests collected, saw {len(collected)}:\n{result.stdout}")
 
     # Pin the layout: no integration-marked test may drift back out of the gated
     # directory. Match the decorator only where it is actually applied (a line whose
@@ -418,3 +442,18 @@ def test_integration_gate_command_collects_every_integration_test():
     conftest = (tests_dir / "integration" / "conftest.py").read_text()
     assert "pytest.fail" in conftest, "live_platform must fail (not skip) when unconfigured"
     assert "pytest.skip" not in conftest, "live_platform must not silently skip deployment blockers"
+
+
+def test_integration_gate_rejects_partial_collection(monkeypatch):
+    run = subprocess.run
+
+    def collect_without_one_case(command, **kwargs):
+        return run([*command, "--deselect=backend/tests/integration/test_vc_audit_live.py::"
+                    "test_real_delta_append_only_and_durable_replay"], **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", collect_without_one_case)
+    with pytest.raises(AssertionError, match=r"Expected all (\d+) declared integration cases collected, saw (\d+)") as error:
+        test_integration_gate_command_collects_every_integration_test()
+    declared, collected = map(int, re.search(r"Expected all (\d+).*saw (\d+)", str(error.value)).groups())
+    assert collected == declared - 1
+    assert collected >= 5
