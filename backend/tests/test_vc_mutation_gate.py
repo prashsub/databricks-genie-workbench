@@ -131,3 +131,19 @@ def test_reviewed_base_mismatch_preserves_external_preimage_and_blocks(rig):
     rig.coordination.admit.assert_not_called()
     rig.transport.patch_config_once.assert_not_called()
     rig.transport.patch_description_once.assert_not_called()
+
+
+def test_two_patch_happy_path_checkpoints_and_reasserts_each_send(rig):
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result is not None, "Both PATCHes need checkpointed final evidence"
+    assert result.status == vc.OperationStatus.CONFIRMED
+    assert rig.trace.count("admit") == 1
+    for send in ("patch_config", "patch_description"):
+        assert rig.trace[rig.trace.index(send) - 1] == "assert_owner"
+    assert rig.trace.index("config_observed") < rig.trace.index("patch_description")
+    assert rig.trace.index("description_observed") < rig.trace.index("finish")
+    version = rig.versions[result.postimage.version_id]
+    assert version.context.parent_version_id == result.preimage.version_id
+    assert version.context.attempt_id == rig.fence.attempt_id
+    assert version.context.generation == rig.fence.generation
+    assert version.snapshot.fingerprints == rig.desired.fingerprints

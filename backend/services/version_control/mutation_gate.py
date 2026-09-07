@@ -36,6 +36,22 @@ class MutationGate:
             return self._finish(request, executor, claim, vc.OperationStatus.NOOP, preimage)
         self.coordination.assert_owner(claim)
         self.transport.patch_config_once(request.binding, vc.to_wire(request.serialized_space), claim)
+        checkpoint = self.canonicalizer.observe(self.transport.get(request.binding, executor))
+        middle = self._capture(request, executor, claim, checkpoint, "config_checkpoint", preimage.version_id)
+        self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, middle)
+        if request.description is not None and snapshot.fingerprints.metadata != desired.fingerprints.metadata:
+            self.coordination.assert_owner(claim)
+            self.transport.patch_description_once(request.binding, request.description, claim)
+            final = self.canonicalizer.observe(self.transport.get(request.binding, executor))
+            postimage = self._capture(request, executor, claim, final, "postimage", preimage.version_id)
+            self._checkpoint(claim, vc.PatchStage.DESCRIPTION_OBSERVED, postimage)
+        else:
+            postimage = middle
+        return self._finish(request, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
+
+    def _checkpoint(self, claim, stage, observation):
+        self.coordination.checkpoint(claim, stage, vc.StageEvidence(
+            "VC/1.0", stage, datetime.now(timezone.utc), observation.state_digest, observation))
 
     def _finish(self, request, executor, claim, status, postimage=None):
         evidence = vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
