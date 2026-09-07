@@ -65,7 +65,7 @@ export function createDemoTransport(): typeof fetch {
       const version = history.find(version => version.version_id === decodeURIComponent(path.split('/').at(-1) ?? ''))
       return version ? json(version) : failure(404, 'Version unavailable.')
     }
-    if (path.endsWith('/diff')) return json({ comparison: status?.stale ? 'unknown' : 'known', items: status?.stale ? [] : [{ category: 'sql', path: 'example_queries/1', change: 'modified', before: 'SELECT old_column FROM sales', after: 'SELECT new_column FROM sales', review_required: true }] })
+    if (path.endsWith('/diff')) return json({ comparison: status?.stale ? 'unknown' : url.searchParams.get('left') === url.searchParams.get('right') ? 'equal' : 'different', items: status?.stale || url.searchParams.get('left') === url.searchParams.get('right') ? [] : [{ category: 'sql', path: 'example_queries/1', change: 'modified', before: 'SELECT old_column FROM sales', after: 'SELECT new_column FROM sales', review_required: true }] })
     if ((path.endsWith('/restore') || path.endsWith('/reconcile')) && isCommand) {
       if (status?.quarantined || status?.unresolved_operation_id) return failure(423, 'Quarantined / unresolved operation. Inspect evidence; no replay.')
       if (status?.stale) return failure(503, 'Coordination unavailable.')

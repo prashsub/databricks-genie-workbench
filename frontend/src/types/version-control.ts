@@ -1,3 +1,4 @@
+export type Comparison = 'equal' | 'different' | 'unknown'
 export type DriftState = 'clean' | 'external_ahead' | 'desired_ahead' | 'diverged' | 'unknown' | 'unreachable' | 'applied_unverified' | 'conflicted'
 export type OperationStatus = 'requested' | 'preimage_captured' | 'apply_attempted' | 'applied_unverified' | 'applied_partial' | 'confirmed' | 'conflicted' | 'quarantined' | 'failed' | 'compensation_attempted' | 'compensated' | 'noop'
 export type Origin = 'workbench' | 'external' | 'optimizer' | 'restore' | 'promotion' | 'unknown'
@@ -24,7 +25,7 @@ export interface DiffItem {
   category: 'sources' | 'columns' | 'instructions' | 'joins' | 'filters' | 'parameters' | 'sql' | 'benchmarks' | 'questions' | 'metadata' | 'bindings'
   path: string; change: 'added' | 'removed' | 'modified'; before: unknown; after: unknown; review_required: boolean
 }
-export interface SemanticDiff { items: DiffItem[]; comparison: 'known' | 'unknown' }
+export interface SemanticDiff { items: DiffItem[]; comparison: Comparison }
 export interface ObservationResult { status: BindingStatus; captured_version: VersionSummary | null; busy: boolean }
 export interface ApiError { code: string; message: string; operation_id?: string; retryable: boolean; stale: boolean }
 export interface ReviewedCommand { binding_revision: number; expected_base: Fingerprints; approval_id: string }

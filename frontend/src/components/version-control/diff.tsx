@@ -4,7 +4,8 @@ export function SemanticDiffView({ diff }: { diff: SemanticDiff }) {
   const categories = [...new Set(diff.items.map(item => item.category))]
   return <section aria-label="Semantic diff">
     <h3>Semantic diff</h3>
-    {!diff.items.length && <p>No changes in this comparison.</p>}
+    {diff.comparison === 'different' && !diff.items.length && <p role="status">Comparison incomplete — differences reported but no items returned.</p>}
+    {diff.comparison === 'equal' && <p>No changes in this comparison.</p>}
     {categories.map(category => <section key={category} aria-label={category}>
       <h4>{category}</h4>
       {diff.items.filter(item => item.category === category).map((item, index) => <article key={`${item.path}-${index}`}>
