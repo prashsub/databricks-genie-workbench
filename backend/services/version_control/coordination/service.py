@@ -338,7 +338,10 @@ class CoordinationService:
                 or trusted.attempt_id != row.attempt_id or trusted.execution_ref != row.executor_ref):
             raise CoordinationError('Trusted termination of the exact prior attempt is required')
         self._validate_termination(trusted)
-        self._validate_samples(evidence)
+        human = bool(evidence.human_authorization_reference and evidence.human_reason
+                     and evidence.human_reason.strip() and evidence.residual_risk_acknowledged
+                     and self._io(self.authorize_human_recovery, binding, evidence))
+        self._validate_samples(evidence, human=human)
         if not evidence.checkpoint_classification.strip():
             raise CoordinationError('Recovery checkpoint classification required')
         if row.admitted_at is not None:
@@ -382,9 +385,9 @@ class CoordinationService:
         else:
             raise CoordinationError('Untrusted termination source')
 
-    def _validate_samples(self, evidence):
+    def _validate_samples(self, evidence, *, human=False):
         capability = self.verified_request_lifetime
-        if (capability is None or not isfinite(capability[0]) or capability[0] <= 0
+        if not human and (capability is None or not isfinite(capability[0]) or capability[0] <= 0
                 or not capability[1] or capability != (
                     evidence.maximum_request_lifetime_seconds, evidence.lifetime_bound_reference)):
             raise CoordinationError('Automatic recovery disabled: request lifetime is unverified')
@@ -393,5 +396,5 @@ class CoordinationService:
                 or any(s.observed_at <= evidence.termination.terminated_at
                        or s.observed_at > self.clock.now() for s in samples)
                 or any(a.observed_at >= b.observed_at for a, b in zip(samples, samples[1:]))
-                or (samples[-1].observed_at - samples[0].observed_at).total_seconds() <= capability[0]):
+                or (not human and (samples[-1].observed_at - samples[0].observed_at).total_seconds() <= capability[0])):
             raise CoordinationError('Need three stable post-termination GETs spanning beyond verified lifetime')

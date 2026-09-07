@@ -102,3 +102,39 @@ def test_recovery_needs_exact_attempt_termination_and_three_post_termination_rea
         with pytest.raises(CoordinationError):
             h.service.recover(h.binding, evidence)
         assert h.store.read(h.binding.binding_id).unresolved
+
+
+@pytest.mark.parametrize('missing', [None, 'authorization', 'reason', 'risk', 'trusted-policy'])
+def test_unknown_request_lifetime_disables_auto_clear(h, missing):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    h.service.quarantine(claim, 'worker disconnected')
+    evidence = recovery_evidence(h, claim)
+    h.termination.for_attempt.return_value = evidence.termination
+    # Caller-supplied lifetime/reference cannot turn on automatic recovery.
+    with pytest.raises(CoordinationError, match='unverified'):
+        h.service.recover(h.binding, evidence)
+    evidence = replace(evidence, maximum_request_lifetime_seconds=None,
+        lifetime_bound_reference=None, human_authorization_reference='audited-operator/123',
+        human_reason='Orphan inspection complete; reconcile under new governed request',
+        residual_risk_acknowledged=True)
+    h.authorize_human_recovery.return_value = True
+    if missing == 'authorization':
+        evidence = replace(evidence, human_authorization_reference=None)
+    elif missing == 'reason':
+        evidence = replace(evidence, human_reason='')
+    elif missing == 'risk':
+        evidence = replace(evidence, residual_risk_acknowledged=False)
+    elif missing == 'trusted-policy':
+        h.authorize_human_recovery.return_value = False
+    if missing is None:
+        result = h.service.recover(h.binding, evidence)
+        assert not result.unresolved
+        audits = [r for r in h.durable.state.rows if r.payload['fact_kind'] == 'recovery']
+        assert audits[-1].payload['evidence']['residual_risk_acknowledged'] is True
+        assert audits[-1].payload['evidence']['human_authorization_reference'] == 'audited-operator/123'
+    else:
+        with pytest.raises(CoordinationError):
+            h.service.recover(h.binding, evidence)
+        assert h.store.read(h.binding.binding_id).unresolved
