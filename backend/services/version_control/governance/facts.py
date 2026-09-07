@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
-    ActorContext, AdmissionClaim, ApprovalRecord, ApprovalUse, ApprovedOperation,
-    CreateIntentRef, CreateRequest, FactKind, FactStatus, FactRef, MutationRequest,
-    OperationFact, RequestHistory,
+    ActorContext, AdmissionClaim, ApprovalInputs, ApprovalRecord, ApprovalUse, ApprovedOperation,
+    BreakGlassRequest, CreateIntentRef, CreateRequest, DeploymentReceipt, FactKind,
+    FactStatus, FactRef, MutationRequest, OperationFact, PackageManifest, RecoveryEvidence,
+    RequestHistory,
     canonical_json_hash, from_wire, to_wire,
 )
 
@@ -24,6 +25,23 @@ def fact_key(fact: OperationFact) -> str:
         'kind': fact.fact_kind.value, 'sequence': fact.transition_sequence,
         'attempt_id': fact.attempt_id, 'generation': fact.generation,
     })
+
+
+def validate_evidence(fact):
+    expected = {
+        FactKind.APPROVAL_REQUEST: (ApprovalInputs, ApprovalRecord),
+        FactKind.APPROVAL_VOTE: (ApprovalRecord,),
+        FactKind.APPROVAL_GRANTED: (ApprovalRecord,),
+        FactKind.APPROVAL_INVALIDATED: (ApprovalRecord,),
+        FactKind.RELEASE: (PackageManifest,),
+        FactKind.RECEIPT: (DeploymentReceipt,),
+        FactKind.BREAK_GLASS: (BreakGlassRequest,),
+        FactKind.RECOVERY: (RecoveryEvidence,),
+    }
+    if fact.fact_kind in expected and not isinstance(fact.evidence, expected[fact.fact_kind]):
+        raise ValueError('Fact kind requires matching typed evidence')
+    if fact.evidence_uri is not None and fact.evidence_digest is None:
+        raise ValueError('Private evidence digest required')
 
 
 class DurableOperationFacts:
@@ -50,6 +68,7 @@ class DurableOperationFacts:
         if not self.writes_enabled:
             raise PermissionError('Fact writes disabled')
         fact = from_wire(OperationFact, to_wire(fact))
+        validate_evidence(fact)
         if fact.operation_id != fact.request.operation_id:
             raise ValueError('Operation identity mismatch')
         if fact.fact_kind == FactKind.CREATE_INTENT:

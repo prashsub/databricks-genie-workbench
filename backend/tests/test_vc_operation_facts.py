@@ -234,3 +234,50 @@ def test_consumption_flush_supports_bound_dev_and_break_glass_grants(mode):
     assert restarted.verify_flush(claim)
     with pytest.raises(PermissionError):
         restarted.publish_consumption(replace(claim, attempt_id=uid(55)))
+
+
+@pytest.mark.parametrize('kind', [FactKind.APPROVAL_REQUEST, FactKind.APPROVAL_VOTE,
+                                 FactKind.APPROVAL_GRANTED, FactKind.APPROVAL_INVALIDATED,
+                                 FactKind.RELEASE, FactKind.RECEIPT, FactKind.BREAK_GLASS,
+                                 FactKind.RECOVERY])
+def test_fact_kind_rejects_unrelated_typed_evidence(kind):
+    ledger, store = durable()
+    with pytest.raises(ValueError, match='evidence'):
+        ledger.append(fact(fact_kind=kind))
+    assert store.state.rows == []
+
+
+@pytest.mark.parametrize('fault', ['missing-reader', 'corrupted', 'outage', 'foreign-volume', 'traversal'])
+def test_private_evidence_loss_fails_closed_at_durable_read(fault):
+    import json
+    from hashlib import sha256
+    from backend.services.version_control.governance.delta import DeltaFactStore
+
+    content = b'private-preflight-evidence'
+    uri = '/Volumes/catalog/control/vc_approval_evidence/preflight.json'
+    evidence = fact(evidence_uri=uri, evidence_digest=sha256(content).hexdigest())
+    payload = to_wire(evidence)
+    sql = lambda *args: [{'evidence_json': json.dumps({'schema_version': 'VC/1.0', 'fact': payload})}]
+    seen = []
+
+    def read(uri):
+        seen.append(uri)
+        return content
+
+    adapter = DeltaFactStore(sql, 'catalog', 'control', '123', read_evidence=read)
+    assert adapter.read() == (payload,)
+    assert seen == [uri]
+    if fault == 'missing-reader':
+        adapter = DeltaFactStore(sql, 'catalog', 'control', '123')
+    elif fault == 'corrupted':
+        content = b'changed'
+    elif fault == 'outage':
+        def read(uri):
+            raise OSError('Volume unavailable')
+        adapter = DeltaFactStore(sql, 'catalog', 'control', '123', read_evidence=read)
+    elif fault == 'foreign-volume':
+        payload['evidence_uri'] = '/Volumes/catalog/control/export/preflight.json'
+    else:
+        payload['evidence_uri'] = uri + '/../other.json'
+    with pytest.raises((PermissionError, ValueError, OSError)):
+        adapter.read()
