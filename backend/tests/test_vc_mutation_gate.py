@@ -122,3 +122,12 @@ def test_noop_requires_config_and_benchmark_equality(rig, field):
     rig.gate.execute(request, rig.executor)
     rig.transport.patch_config_once.assert_called_once()
 
+
+def test_reviewed_base_mismatch_preserves_external_preimage_and_blocks(rig):
+    rig.state["description"] = "external edit"
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.status == vc.OperationStatus.CONFLICTED
+    assert rig.versions[result.preimage.version_id].snapshot.restorable_metadata["description"] == "external edit"
+    rig.coordination.admit.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
