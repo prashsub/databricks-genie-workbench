@@ -1,6 +1,7 @@
 """M10 VC/1.0 seam tests: backend services are Protocol fakes only."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -18,7 +19,8 @@ def rig():
     binding = binding_fixture()
     executor = executor_fixture()
     payload = {"version": 2, "instructions": {}}
-    source = ChampionArtifact("run", "champion", binding, "a" * 64,
+    fingerprints = vc.Fingerprints("a" * 64, "b" * 64, "c" * 64, "vc-c14n/1")
+    source = ChampionArtifact("run", "champion", binding, fingerprints.state_digest,
                               str(uuid4()), payload, "description",
                               source_digest(payload, "description"), "requester", None)
     sources = Mock()
@@ -33,8 +35,16 @@ def rig():
         requests.prepare.call_args.args[0], None)
     flags = Mock()
     flags.enabled.return_value = True
+    identity = Mock(spec=vc.IdentityProvider)
+    identity.can_edit.return_value = True
+    approvals = Mock(spec=vc.ApprovalService)
+    approvals.authorize.side_effect = lambda request, job: vc.AuthorizationGrant(
+        request.binding, request.identity, "requester-rights", fingerprints,
+        vc.canonical_json_hash("vc-rendered-target/1", {
+            "serialized_space": request.serialized_space, "description": request.description,
+        }), datetime.now(timezone.utc) + timedelta(minutes=5), request.approval_id, None)
     adapter = OptimizerChampionAdapter(sources=sources, gate=gate, requests=requests, flags=flags,
-                                       facts=facts)
+                                       facts=facts, identity=identity, approvals=approvals)
     return adapter, source, executor, gate, requests, flags
 
 
@@ -90,7 +100,8 @@ def test_retry_or_second_champion_in_same_run_cannot_append_second_optimizer_ver
     gate.execute.side_effect = execute
     first = adapter.apply("run", "champion", source.binding, source.expected_base, executor)
     restarted = OptimizerChampionAdapter(sources=adapter.sources, gate=gate,
-                                         requests=requests, flags=adapter.flags, facts=adapter.facts)
+                                         requests=requests, flags=adapter.flags, facts=adapter.facts,
+                                         identity=adapter.identity, approvals=adapter.approvals)
     assert restarted.apply("run", "champion", source.binding, source.expected_base,
                             replace(executor, execution_ref="job/new-attempt")) is first
     for changed in (replace(source, champion_id="other"),
@@ -112,3 +123,30 @@ def test_telemetry_memory_fallback_never_authorizes_champion_apply(rig):
         adapter.apply("run", "champion", source.binding, source.expected_base, executor)
     gate.execute.assert_not_called()
     requests.prepare.assert_called_once()
+
+
+def test_job_executor_verifies_requester_edit_or_release_policy(rig):
+    adapter, source, executor, gate, _, _ = rig
+    adapter.identity = Mock(spec=vc.IdentityProvider)
+    adapter.identity.can_edit.side_effect = lambda subject, binding: subject == executor.principal_id
+    adapter.approvals = Mock(spec=vc.ApprovalService)
+    with pytest.raises(PermissionError, match="Requester"):
+        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+    adapter.identity.can_edit.assert_called_once_with("requester", source.binding)
+    gate.execute.assert_not_called()
+
+
+def test_release_policy_denial_and_wrong_job_run_as_fail_closed(rig):
+    adapter, source, executor, gate, _, _ = rig
+    source = replace(source, approval_id=str(uuid4()), binding=replace(source.binding, environment="prod"))
+    adapter.sources.load.return_value = source
+    adapter.identity = Mock(spec=vc.IdentityProvider)
+    adapter.identity.can_edit.return_value = False
+    adapter.approvals = Mock(spec=vc.ApprovalService)
+    adapter.approvals.authorize.side_effect = PermissionError("release policy revoked")
+    with pytest.raises(PermissionError, match="release policy"):
+        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+    adapter.identity.verify_run_as.side_effect = PermissionError("wrong run_as")
+    with pytest.raises(PermissionError, match="run_as"):
+        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+    gate.execute.assert_not_called()
