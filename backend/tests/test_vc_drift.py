@@ -38,3 +38,39 @@ def test_three_heads_classify_clean_external_desired_diverged(observed, approved
     assert result.policy_target == version_id(approved)
     assert result.common_base == (version_id(1) if observed == 1 or approved == 1 else None)
     assert result.reasons
+
+
+@pytest.mark.parametrize("case", ["missing_head", "missing_history", "unsupported", "mixed"])
+def test_missing_history_or_incompatible_canonicalizer_is_unknown(case):
+    from backend.services.version_control.drift import DriftService
+
+    original = snapshot("one")
+    unsupported = replace(original, fingerprints=replace(original.fingerprints, canonicalizer_version="future/9"))
+    states = {version_id(1): original, version_id(2): original}
+    heads = vc.Heads(version_id(1), version_id(2), version_id(1))
+    if case == "missing_head":
+        heads = replace(heads, approved=None)
+    elif case == "missing_history":
+        del states[version_id(2)]
+    elif case == "unsupported":
+        states = dict.fromkeys(states, unsupported)
+    else:
+        states[version_id(2)] = unsupported
+    result = DriftService(canonicalizer=FakeCanonicalizer()).classify(heads, lookup(states), "reachable")
+    assert result.state == vc.DriftState.UNKNOWN
+    assert result.allowed_actions == ()
+    assert result.reasons
+
+
+@pytest.mark.parametrize("change", ["metadata", "array_order"])
+def test_meaningful_changes_are_not_clean(change):
+    from backend.services.version_control.drift import DriftService
+
+    canonicalizer = FakeCanonicalizer()
+    before = canonicalizer.observe({"serialized_space": {"queries": ["first", "second"]}, "description": "old"})
+    after = canonicalizer.observe({"serialized_space": {"queries": ["second", "first"] if change == "array_order"
+                                                    else ["first", "second"]}, "description": "new"})
+    result = DriftService(canonicalizer=canonicalizer).classify(
+        vc.Heads(version_id(2), version_id(1), version_id(1)),
+        lookup({version_id(1): before, version_id(2): after}), "reachable")
+    assert result.state == vc.DriftState.EXTERNAL_AHEAD

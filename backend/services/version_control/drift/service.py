@@ -17,11 +17,18 @@ class DriftService:
         self.canonicalizer = canonicalizer
 
     def classify(self, heads: vc.Heads, versions: vc.VersionLookup, reachability: str):
-        observed, approved, deployed = (versions.get(reference) for reference in
-                                        (heads.observed, heads.approved, heads.deployed))
+        if None in (heads.observed, heads.approved, heads.deployed):
+            return Classification(vc.DriftState.UNKNOWN, ("Missing policy or observation head",))
+        try:
+            observed, approved, deployed = (versions.get(reference) for reference in
+                                            (heads.observed, heads.approved, heads.deployed))
+        except (LookupError, PermissionError):
+            return Classification(vc.DriftState.UNKNOWN, ("Required history unavailable",))
         observed_approved = self.canonicalizer.compare(observed, approved)
         approved_deployed = self.canonicalizer.compare(approved, deployed)
         observed_deployed = self.canonicalizer.compare(observed, deployed)
+        if vc.Comparison.UNKNOWN in (observed_approved, approved_deployed, observed_deployed):
+            return Classification(vc.DriftState.UNKNOWN, ("Incompatible canonicalizer evidence",))
         if observed_approved == approved_deployed == vc.Comparison.EQUAL:
             state = vc.DriftState.CLEAN
         elif approved_deployed == vc.Comparison.EQUAL:
