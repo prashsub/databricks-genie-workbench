@@ -281,3 +281,38 @@ def test_private_evidence_loss_fails_closed_at_durable_read(fault):
         payload['evidence_uri'] = uri + '/../other.json'
     with pytest.raises((PermissionError, ValueError, OSError)):
         adapter.read()
+
+
+@pytest.mark.parametrize('fault', ['generation', 'approval_digest', 'missing_claim'])
+def test_flush_rejects_ambiguous_or_tampered_consumption_rows(fault):
+    from backend.tests.test_vc_approvals import approve, setup_approval
+
+    context = setup_approval()
+    approve(context)
+    grant = context.service.authorize(context.request, context.executor)
+    observation = ObservationRef(uid(3), grant.binding.binding_id, 1, context.request.expected_base, DIGEST)
+    claim = AdmissionClaim(grant.binding.binding_id, 1, uid(5), 1, 2,
+                           grant.request, observation, grant.approval_id, grant.approval_digest)
+    context.facts.publish_consumption(claim)
+    committed = context.store.state.rows[-1]
+    payload = to_wire(committed.payload)
+    if fault == 'missing_claim':
+        payload.pop('admission_claim')
+    elif fault == 'generation':
+        payload['generation'] = 9
+    else:
+        payload['approval_digest'] = 'b' * 64
+    context.store.seed(replace(committed, payload=payload))
+    assert not context.facts.verify_flush(claim)
+
+
+def test_different_request_payload_is_rejected_before_any_append():
+    from backend.tests.test_vc_approvals import setup_approval
+
+    context = setup_approval()
+    before = tuple(context.store.state.rows)
+    different = replace(context.request, description='tampered')
+    with pytest.raises(ValueError, match='request'):
+        context.facts.record_request(different, fact(binding=different.binding, request=different.identity,
+                                                    transition_sequence=8))
+    assert tuple(context.store.state.rows) == before

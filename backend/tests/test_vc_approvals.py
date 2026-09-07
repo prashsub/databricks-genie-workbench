@@ -420,3 +420,20 @@ def test_authorization_publishes_durable_grant_before_return_and_invalidations_b
                              evidence=replace(record, status=FactStatus.INVALIDATED)))
     with pytest.raises(PermissionError, match='invalidated'):
         context.service.authorize(context.request, context.executor)
+
+
+def test_preflight_proof_must_exist_in_durable_request_evidence():
+    context = setup_approval()
+    with pytest.raises(PermissionError, match='preflight'):
+        context.service.request(replace(context.bound, preflight_evidence_digest='b' * 64),
+                                context.identity.actors['requester'])
+    approve(context)
+    lookup = context.facts.lookup_request
+
+    def without_proof(*args):
+        history = lookup(*args)
+        return replace(history, facts=tuple(row for row in history.facts if not isinstance(row.evidence, StageEvidence)))
+
+    context.facts.lookup_request = without_proof
+    with pytest.raises(PermissionError, match='preflight'):
+        context.service.authorize(context.request, context.executor)

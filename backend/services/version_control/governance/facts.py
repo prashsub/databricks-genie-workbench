@@ -62,6 +62,10 @@ class DurableOperationFacts:
     def record_request(self, request: MutationRequest | CreateRequest, fact: OperationFact) -> FactRef:
         if request.identity != fact.request or request.binding != fact.binding:
             raise ValueError('Request identity mismatch')
+        prior = [row['operation_request'] for row in self._read()
+                 if row['operation_id'] == request.identity.operation_id and 'operation_request' in row]
+        if any(payload != to_wire(request) for payload in prior):
+            raise ValueError('Immutable request conflict')
         return self._append(fact, request)
 
     def _append(self, fact, request=None, claim=None):
@@ -154,8 +158,24 @@ class DurableOperationFacts:
                      and 'admission_claim' in row)
 
     def verify_flush(self, claim):
-        claims = self._claims(claim.request.operation_id)
-        return bool(claims) and all(saved == claim for saved, row in claims)
+        rows = [row for row in self._read() if row['operation_id'] == claim.request.operation_id
+                and row['fact_kind'] == FactKind.APPROVAL_CONSUMED.value]
+        if not rows or any(row != rows[0] for row in rows):
+            return False
+        row = rows[0]
+        if (row.get('admission_claim') != to_wire(claim) or row['attempt_id'] != claim.attempt_id
+                or row['generation'] != claim.generation or row['approval_id'] != claim.approval_id
+                or row['approval_digest'] != claim.approval_digest or row['request'] != to_wire(claim.request)):
+            return False
+        binding = self.get_request(claim.request.operation_id).request.binding
+        history = self.lookup_request(binding, claim.request.idempotency_key)
+        if history.ambiguous:
+            return False
+        if claim.approval_id is not None:
+            use = self.approval_use(binding, claim.approval_id)
+            if use.ambiguous or use.operation_ids != (claim.request.operation_id,):
+                return False
+        return True
 
     def publish_consumption(self, claim):
         if not self.writes_enabled:

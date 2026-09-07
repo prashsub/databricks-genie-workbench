@@ -68,6 +68,11 @@ class ApprovalService:
                 or request.expected_base != inputs.expected_base_fingerprints.state_digest
                 or rendered != inputs.rendered_target_digest):
             raise ValueError('Request is not bound to reviewed immutable inputs')
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        if not any(isinstance(row.evidence, StageEvidence)
+                   and row.evidence.evidence_digest == inputs.preflight_evidence_digest
+                   and row.request == request.identity for row in history.facts):
+            raise PermissionError('Durable preflight evidence unavailable')
 
     def _captured_base(self, request, reviewed_at):
         if request.operation_type not in ('adopt', 'reapply'):
