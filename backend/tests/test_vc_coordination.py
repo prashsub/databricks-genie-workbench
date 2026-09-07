@@ -331,7 +331,7 @@ def test_checkpoint_stage_machine_is_scoped_to_the_admitted_operation(h, shape):
     assert h.store.read(h.binding.binding_id).mutation_stage == planned[-1]
 
 
-def test_checkpoint_replay_skip_and_attempt_fencing(h):
+def test_checkpoint_replay_skip_and_attempt_fencing(h, monkeypatch):
     durable_facts(h)
     enroll(h)
     claim = admit(h)
@@ -348,13 +348,25 @@ def test_checkpoint_replay_skip_and_attempt_fencing(h):
     # 6. attempt fencing: a foreign attempt_id row is rejected without change.
     row = h.store.read(h.binding.binding_id)
     foreign = replace(row, attempt_id=uid())
-    h.store.state.rows[:] = [foreign]
+    original_cas = h.store.compare_and_swap
+
+    def takeover_inside_cas(*args, **changes):
+        assert h.store.read(h.binding.binding_id) == row
+        assert changes['mutation_stage'] == c.PatchStage.CONFIG_OBSERVED
+        h.store.state.rows[:] = [foreign]
+        return original_cas(*args, **changes)
+
+    takeover_cas = Mock(side_effect=takeover_inside_cas)
     observed = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED, h.clock.now(), 'a' * 64, h.preimage)
-    with pytest.raises(CoordinationError):
-        h.service.checkpoint(claim, observed.stage, observed)
+    with monkeypatch.context() as patch:
+        patch.setattr(h.store, 'compare_and_swap', takeover_cas)
+        with pytest.raises(CoordinationError):
+            h.service.checkpoint(claim, observed.stage, observed)
+    takeover_cas.assert_called_once()
     after = h.store.read(h.binding.binding_id)
     assert after.attempt_id == foreign.attempt_id
     assert after.mutation_stage == c.PatchStage.CONFIG_IN_FLIGHT
+    assert after == foreign
 
     # 7. recorded_at bounds raise with a distinguishable message.
     h.store.state.rows[:] = [row]
