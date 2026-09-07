@@ -133,7 +133,6 @@ def test_requested_only_history_proceeds_to_first_execution(rig):
     vc.FactStatus.APPLIED_UNVERIFIED,
     vc.FactStatus.APPLIED_PARTIAL,
     vc.FactStatus.CONFIRMED,
-    vc.FactStatus.CONFLICTED,
 ])
 def test_execution_outcome_history_routes_to_verify_only_without_second_patch(rig, status):
     fact = vc.OperationFact(
@@ -143,6 +142,68 @@ def test_execution_outcome_history_routes_to_verify_only_without_second_patch(ri
         status, vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
                                  datetime.now(timezone.utc), rig.identity.request_digest, None),
         datetime.now(timezone.utc),
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    rig.coordination.reserve.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+
+
+def test_presend_cas_loss_conflicted_does_not_block_first_execution(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "presend-cas-loss", rig.binding, rig.identity, "coordination",
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.CONFLICTED,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_PENDING,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=None,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.CONFIRMED
+    rig.coordination.reserve.assert_called_once()
+    rig.coordination.admit.assert_called_once()
+    rig.transport.patch_config_once.assert_called_once()
+
+
+def test_completed_noop_history_routes_to_verify_only(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "completed-noop", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.NOOP,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=rig.fence.attempt_id,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    rig.coordination.reserve.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+
+
+def test_postsend_conflicted_still_routes_to_verify_only(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "postsend-conflicted", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.CONFLICTED,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=rig.fence.attempt_id,
     )
     rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
     rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
