@@ -1,4 +1,4 @@
-import type { ApiError, ApprovalInputs, ApprovalRecord, ApprovalRequest, BindingStatus, DeploymentReceipt, ObservationResult, Operation, OperationHandle, OverviewPage, ReconcileCommand, ReleaseCommand, ReleaseHandle, RestoreCommand, SemanticDiff, VersionDetail, VersionPage } from '@/types/version-control'
+import type { ApiError, ApprovalRequestInputs, ApprovalRecord, ApprovalRequest, BindingStatus, DeploymentReceipt, ObservationResult, Operation, OperationHandle, OverviewPage, ReconcileCommand, ReleaseCommand, ReleaseHandle, RestoreCommand, SemanticDiff, VersionDetail, VersionPage } from '@/types/version-control'
 
 export class VersionControlError extends Error implements ApiError {
   code: string
@@ -62,7 +62,32 @@ export class VersionControlApi {
   observe(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return', key: string) { return this.post<ObservationResult>(`${bindingPath(bindingId)}/observe`, { reason }, key) }
   restore(bindingId: string, body: RestoreCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/restore`, body, key) }
   reconcile(bindingId: string, body: ReconcileCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/reconcile`, body, key) }
-  requestApproval(body: ApprovalInputs, key: string) { return this.post<ApprovalRequest>('/approvals', body, key) }
+  requestApproval(inputs: ApprovalRequestInputs, key: string) {
+    // Whitelist the request contract: response-only identities never cross this boundary.
+    const body: ApprovalRequestInputs = {
+      schema_version: inputs.schema_version,
+      operation_type: inputs.operation_type,
+      source_version_id: inputs.source_version_id,
+      raw_source_digest: inputs.raw_source_digest,
+      source_fingerprints: inputs.source_fingerprints,
+      artifact_digest: inputs.artifact_digest,
+      mapping_digest: inputs.mapping_digest,
+      rendered_target_digest: inputs.rendered_target_digest,
+      transformer_version: inputs.transformer_version,
+      canonicalizer_version: inputs.canonicalizer_version,
+      target_binding: inputs.target_binding,
+      expected_base_fingerprints: inputs.expected_base_fingerprints,
+      permission_policy_digest: inputs.permission_policy_digest,
+      validation_policy_digest: inputs.validation_policy_digest,
+      benchmark_policy_digest: inputs.benchmark_policy_digest,
+      preflight_evidence_digest: inputs.preflight_evidence_digest,
+      thresholds: inputs.thresholds,
+      recovery_policy: inputs.recovery_policy,
+      expires_at: inputs.expires_at,
+    }
+    if (!body.preflight_evidence_digest || !body.raw_source_digest || !body.rendered_target_digest || !body.validation_policy_digest || !body.benchmark_policy_digest) return Promise.reject(new Error('Server approval evidence unavailable; request blocked.'))
+    return this.post<ApprovalRequest>('/approvals', body, key)
+  }
   vote(approvalId: string, decision: 'approve' | 'reject', key: string) { return this.post<ApprovalRecord>(`/approvals/${encodeURIComponent(approvalId)}/votes`, { decision }, key) }
   approval(approvalId: string) { return this.get<ApprovalRecord>(`/approvals/${encodeURIComponent(approvalId)}`) }
   operation(operationId: string) { return this.get<Operation>(`/operations/${encodeURIComponent(operationId)}`) }

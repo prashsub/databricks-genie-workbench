@@ -11,7 +11,9 @@ it('adopt_requests_approval_and_reapply_does_not_reuse_invalid_approval', async 
   const reviewed = { binding_revision: 3, expected_base: fingerprints, approval_id: approvalFixture.approval_id }
   await reconcileAction(api, 'demo-binding', 'adopt', reviewed, approvalInputsFixture, approvalFixture, 'adopt-intent')
   expect(transport.mock.calls[0][0]).toBe('/api/version-control/approvals')
-  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toEqual(approvalInputsFixture)
+  const body = JSON.parse(String(transport.mock.calls[0][1]?.body))
+  expect(body.expected_base_fingerprints).toEqual(fingerprints)
+  expect(body).not.toHaveProperty('requester_id')
   await expect(reconcileAction(api, 'demo-binding', 'reapply', reviewed, approvalInputsFixture, approvalFixture, 'reapply-intent')).rejects.toThrow('fresh approval')
   expect(transport).toHaveBeenCalledTimes(1)
 })

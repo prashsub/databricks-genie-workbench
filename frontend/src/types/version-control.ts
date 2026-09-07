@@ -7,7 +7,7 @@ export interface BindingStatus {
   binding_id: string; binding_revision: number; heads: Heads; drift: DriftState
   quarantined: boolean; unresolved_operation_id: string | null
   observed_at: string | null; projection_as_of: string; stale: boolean
-  allowed_actions: string[]; reasons: string[]
+  allowed_actions: string[]; reasons: string[]; approval_inputs?: ApprovalRequestInputs
 }
 export interface VersionSummary {
   version_id: string; binding_id: string; observed_at: string; origin: Origin; observed_by: string
@@ -19,7 +19,7 @@ export type VersionPage = Page<VersionSummary>
 export type OverviewPage = Page<BindingStatus>
 export interface VersionDetail extends VersionSummary { snapshot?: unknown }
 export interface OperationHandle { operation_id: string; status: OperationStatus; job_run_id: string | null }
-export interface Operation extends OperationHandle { checkpoints: string[]; audit: string[]; receipt_references: string[] }
+export interface Operation extends OperationHandle { checkpoints: string[]; audit: string[]; receipt_references: string[]; evidence_digest?: string; approval_inputs?: ApprovalRequestInputs }
 export interface DiffItem {
   category: 'sources' | 'columns' | 'instructions' | 'joins' | 'filters' | 'parameters' | 'sql' | 'benchmarks' | 'questions' | 'metadata' | 'bindings'
   path: string; change: 'added' | 'removed' | 'modified'; before: unknown; after: unknown; review_required: boolean
@@ -31,13 +31,14 @@ export interface ReviewedCommand { binding_revision: number; expected_base: Fing
 export interface RestoreCommand extends ReviewedCommand { version_id: string }
 export interface ReconcileCommand extends ReviewedCommand { action: 'adopt' | 'reapply' | 'acknowledge'; policy_inputs: Record<string, unknown> }
 export interface ApprovalInputs {
-  schema_version: string; operation_id: string; operation_type: string; source_version_id: string
+  schema_version: string; operation_id?: string; operation_type: string; source_version_id: string
   raw_source_digest: string; source_fingerprints: Fingerprints; artifact_digest?: string; mapping_digest?: string
   rendered_target_digest: string; transformer_version?: string; canonicalizer_version: string
   target_binding: string; expected_base_fingerprints: Fingerprints; permission_policy_digest?: string
   validation_policy_digest: string; benchmark_policy_digest: string; preflight_evidence_digest: string
-  thresholds: Record<string, number>; requester_id: string; recovery_policy: string; expires_at: string
+  thresholds: Record<string, number>; requester_id?: string; recovery_policy: string; expires_at: string
 }
+export type ApprovalRequestInputs = Omit<ApprovalInputs, 'requester_id' | 'operation_id'>
 export interface ApprovalRequest { approval_id: string; inputs: ApprovalInputs }
 export interface ApprovalRecord extends ApprovalRequest {
   approval_digest: string | null; valid: boolean; invalidation_reasons: string[]; allowed_actions: string[]

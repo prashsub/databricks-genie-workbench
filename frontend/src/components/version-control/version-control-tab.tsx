@@ -10,7 +10,6 @@ import { demoApi } from './demo-api'
 import { RestorePanel } from './restore'
 import { ReconcilePanel } from './reconcile'
 import { ApprovalsPanel } from './approvals'
-import { approvalInputsFixture } from './fixtures'
 import { PromotionPanel } from './promotion'
 
 export function VersionControlView({ state, api }: { state: VersionControlState; api?: VersionControlApi }) {
@@ -34,7 +33,8 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
   const [approvalId, setApprovalId] = useState('')
   const [approval, setApproval] = useState<ApprovalRecord | null>(null)
   const base = state.history.items.find(version => version.version_id === state.status?.heads.observed)
-  const inputs = { ...approvalInputsFixture, target_binding: bindingId, source_version_id: base?.version_id ?? '', expected_base_fingerprints: base?.fingerprints ?? approvalInputsFixture.expected_base_fingerprints }
+  const projection = state.status?.approval_inputs
+  const inputs = base && projection?.source_version_id === base.version_id ? { ...projection, source_fingerprints: base.fingerprints, expected_base_fingerprints: base.fingerprints } : null
   const compare = async (left: string, right: string) => {
     setComparing(true)
     setError('')
@@ -54,7 +54,7 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
     {comparing && <p role="status">Loading comparison…</p>}
     {error && <p role="alert">{error}</p>}
     {diff && <SemanticDiffView diff={diff} />}
-    {base && <ReconcilePanel api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
+    {base && inputs && <ReconcilePanel api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
     <ApprovalsPanel api={api} approvalId={approvalId} inputs={inputs} disabled={!canMutate(state, 'adopt')} onApproval={setApprovalId} onRecord={setApproval} />
     <PromotionPanel key={`${bindingId}-${selected?.version_id ?? ''}-${state.status?.binding_revision}`} api={api} bindingId={bindingId} sourceVersionId={selected?.version_id ?? ''} inputs={inputs} disabled={!canMutate(state, 'promote')} />
   </div>

@@ -16,3 +16,14 @@ it('approval_ui_shows_bound_digests_distinct_approvers_and_expiry', async () => 
   await expect(voteApproval(new VersionControlApi(transport), { ...record, allowed_actions: [] }, 'approve', 'denied')).rejects.toThrow('not allowed')
   expect(transport).toHaveBeenCalledTimes(1)
 })
+
+it('approval_request_body_carries_server_derived_preflight_and_no_client_requester_identity', async () => {
+  const inputs = { ...approvalFixture.inputs, raw_source_digest: 'server-raw', rendered_target_digest: 'server-rendered', validation_policy_digest: 'server-policy', preflight_evidence_digest: 'server-preflight' }
+  const transport = vi.fn(async () => new Response(JSON.stringify(approvalFixture)))
+  await new VersionControlApi(transport).requestApproval(inputs, 'derived-request')
+  const body = JSON.parse(String(transport.mock.calls[0][1]?.body))
+  expect(body).not.toHaveProperty('requester_id')
+  expect(body).not.toHaveProperty('operation_id')
+  expect(body.preflight_evidence_digest).toBe('server-preflight')
+  for (const fabricated of ['preflight-1', 'validation-1', 'raw-3', 'rendered-3']) expect(Object.values(body)).not.toContain(fabricated)
+})

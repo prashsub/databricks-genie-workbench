@@ -1,6 +1,6 @@
 import { VersionControlApi } from '@/lib/version-control-api'
 import type { ApprovalInputs, ApprovalRecord, BindingStatus, DeploymentReceipt, Operation, OperationStatus, ReleaseCommand, VersionSummary } from '@/types/version-control'
-import { approvalFixture, bindingFixture, receiptFixture, versionFixture } from './fixtures'
+import { approvalFixture, approvalInputsFixture, bindingFixture, receiptFixture, versionFixture } from './fixtures'
 
 const statuses: BindingStatus[] = [
   bindingFixture,
@@ -21,7 +21,7 @@ export function createDemoTransport(): typeof fetch {
   const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
   const failure = (status: number, message: string) => json({ code: `DEMO_${status}`, message, stale: true, retryable: false }, status)
   const operation = (status: OperationStatus, evidence: string) => {
-    const result: Operation = { operation_id: `demo-operation-${operations.size + 1}`, status, job_run_id: 'demo-job', checkpoints: ['Preimage persisted', evidence], audit: ['Fixture target executor; no real workspace execution.'], receipt_references: [] }
+    const result: Operation = { operation_id: `demo-operation-${operations.size + 1}`, status, job_run_id: 'demo-job', evidence_digest: `demo-evidence-${operations.size + 1}`, checkpoints: ['Preimage persisted', evidence], audit: ['Fixture target executor; no real workspace execution.'], receipt_references: [] }
     operations.set(result.operation_id, result)
     return { ...result, status: 'requested' }
   }
@@ -53,7 +53,8 @@ export function createDemoTransport(): typeof fetch {
     if (path.endsWith('/status')) return json(status)
     if (path.endsWith('/observe') && isCommand) {
       if (status?.stale) return failure(503, 'Snapshot persistence unavailable; retained history is stale.')
-      return json({ status, captured_version: status?.heads.observed ? history[0] : null, busy: bindingId === 'demo-busy' })
+      const approval_inputs = { ...approvalInputsFixture, expires_at: new Date(Date.now() + 3600000).toISOString() }
+      return json({ status: { ...status, approval_inputs }, captured_version: status?.heads.observed ? history[0] : null, busy: bindingId === 'demo-busy' })
     }
     if (path.endsWith('/versions')) {
       if (bindingId === 'demo-history-unreachable') return failure(503, 'History storage unreachable.')
@@ -102,7 +103,12 @@ export function createDemoTransport(): typeof fetch {
       const releaseId = decodeURIComponent(path.split('/')[2])
       const release = releases.get(releaseId)
       if (!release) return failure(404, 'Release unavailable.')
-      if (path.endsWith('/validate') && isCommand) { release.validated = true; return json(operation('confirmed', 'Mapping and preflight evidence validated'), 202) }
+      if (path.endsWith('/validate') && isCommand) {
+        release.validated = true
+        const handle = operation('confirmed', 'Mapping and preflight evidence validated')
+        operations.get(handle.operation_id)!.approval_inputs = { ...approvalInputsFixture, operation_type: 'promotion', target_binding: release.selection.target_binding, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, preflight_evidence_digest: handle.evidence_digest!, expires_at: new Date(Date.now() + 3600000).toISOString() }
+        return json(handle, 202)
+      }
       if (path.endsWith('/promote') && isCommand) {
         const approval = approved(String(body.approval_id), release.selection.target_binding)
         if (!release.validated || !approval || approval.inputs.mapping_digest !== release.selection.mapping_digest || approval.inputs.source_version_id !== release.selection.source_version_id) return failure(409, 'Release requires validated mapping and matching target-local approval.')

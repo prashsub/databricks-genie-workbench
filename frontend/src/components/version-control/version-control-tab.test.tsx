@@ -97,3 +97,11 @@ it('capture_failure_shows_stale_history_and_disables_mutating_actions', async ()
   expect(html).toContain('external-3')
   expect(html).not.toContain('Request adoption approval')
 })
+
+
+it('production_modules_do_not_import_test_fixtures', () => {
+  for (const file of readdirSync(new URL('.', import.meta.url)).filter(file => /\.tsx?$/.test(file) && !file.includes('.test.') && !['demo-api.ts', 'fixtures.ts'].includes(file))) {
+    expect(readFileSync(new URL(file, import.meta.url), 'utf8'), file).not.toMatch(/from ['"]\.\/fixtures['"]/)
+  }
+})
+import { readFileSync, readdirSync } from 'node:fs'
