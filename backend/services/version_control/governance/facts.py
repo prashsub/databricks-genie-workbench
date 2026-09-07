@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
-    ApprovalRecord, ApprovalUse, ApprovedOperation, CreateRequest, FactKind,
+    ApprovalRecord, ApprovalUse, ApprovedOperation, CreateIntentRef, CreateRequest, FactKind,
     FactRef, MutationRequest, OperationFact, RequestHistory,
     canonical_json_hash, from_wire, to_wire,
 )
@@ -49,6 +49,12 @@ class DurableOperationFacts:
         fact = from_wire(OperationFact, to_wire(fact))
         if fact.operation_id != fact.request.operation_id:
             raise ValueError('Operation identity mismatch')
+        if fact.fact_kind == FactKind.CREATE_INTENT:
+            expected = CreateIntentRef(fact.event_id, fact.operation_id, fact.binding.binding_id,
+                                       fact.binding.binding_revision, fact.request.request_digest)
+            if (fact.evidence != expected or fact.pre_version_id is not None
+                    or fact.binding.space_id is not None or fact.operation_type != 'create'):
+                raise ValueError('Invalid create intent evidence')
         if fact.event_key != fact_key(fact):
             raise ValueError('Invalid deterministic event key')
         if fact.event_id != str(uuid5(NAMESPACE_URL, fact.event_key)):

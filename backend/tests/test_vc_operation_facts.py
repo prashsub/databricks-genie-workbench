@@ -5,7 +5,7 @@ from uuid import UUID, uuid5, NAMESPACE_URL
 import pytest
 
 from backend.services.version_control.contracts import (
-    FactKind, FactStatus, MutationRequest, OperationFact, PatchStage, RequestIdentity, StageEvidence,
+    CreateIntentRef, FactKind, FactStatus, MutationRequest, OperationFact, PatchStage, RequestIdentity, StageEvidence,
     to_wire,
 )
 from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
@@ -107,3 +107,21 @@ def test_completed_request_and_consumed_approval_remain_after_coordination_reuse
     store.seed(replace(store.state.rows[0], payload=to_wire(fact(
         operation_id=uid(8), request=RequestIdentity(uid(8), 'client-key', 'b' * 64)))))
     assert restarted.lookup_request(initial.binding, 'client-key').ambiguous
+
+
+def test_create_intent_is_durable_without_fake_pre_version():
+    ledger, store = durable()
+    binding = replace(binding_fixture(), space_id=None)
+    provisional = fact(binding=binding, fact_kind=FactKind.CREATE_INTENT, operation_type='create')
+    intent = CreateIntentRef(provisional.event_id, uid(2), binding.binding_id, 1, DIGEST)
+    created = replace(provisional, evidence=intent)
+    ledger.append(created)
+    restarted, _ = durable(store)
+    assert restarted.lookup_request(binding, 'client-key').facts == (created,)
+    assert created.pre_version_id is None
+    with pytest.raises(ValueError, match='create intent'):
+        durable()[0].append(replace(created, pre_version_id=uid(10)))
+    with pytest.raises(ValueError, match='create intent'):
+        durable()[0].append(replace(created, evidence=fact().evidence))
+    with pytest.raises(ValueError, match='create intent'):
+        durable()[0].append(replace(created, evidence=replace(intent, binding_revision=2)))
