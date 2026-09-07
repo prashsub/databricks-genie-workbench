@@ -48,6 +48,35 @@ def test_existing_fingerprint_api_remains_compatible() -> None:
     )
 
 
+def test_legacy_duplicate_ids_sort_while_vc_preserves_input_order() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    original = _space()
+    entries = [
+        {"id": "b", "content": ["First b"]},
+        {"id": "a", "content": ["Only a"]},
+        {"id": "b", "content": ["Second b"]},
+    ]
+    original["instructions"]["text_instructions"] = entries
+    sorted_space = deepcopy(original)
+    sorted_space["instructions"]["text_instructions"] = [
+        entries[1], entries[0], entries[2]
+    ]
+    expected = [
+        {"id": "a", "content": "Only a"},
+        {"id": "b", "content": "First b"},
+        {"id": "b", "content": "Second b"},
+    ]
+    assert canonicalize(original)["instructions"]["text_instructions"] == expected
+    assert config_fingerprint(original) == config_fingerprint(sorted_space)
+    adapter = Canonicalizer()
+    snapshot = adapter.observe(original)
+    assert to_wire(snapshot.canonical_state["config"])["instructions"][
+        "text_instructions"
+    ] == [expected[1], expected[0], expected[2]]
+    assert snapshot.fingerprints.config != adapter.observe(sorted_space).fingerprints.config
+
+
 def test_observe_preserves_exact_restorable_state_and_envelope() -> None:
     from backend.services.config_fingerprint import Canonicalizer
 
