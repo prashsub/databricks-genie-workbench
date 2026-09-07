@@ -8,6 +8,7 @@ from backend.services.version_control import contracts as vc
 from backend.services.version_control.governance.facts import fact_key
 from .mapping import RenderedPayload
 from .packages import digest, encode, immutable_put
+from . import compensation
 
 
 def existing(history):
@@ -70,7 +71,9 @@ def record(service, operation, release, manifest, rendered, policy, result, exec
         executor_id=executor.principal_id, job_run_id=terminal.job_run_id or executor.execution_ref,
         validation_evidence_digest=digest(tests['validation']), benchmark_evidence_digest=digest(tests['benchmark']),
         status=status, compensation_operation_id=None, recorded_at=datetime.now(timezone.utc))
-    fact = replace(terminal, fact_kind=vc.FactKind.RECEIPT, evidence=receipt, status=vc.FactStatus(status.value),
+    if confirmed and status == vc.OperationStatus.FAILED:
+        receipt = compensation.attempt(service, operation, receipt, terminal, executor)
+    fact = replace(terminal, fact_kind=vc.FactKind.RECEIPT, evidence=receipt, status=vc.FactStatus(receipt.status.value),
         release_id=release.release_id, recorded_at=receipt.recorded_at, transition_sequence=0)
     key = fact_key(fact)
     fact = replace(fact, event_id=str(uuid5(NAMESPACE_URL, key)), event_key=key)

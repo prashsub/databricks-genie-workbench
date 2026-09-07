@@ -251,3 +251,49 @@ def test_receipt_export_failure_retries_export_not_patch(promotion_rig):
     assert store.read(path) == encode(receipt)
     assert rig.service.execute(uid(4), rig.executor) == receipt
     assert len([fact for fact in rig.rows if fact.fact_kind == vc.FactKind.RECEIPT]) == 1
+
+
+@pytest.mark.parametrize('case', ['authorized', 'no_policy', 'drift', 'ambiguous', 'unresolved', 'late_authorization', 'failed_restore'])
+def test_failed_smoke_compensation_needs_preauthorization_and_matching_post_stage(promotion_rig, case):
+    rig = promotion_rig
+    approve(rig)
+    compensation = replace(rig.request, identity=vc.RequestIdentity(uid(20), 'compensate-once', 'b' * 64),
+        operation_type='restore', source_version_id=uid(10), expected_base=rig.post.state_digest,
+        serialized_space=rig.base.serialized_space, description='Old', approval_id=uid(20))
+    policy = {} if case == 'no_policy' else {'compensation_operation_id': uid(20),
+                                           'compensation_request_digest': compensation.identity.request_digest}
+    inputs = replace(rig.approval.request.inputs, recovery_policy=policy)
+    requested_at = datetime.now(timezone.utc) + timedelta(hours=1) if case == 'late_authorization' else rig.approval.request.requested_at
+    rig.approval = replace(rig.approval, request=replace(rig.approval.request, inputs=inputs, requested_at=requested_at))
+    rig.facts.get_request.side_effect = lambda operation_id: vc.ApprovedOperation(
+        rig.request if operation_id == uid(4) else compensation, rig.approval)
+    rig.service.restore = Mock()
+    rig.service.restore.compensate.return_value = replace(rig.result, operation_id=uid(20),
+        status=vc.OperationStatus.APPLIED_UNVERIFIED if case == 'failed_restore' else vc.OperationStatus.CONFIRMED)
+    original_observation = rig.observer.capture.return_value
+    def observe(binding, reason, executor):
+        if reason == 'promotion_compensation':
+            return Mock(spec=vc.ObservationResult, busy=False,
+                captured_version=Mock(spec=vc.VersionSummary, fingerprints=rig.base.fingerprints if case == 'drift' else rig.post.fingerprints),
+                status=Mock(spec=vc.BindingStatus, stale=False, quarantined=False))
+        return original_observation
+    rig.observer.capture.side_effect = observe
+    rig.tests.run.side_effect = [
+        {'validation': {'passed': True}, 'benchmark': {'passed': True}},
+        {'validation': {'passed': False}, 'benchmark': {'passed': True}}]
+    if case == 'ambiguous':
+        rig.facts.lookup_request.side_effect = lambda binding, key: vc.RequestHistory(tuple(rig.rows), bool(rig.rows))
+        with pytest.raises(ValueError):
+            rig.service.execute(uid(4), rig.executor)
+        rig.service.restore.compensate.assert_not_called()
+        return
+    if case == 'unresolved':
+        rig.result = replace(rig.result, status=vc.OperationStatus.APPLIED_UNVERIFIED, unresolved=True)
+    receipt = rig.service.execute(uid(4), rig.executor)
+    if case in {'authorized', 'failed_restore'}:
+        rig.service.restore.compensate.assert_called_once_with(uid(4), uid(20), rig.executor)
+        assert receipt.compensation_operation_id == uid(20)
+        assert receipt.status == (vc.OperationStatus.COMPENSATED if case == 'authorized' else vc.OperationStatus.FAILED)
+    else:
+        rig.service.restore.compensate.assert_not_called()
+        assert receipt.status != vc.OperationStatus.COMPENSATED

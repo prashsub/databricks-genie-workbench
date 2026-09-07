@@ -19,3 +19,4 @@ All commands run from the m07 worktree. Each numbered task is committed separate
 | 12 | 4 retry assertions failed; Job stub raised NotImplementedError | Dispatch: 6 passed |
 | 13 | Named receipt test returned OperationResult, not DeploymentReceipt | Promotion + dispatch: 33 passed |
 | 14 | Export outage test: DID NOT RAISE (export absent) | Promotion + dispatch: 34 passed; repair skips source reads/tests/PATCH |
+| 15 | Authorized/failed-restore cases: guarded compensation was never called | Promotion + dispatch: 41 passed; drift/ambiguity/unresolved/late approval never compensate |
