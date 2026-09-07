@@ -135,9 +135,10 @@
       "desc": "Cross-module actor_kind vocab drift + M04 retry short-circuit fix (integrator-sanctioned)",
       "worker": "codex",
       "conversation_id": "3773493063976171",
-      "status": "FIX v1 done (6462f58,0188353). Cross-review BLOCK: execute() short-circuit set derived from wrong source (lookup_request returns ALL OPERATION facts incl coordination-written). 1a CONFLICTED is pre-send on coordination producers -> retry of approved write wrongly short-circuits, wedges write (no PATCH). 1b NOOP omitted (completed terminal) -> unhandled ExistingReceipt. FIX2 RUNNING codex/Astra conv 3773493063976232: discriminate pre-send vs post-send CONFLICTED (attempt_id/PatchStage), add NOOP, 3 RED tests incl no-double-PATCH guard. Vocab confirmed correct (+6th consumer vc_reconcile.py). Owned-paths mutation_gate.py+test only.",
+      "status": "FIX2 DONE + VERIFIED (commits f0907ce,7d1d936,7886390,6ad2069; HEAD 6ad2069; pushed). _requires_verify_only helper: unconditional short-circuit for APPLIED_UNVERIFIED/APPLIED_PARTIAL/CONFIRMED/NOOP; CONFLICTED/QUARANTINED only post-send (attempt_id not None AND StageEvidence AND stage != CONFIG_PENDING). Gate pre-admission conflict now records CONFIG_PENDING. All 3 RED props mutation-verified by polly (presend-conflict proceeds, NOOP short-circuits, postsend-conflict no-double-PATCH). 45 module + 1084 full offline pass, owned-paths clean (mutation_gate.py+test). IN RE-REVIEW claude_code conv 3773493063976235.",
       "review_conversation_id": "3773493063976190",
-      "fix2_conversation_id": "3773493063976232"
+      "fix2_conversation_id": "3773493063976232",
+      "fix2_review_conversation_id": "3773493063976235"
     }
   ],
   "reviews": {
