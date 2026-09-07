@@ -27,7 +27,7 @@ export function createDemoTransport(): typeof fetch {
   }
   const approved = (id: string, bindingId: string) => {
     const record = approvals.get(id)
-    return record?.valid && record.inputs.target_binding === bindingId && Date.parse(record.inputs.expires_at) > Date.now() ? record : null
+    return record?.valid && record.inputs.target_binding.binding_id === bindingId && Date.parse(record.inputs.expires_at) > Date.now() ? record : null
   }
   return async (input, init) => {
     init?.signal?.throwIfAborted()
@@ -106,14 +106,14 @@ export function createDemoTransport(): typeof fetch {
       if (path.endsWith('/validate') && isCommand) {
         release.validated = true
         const handle = operation('confirmed', 'Mapping and preflight evidence validated')
-        operations.get(handle.operation_id)!.approval_inputs = { ...approvalInputsFixture, operation_type: 'promotion', target_binding: release.selection.target_binding, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, preflight_evidence_digest: handle.evidence_digest!, expires_at: new Date(Date.now() + 3600000).toISOString() }
+        operations.get(handle.operation_id)!.approval_inputs = { ...approvalInputsFixture, operation_type: 'promotion', target_binding: { ...approvalInputsFixture.target_binding, binding_id: release.selection.target_binding }, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, preflight_evidence_digest: handle.evidence_digest!, expires_at: new Date(Date.now() + 3600000).toISOString() }
         return json(handle, 202)
       }
       if (path.endsWith('/promote') && isCommand) {
         const approval = approved(String(body.approval_id), release.selection.target_binding)
         if (!release.validated || !approval || approval.inputs.mapping_digest !== release.selection.mapping_digest || approval.inputs.source_version_id !== release.selection.source_version_id) return failure(409, 'Release requires validated mapping and matching target-local approval.')
         const handle = operation('confirmed', 'Rendered target read-back verified')
-        release.receipt = { ...receiptFixture, release_id: releaseId, operation_id: handle.operation_id, target_binding: release.selection.target_binding, approval_id: approval.approval_id, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, status: 'confirmed', observed_fingerprints: receiptFixture.rendered_fingerprints, post_version_id: 'demo-target-after', compensation_operation_id: null }
+        release.receipt = { ...receiptFixture, release_id: releaseId, operation_id: handle.operation_id, target_binding: { ...approvalInputsFixture.target_binding, binding_id: release.selection.target_binding }, approval_id: approval.approval_id, source_version_id: release.selection.source_version_id, mapping_digest: release.selection.mapping_digest, status: 'confirmed', observed_fingerprints: receiptFixture.rendered_fingerprints, post_version_id: 'demo-target-after', compensation_operation_id: null }
         return json(handle, 202)
       }
       if (path.endsWith('/receipt')) return release.receipt ? json(release.receipt) : json({ operation_id: releaseId, status: 'requested', job_run_id: null }, 202)

@@ -51,3 +51,15 @@ it('badge_distinguishes_partial_unresolved_quarantined_conflicted_and_stale_clea
   expect(render({ drift: 'clean', heads: { observed: 'x', approved: 'p', deployed: 'p' } })).toContain('In sync')
   expect(render({ drift: 'clean', heads: { observed: 'p', approved: 'p', deployed: 'q' } })).toContain('Policy mismatch')
 })
+
+import m02Bindings from '../../../../backend/tests/fixtures/vc_contracts/binding_status.json'
+import type { BindingStatus } from '@/types/version-control'
+it('badge_covers_every_m02_drift_projection', async () => {
+  const labels: Record<BindingStatus['drift'], string> = { clean: 'Unknown', external_ahead: 'External ahead', desired_ahead: 'Desired ahead', diverged: 'Diverged', unknown: 'Unknown', unreachable: 'Unreachable', applied_unverified: 'Applied, unverified', conflicted: 'Conflicted' }
+  const api = new VersionControlApi(vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ items: m02Bindings.examples, next_cursor: null }))))
+  for (const status of (await api.overview()).items) {
+    const html = renderToStaticMarkup(<OverviewBadge status={status} />)
+    expect(html).toContain(labels[status.drift])
+    for (const reason of status.reasons) expect(html).toContain(reason)
+  }
+})

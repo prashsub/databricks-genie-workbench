@@ -2,6 +2,7 @@ import type { ApiError, ApprovalRequestInputs, ApprovalRecord, ApprovalRequest, 
 
 export class VersionControlError extends Error implements ApiError {
   code: string
+  details?: Record<string, unknown>
   operation_id?: string
   retryable: boolean
   stale: boolean
@@ -10,6 +11,7 @@ export class VersionControlError extends Error implements ApiError {
     super(error.message)
     this.status = status
     this.code = error.code
+    this.details = error.details
     this.operation_id = error.operation_id
     this.retryable = error.retryable
     this.stale = error.stale

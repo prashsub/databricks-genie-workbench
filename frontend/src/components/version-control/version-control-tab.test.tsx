@@ -72,7 +72,7 @@ it('fake_api_supports_approval_restore_promotion_and_receipt_without_network', a
     expect(await api.receipt(release.release_id)).toHaveProperty('status', 'requested')
     const preflight = await api.validate(release.release_id, 'validate-1')
     expect((await api.operation(preflight.operation_id)).status).toBe('confirmed')
-    const promotionApproval = await api.requestApproval({ ...inputs, operation_type: 'promotion', target_binding: 'demo-target', mapping_digest: 'mapping-1' }, 'promotion-request')
+    const promotionApproval = await api.requestApproval({ ...inputs, operation_type: 'promotion', target_binding: { ...inputs.target_binding, binding_id: 'demo-target' }, mapping_digest: 'mapping-1' }, 'promotion-request')
     await api.vote(promotionApproval.approval_id, 'approve', 'promotion-vote')
     await api.promote(release.release_id, { approval_id: promotionApproval.approval_id }, 'promote-1')
     expect(await api.receipt(release.release_id)).toHaveProperty('post_version_id')

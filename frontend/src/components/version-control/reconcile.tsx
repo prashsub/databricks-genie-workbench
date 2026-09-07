@@ -33,7 +33,7 @@ export function OperationDrillThrough({ api, operationId }: { api?: VersionContr
 }
 
 function hasFreshApproval(bindingId: string, reviewed: ReviewedCommand, approval: ApprovalRecord | null) {
-  return Boolean(approval?.valid && approval.approval_id === reviewed.approval_id && approval.inputs.target_binding === bindingId && Date.parse(approval.inputs.expires_at) > Date.now() && JSON.stringify(approval.inputs.expected_base_fingerprints) === JSON.stringify(reviewed.expected_base))
+  return Boolean(approval?.valid && approval.approval_id === reviewed.approval_id && approval.inputs.target_binding.binding_id === bindingId && approval.inputs.target_binding.binding_revision === reviewed.binding_revision && Date.parse(approval.inputs.expires_at) > Date.now() && JSON.stringify(approval.inputs.expected_base_fingerprints) === JSON.stringify(reviewed.expected_base))
 }
 
 export async function reconcileAction(api: VersionControlApi, bindingId: string, action: 'adopt' | 'reapply' | 'acknowledge', reviewed: ReviewedCommand, inputs: ApprovalInputs, approval: ApprovalRecord | null, key: string) {

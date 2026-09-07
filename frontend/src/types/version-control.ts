@@ -2,6 +2,7 @@ export type Comparison = 'equal' | 'different' | 'unknown'
 export type DriftState = 'clean' | 'external_ahead' | 'desired_ahead' | 'diverged' | 'unknown' | 'unreachable' | 'applied_unverified' | 'conflicted'
 export type OperationStatus = 'requested' | 'preimage_captured' | 'apply_attempted' | 'applied_unverified' | 'applied_partial' | 'confirmed' | 'conflicted' | 'quarantined' | 'failed' | 'compensation_attempted' | 'compensated' | 'noop'
 export type Origin = 'workbench' | 'external' | 'optimizer' | 'restore' | 'promotion' | 'unknown'
+export interface BindingRef { binding_id: string; binding_revision: number; space_key: string; workspace_id: string; space_id: string | null; environment: string }
 export interface Heads { observed: string | null; approved: string | null; deployed: string | null }
 export interface Fingerprints { config: string; benchmark: string; metadata: string; canonicalizer_version: string }
 export interface BindingStatus {
@@ -27,17 +28,17 @@ export interface DiffItem {
 }
 export interface SemanticDiff { items: DiffItem[]; comparison: Comparison }
 export interface ObservationResult { status: BindingStatus; captured_version: VersionSummary | null; busy: boolean }
-export interface ApiError { code: string; message: string; operation_id?: string; retryable: boolean; stale: boolean }
+export interface ApiError { code: string; message: string; operation_id?: string; retryable: boolean; stale: boolean; details?: Record<string, unknown> }
 export interface ReviewedCommand { binding_revision: number; expected_base: Fingerprints; approval_id: string }
 export interface RestoreCommand extends ReviewedCommand { version_id: string }
 export interface ReconcileCommand extends ReviewedCommand { action: 'adopt' | 'reapply' | 'acknowledge'; policy_inputs: Record<string, unknown> }
 export interface ApprovalInputs {
   schema_version: string; operation_id?: string; operation_type: string; source_version_id: string
-  raw_source_digest: string; source_fingerprints: Fingerprints; artifact_digest?: string; mapping_digest?: string
-  rendered_target_digest: string; transformer_version?: string; canonicalizer_version: string
-  target_binding: string; expected_base_fingerprints: Fingerprints; permission_policy_digest?: string
+  raw_source_digest: string; source_fingerprints: Fingerprints; artifact_digest: string | null; mapping_digest: string | null
+  rendered_target_digest: string; transformer_version: string | null; canonicalizer_version: string
+  target_binding: BindingRef; expected_base_fingerprints: Fingerprints; permission_policy_digest: string | null
   validation_policy_digest: string; benchmark_policy_digest: string; preflight_evidence_digest: string
-  thresholds: Record<string, number>; requester_id?: string; recovery_policy: string; expires_at: string
+  thresholds: Record<string, number>; requester_id?: string; recovery_policy: { automatic_clear: boolean; residual_risk_acknowledged: boolean }; expires_at: string
 }
 export type ApprovalRequestInputs = Omit<ApprovalInputs, 'requester_id' | 'operation_id'>
 export interface ApprovalRequest { approval_id: string; inputs: ApprovalInputs }
@@ -52,13 +53,13 @@ export interface PackageManifest {
   ownership: Record<string, string>; file_digests: Record<string, string>; package_digest: string
 }
 export interface DeploymentReceipt {
-  schema_version: string; release_id: string; operation_id: string; target_binding: string; attempt_id: string
+  schema_version: string; release_id: string; operation_id: string; target_binding: BindingRef; attempt_id: string
   generation: number; coordination_backend: 'delta'; approval_id: string; approval_digest: string
   source_version_id: string; package_digest: string; mapping_digest: string
   intended_fingerprints: Fingerprints; rendered_fingerprints: Fingerprints; observed_fingerprints: Fingerprints
-  pre_version_id: string; post_version_id?: string | null; transformer_version: string; canonicalizer_version: string
+  pre_version_id: string; post_version_id: string | null; transformer_version: string; canonicalizer_version: string
   executor_id: string; job_run_id: string; validation_evidence_digest: string; benchmark_evidence_digest: string
-  status: OperationStatus; compensation_operation_id?: string | null; recorded_at: string
+  status: OperationStatus; compensation_operation_id: string | null; recorded_at: string
 }
 export interface ReleaseCommand { source_binding: string; source_version_id: string; target_binding: string; mapping_digest: string; policy: string }
 export interface ReleaseHandle extends OperationHandle { release_id: string }

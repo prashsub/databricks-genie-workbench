@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
 import { createMutationIntent } from '@/lib/version-control-api'
-import type { ApprovalRequestInputs, ApprovalRecord, DeploymentReceipt, OperationHandle, ReleaseCommand } from '@/types/version-control'
+import type { ApprovalRequestInputs, ApprovalRecord, BindingRef, DeploymentReceipt, OperationHandle, ReleaseCommand } from '@/types/version-control'
 import { pollOperation } from './restore'
 import { ApprovalsPanel } from './approvals'
 export function ReceiptView({ receipt }: { receipt: DeploymentReceipt }) {
@@ -45,11 +45,12 @@ export function createPromotionFlow(api: VersionControlApi) {
   let selection: ReleaseCommand | null = null
   let releaseId = ''
   let preflight = false
+  let targetBinding: BindingRef | null = null
   let evidenceDigest: string | null = null
   let revision = 0
   return {
     configure(next: ReleaseCommand) {
-      if (JSON.stringify(next) !== JSON.stringify(selection)) { selection = next; releaseId = ''; preflight = false; evidenceDigest = null; revision += 1 }
+      if (JSON.stringify(next) !== JSON.stringify(selection)) { selection = next; releaseId = ''; preflight = false; evidenceDigest = null; targetBinding = null; revision += 1 }
     },
     async validate(key: string) {
       if (!selection?.target_binding.trim() || !selection.mapping_digest.trim() || !selection.source_version_id || !selection.policy.trim() || selection.source_binding === selection.target_binding) throw new Error('Select an explicit target, immutable mapping, source version and policy.')
@@ -63,11 +64,12 @@ export function createPromotionFlow(api: VersionControlApi) {
       preflight = operation.status === 'confirmed' && Boolean(evidenceDigest)
       if (!preflight) throw new Error(`Preflight incomplete: ${operation.status}`)
       const inputs = operation.approval_inputs
+      targetBinding = inputs?.target_binding ?? null
       return { releaseId, evidenceDigest, inputs: inputs ? { ...inputs, preflight_evidence_digest: evidenceDigest! } : null }
     },
     async promote(approval: ApprovalRecord | null, key: string) {
       if (!preflight || !releaseId) throw new Error('A confirmed preflight is required.')
-      if (!approval?.valid || !approval.approval_digest || approval.inputs.preflight_evidence_digest !== evidenceDigest || approval.inputs.target_binding !== selection?.target_binding || approval.inputs.source_version_id !== selection.source_version_id || approval.inputs.mapping_digest !== selection.mapping_digest || Date.parse(approval.inputs.expires_at) <= Date.now()) throw new Error('Fresh target-local approval matching the selected inputs is required.')
+      if (!approval?.valid || !approval.approval_digest || approval.inputs.preflight_evidence_digest !== evidenceDigest || !targetBinding || targetBinding.binding_id !== selection?.target_binding || approval.inputs.target_binding.binding_id !== targetBinding.binding_id || approval.inputs.target_binding.binding_revision !== targetBinding.binding_revision || approval.inputs.source_version_id !== selection.source_version_id || approval.inputs.mapping_digest !== selection.mapping_digest || Date.parse(approval.inputs.expires_at) <= Date.now()) throw new Error('Fresh target-local approval matching the selected inputs is required.')
       const handle = await api.promote(releaseId, { approval_id: approval.approval_id }, key)
       return pollOperation(api, handle.operation_id)
     },
