@@ -1,5 +1,24 @@
 """Tests for CreateAgent idempotency guards (backend/services/create_agent.py)."""
 
+
+def test_all_existing_mutation_entrypoints_use_gate_and_fail_closed(monkeypatch):
+    from unittest.mock import Mock
+    import pytest
+    from backend import genie_creator
+    from backend.services import create_agent_tools
+    client = Mock()
+    monkeypatch.setattr(genie_creator, "get_workspace_client", lambda: client)
+    monkeypatch.setattr(genie_creator, "get_sql_warehouse_id", lambda: "warehouse")
+    monkeypatch.setattr(genie_creator, "_non_retrying_client", lambda original: original)
+    with pytest.raises(PermissionError, match="disabled"):
+        genie_creator.create_genie_space("Sales", {"version": 2})
+    for result in (create_agent_tools._create_space("Sales", config={"version": 2}),
+                   create_agent_tools._update_space("space", config={"version": 2})):
+        assert result["success"] is False
+        assert result["retryable"] is False
+        assert result["code"] == "vc_writes_disabled"
+    client.api_client.do.assert_not_called()
+
 import asyncio
 from types import SimpleNamespace
 

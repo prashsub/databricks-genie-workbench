@@ -262,3 +262,23 @@ def test_resumed_request_never_enters_a_new_send_sequence(rig):
     rig.gate.execute(rig.request, rig.executor)
     rig.transport.patch_config_once.assert_called_once()
     rig.transport.patch_description_once.assert_called_once()
+
+
+@pytest.mark.parametrize("flags", [None, False])
+def test_all_existing_mutation_entrypoints_use_gate_and_fail_closed(rig, flags):
+    if flags is None:
+        rig.gate.flags = None
+    else:
+        rig.flags.enabled.return_value = False
+    with pytest.raises(PermissionError, match="disabled"):
+        rig.gate.execute(rig.request, rig.executor)
+    rig.coordination.reserve.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+
+
+@pytest.mark.parametrize("operation_type", ["restore", "promotion", "optimizer_apply", "reapply"])
+def test_governed_operations_cannot_use_app_executor(rig, operation_type):
+    with pytest.raises(PermissionError):
+        rig.gate.execute(replace(rig.request, operation_type=operation_type),
+                         replace(rig.executor, execution_ref="app/worker"))
+    rig.transport.patch_config_once.assert_not_called()

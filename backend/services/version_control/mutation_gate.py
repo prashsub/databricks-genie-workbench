@@ -9,7 +9,7 @@ from backend.services.version_control import contracts as vc
 
 class MutationGate:
     def __init__(self, *, coordination, ledger, facts, approvals, transport,
-                 canonicalizer, flags, registry=None):
+                 canonicalizer, flags=None, registry=None):
         self.coordination = coordination
         self.ledger = ledger
         self.facts = facts
@@ -20,6 +20,7 @@ class MutationGate:
         self.registry = registry
 
     def execute(self, request, executor):
+        self._enabled(request.binding, executor, request.operation_type)
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
         if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
             raise RuntimeError("Ambiguous or reused request identity")
@@ -81,6 +82,7 @@ class MutationGate:
             return self._unverified(request, executor, claim, "Final publication unavailable")
 
     def create(self, request, executor):
+        self._enabled(request.binding, executor, "create")
         if request.binding.space_id is not None or self.registry.resolve(request.binding.binding_id) != request.binding:
             raise PermissionError("A durable provisional logical binding is required")
         if self.facts.get_request(request.identity.operation_id).request != request:
@@ -131,6 +133,20 @@ class MutationGate:
             return self._finish(mutation, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
         except Exception:
             return self._unverified(mutation, executor, claim, "Possible create orphan; audited identity resolution required")
+
+    def _enabled(self, binding, executor, operation_type):
+        if self.flags is None or self.flags.enabled("vc_writes_enabled") is not True:
+            raise PermissionError("VC writes disabled")
+        switches = {"restore": "vc_restore_enabled", "promotion": "vc_promotion_enabled",
+                    "optimizer_apply": "vc_optimizer_apply_enabled", "reapply": "vc_reconcile_enabled"}
+        if operation_type not in {"edit", "create", *switches}:
+            raise PermissionError("Unknown mutation kind disabled")
+        if operation_type in switches or binding.environment == "prod":
+            if (not executor.execution_ref.startswith("job/") or executor.actor_kind != "service"
+                    or (operation_type in switches and self.flags.enabled(switches[operation_type]) is not True)):
+                raise PermissionError("Governed writes disabled outside target-local Jobs")
+        if executor.workspace_id != binding.workspace_id:
+            raise PermissionError("Cross-workspace mutation disabled")
 
     def _partial(self, request, claim, observation, reason):
         self.coordination.quarantine(claim, reason)
