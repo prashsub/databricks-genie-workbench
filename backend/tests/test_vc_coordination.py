@@ -85,6 +85,80 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+@pytest.mark.parametrize('head', ['approved', 'deployed'])
+@pytest.mark.parametrize('defect', ['unknown-id', 'foreign-binding', 'old-revision', 'uncommitted'])
+def test_approved_and_deployed_heads_require_committed_versions_of_this_binding(h, head, defect):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+    durable_facts(h)
+    if defect == 'old-revision':
+        h.binding = replace(h.binding, binding_revision=2)
+        h.resolve_binding.return_value = h.binding
+        h.grant = replace(h.grant, binding=h.binding)
+        h.preimage = replace(h.preimage, binding_revision=2)
+        h.proof = c.EnrollmentProof(uid(), h.binding.binding_id, 2, 'serialized-enrollment')
+    enroll(h)
+    claim = admit(h)
+    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
+    value = uid()
+
+    def context_for(binding):
+        return c.CaptureContext(binding, 'obs', h.clock.now(), 'open',
+            c.ActorContext('a', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
+            attempt_id=uid(), generation=0)
+
+    def get_version(binding, version_id):
+        if defect == 'unknown-id' or version_id != value:
+            return None
+        if defect == 'foreign-binding':
+            return c.Version(value, snapshot, context_for(replace(h.binding, binding_id=uid())))
+        if defect == 'old-revision':
+            return c.Version(value, snapshot, context_for(replace(h.binding, binding_revision=1)))
+        return c.Version(value, snapshot, context_for(h.binding))
+
+    h.ledger.get_version.side_effect = get_version
+    if defect == 'uncommitted':
+        h.ledger.verify_committed.side_effect = lambda ref: getattr(ref, 'version_id', None) != value
+    h.authorize_heads.return_value = True
+
+    original_cas = h.store.compare_and_swap
+    h.store.compare_and_swap = Mock(wraps=original_cas)
+    before = h.store.read(h.binding.binding_id).heads
+    update = c.HeadUpdate(None, value, None, 'ref') if head == 'approved' \
+        else c.HeadUpdate(None, None, value, 'ref')
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(claim, update)
+    # 2. no partial write.
+    assert h.store.read(h.binding.binding_id).heads == before
+    assert h.store.compare_and_swap.call_count == 0
+    # 3. evidence resolution precedes policy.
+    h.authorize_heads.assert_not_called()
+    # 5. resolution was on the path.
+    h.ledger.get_version.assert_any_call(h.binding, value)
+
+
+def test_approved_head_positive_control_and_earlier_attempt_allowed(h):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
+    value = uid()
+
+    def get_version(binding, version_id):
+        if version_id != value:
+            return None
+        # captured under an EARLIER attempt/generation than the admitted claim.
+        return c.Version(value, snapshot, c.CaptureContext(h.binding, 'obs', h.clock.now(), 'open',
+            c.ActorContext('a', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
+            attempt_id=uid(), generation=0))
+
+    h.ledger.get_version.side_effect = get_version
+    h.authorize_heads.return_value = True
+    # 6 & 7: an approved head captured under an earlier attempt is accepted.
+    heads = h.service.advance_heads(claim, c.HeadUpdate(None, value, None, 'ref'))
+    assert heads.approved == value
+
+
 @pytest.mark.parametrize('head', ['observed', 'approved', 'deployed'])
 def test_reservation_fence_cannot_advance_any_head(h, head):
     durable_facts(h)

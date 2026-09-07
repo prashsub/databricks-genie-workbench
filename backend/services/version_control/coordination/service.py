@@ -586,6 +586,21 @@ class CoordinationService:
             observed_sequence=row.observed_sequence + 1)
         return c.ObservationLease(self._fence(row), row.observed_sequence, row.lease_expires_at)
 
+    def _committed_head(self, row, version_id, name):
+        """Prove `version_id` is a version committed to this exact binding/revision."""
+        version = self._io(self.ledger.get_version, row.binding, version_id)
+        if version is None or version.version_id != version_id:
+            raise CoordinationError(f'{name} head does not resolve to a committed version')
+        if version.context.binding != row.binding:
+            raise CoordinationError(f'{name} head belongs to another binding or revision')
+        ref = c.ObservationRef(version.version_id, row.binding.binding_id,
+                               row.binding.binding_revision,
+                               version.snapshot.state_digest,
+                               version.snapshot.response_envelope_digest)
+        if not self._io(self.ledger.verify_committed, ref):
+            raise CoordinationError(f'{name} head is not committed evidence')
+        return version
+
     def advance_heads(self, fence: c.FenceToken, update: c.HeadUpdate) -> c.Heads:
         row = self._owned(fence)
         if update.observed is None and update.approved is None and update.deployed is None:
@@ -597,6 +612,12 @@ class CoordinationService:
             if not isinstance(fence, c.AdmissionClaim):
                 raise OwnershipError('Head updates require an observation lease or an admission claim')
             self.assert_owner(fence)
+        # Evidence before policy: resolve every governed head to a committed version
+        # of THIS binding before asking the policy oracle to authorize it.
+        for name in ('approved', 'deployed'):
+            value = getattr(update, name)
+            if value is not None:
+                self._committed_head(row, value, name)
         if update.approved is not None or update.deployed is not None:
             if (observing or not update.authorization_reference
                     or not self._io(self.authorize_heads, row.binding, fence, update)):
