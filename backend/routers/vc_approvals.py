@@ -18,8 +18,17 @@ class VoteBody(BaseModel):
 def authenticated_actor(request, identity):
     authentication = getattr(request.state, 'vc_auth', None)
     if authentication is None:
-        raise HTTPException(401, detail={'code': 'authentication_required', 'retryable': False, 'stale': False})
+        raise HTTPException(401, detail={'code': 'authentication_required', 'message': 'Authentication required',
+                                         'retryable': False, 'stale': False})
     return identity.actor(authentication)
+
+
+def parse_inputs(value_type, payload):
+    try:
+        return from_wire(value_type, payload)
+    except (ValueError, TypeError) as error:
+        raise HTTPException(422, detail={'code': 'invalid_inputs', 'message': str(error),
+                                         'retryable': False, 'stale': False}) from error
 
 
 def invoke(call):
@@ -41,7 +50,10 @@ def build_router(service, identity):
 
     @router.post('/approvals')
     def request_approval(body: dict, request: Request):
-        return invoke(lambda: service.request(from_wire(ApprovalInputs, body), authenticated_actor(request, identity)))
+        def submit():
+            actor = authenticated_actor(request, identity)
+            return service.request(parse_inputs(ApprovalInputs, body), actor)
+        return invoke(submit)
 
     @router.post('/approvals/{approval_id}/votes')
     def vote(approval_id: str, body: VoteBody, request: Request):
@@ -53,7 +65,9 @@ def build_router(service, identity):
             actor = authenticated_actor(request, identity)
             record = service.get(approval_id)
             binding = record.request.inputs.target_binding
-            if actor.workspace_id != binding.workspace_id or not identity.can_edit(actor.subject_id, binding):
+            if actor.workspace_id != binding.workspace_id or not (
+                    identity.can_edit(actor.subject_id, binding)
+                    or 'approvers' in identity.groups(actor.subject_id, binding.workspace_id)):
                 raise PermissionError('Approval read scope denied')
             return record
         return invoke(read)
@@ -62,7 +76,7 @@ def build_router(service, identity):
     def break_glass(body: dict, request: Request):
         def override():
             actor = authenticated_actor(request, identity)
-            scoped = from_wire(BreakGlassRequest, body)
+            scoped = parse_inputs(BreakGlassRequest, body)
             service.break_glass(scoped, actor)
             return OperationHandle(scoped.identity.operation_id, OperationStatus.QUARANTINED, None)
         return invoke(override)

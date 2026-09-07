@@ -140,3 +140,35 @@ def test_real_delta_and_evidence_volume_outage_disable_authorization(platform):
     with platform.deny_private_evidence_reads():
         with pytest.raises((PermissionError, OSError)):
             service.authorize(request, executor)
+
+
+def test_policy_reviewer_can_read_approval_and_invalid_inputs_are_422():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.routers.vc_approvals import build_router
+
+    context = setup_approval()
+    approval = approve(context)
+    app = FastAPI()
+
+    @app.middleware('http')
+    async def authenticate(request, call_next):
+        request.state.vc_auth = AuthenticatedRequest('human-1', '123')
+        return await call_next(request)
+
+    app.include_router(build_router(context.service, context.identity))
+    client = TestClient(app)
+    assert client.get(f'/api/vc/approvals/{approval.approval_id}').status_code == 200
+    response = client.post('/api/vc/approvals', json={**to_wire(context.bound), 'authorization_grant': {}})
+    assert response.status_code == 422
+    context.identity.memberships.clear()
+    assert client.get(f'/api/vc/approvals/{approval.approval_id}').status_code == 403
+
+    def unavailable(*args):
+        raise OSError('evidence unavailable')
+
+    context.facts.get_request = unavailable
+    response = client.get(f'/api/vc/approvals/{approval.approval_id}')
+    assert response.status_code == 503
+    assert response.json()['detail']['retryable'] is False
+    assert response.json()['detail']['stale'] is True
