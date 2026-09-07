@@ -6,7 +6,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
 
-from .ports import BindingInventory, BundleInventory, Projections, ReconcilePolicy
+from .ports import ApprovedTargets, BindingInventory, BundleInventory, Projections, ReconcilePolicy
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class DriftService:
                  scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30),
                  bundles: BundleInventory | None = None, coordination: vc.Coordination | None = None,
                  registry: vc.Registry | None = None, authorize_history=None,
-                 stale_after=timedelta(minutes=30)):
+                 stale_after=timedelta(minutes=30), approved_targets: ApprovedTargets | None = None):
         if not 1 <= batch_size <= 100 or full_fetch_interval <= timedelta(0):
             raise ValueError("Invalid scan bounds or full-fetch interval")
         self.canonicalizer = canonicalizer
@@ -55,6 +55,7 @@ class DriftService:
         self.registry = registry
         self.authorize_history = authorize_history
         self.stale_after = stale_after
+        self.approved_targets = approved_targets
 
     def overview(self, actor: vc.ActorContext, cursor: str | None = None, limit: int = 100) -> vc.OverviewPage:
         if not 1 <= limit <= 100:
@@ -298,7 +299,7 @@ class DriftService:
 
             result = self.classify(status.heads, BoundVersions(), "reachable",
                                    quarantined=status.quarantined,
-                                   unresolved_operation_id=status.unresolved_operation_id)
+                                   unresolved_operation_id=status.unresolved_operation_id, target_binding=binding)
             status = replace(status, drift=result.state, reasons=result.reasons,
                              allowed_actions=result.allowed_actions)
             captured = replace(captured, status=status)
@@ -312,7 +313,7 @@ class DriftService:
         return captured
 
     def classify(self, heads: vc.Heads, versions: vc.VersionLookup, reachability: str, *,
-                 unresolved_operation_id=None, quarantined=False, conflicted=False):
+                 unresolved_operation_id=None, quarantined=False, conflicted=False, target_binding=None):
         reasons = []
         state = None
         if quarantined:
@@ -337,6 +338,28 @@ class DriftService:
                                             (heads.observed, heads.approved, heads.deployed))
         except (LookupError, PermissionError):
             return Classification(vc.DriftState.UNKNOWN, ("Required history unavailable",))
+        if self.approved_targets is not None:
+            try:
+                if target_binding is None:
+                    raise ValueError("Target binding required for rendered approval")
+                target = self.approved_targets.resolve(target_binding, heads.approved)
+                inputs = target.approval.request.inputs
+                preflight = target.preflight
+                if (target.head_id != heads.approved or target.approval.status != vc.FactStatus.APPROVED
+                        or target.approval.approval_digest is None or inputs.target_binding != target_binding
+                        or inputs.source_fingerprints != approved.fingerprints
+                        or inputs.raw_source_digest != approved.raw_state_digest
+                        or inputs.rendered_target_digest != target.rendered.state_digest
+                        or target.rendered.state_digest != target.rendered.fingerprints.state_digest
+                        or inputs.canonicalizer_version != target.rendered.fingerprints.canonicalizer_version
+                        or preflight.target_binding != target_binding or preflight.operation_id != inputs.operation_id
+                        or preflight.rendered_fingerprints != target.rendered.fingerprints
+                        or preflight.expected_base_fingerprints != inputs.expected_base_fingerprints
+                        or preflight.preflight_evidence_digest != inputs.preflight_evidence_digest):
+                    raise ValueError("Rendered target approval evidence mismatch")
+                approved = target.rendered
+            except (LookupError, PermissionError, ValueError, RuntimeError):
+                return Classification(vc.DriftState.UNKNOWN, ("Target-local rendered approval evidence unavailable or invalid",))
         observed_approved = self.canonicalizer.compare(observed, approved)
         approved_deployed = self.canonicalizer.compare(approved, deployed)
         observed_deployed = self.canonicalizer.compare(observed, deployed)

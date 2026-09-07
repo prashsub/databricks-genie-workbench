@@ -198,3 +198,69 @@ def test_projection_routes_auth_paging_status_and_observer_refresh_boundary():
     assert client.get("/api/version-control/overview?limit=101").status_code == 422
     assert path + "/observe" not in {route.path for route in app.routes}
     observer.capture.assert_not_called()
+
+
+def rendered_setup():
+    from backend.services.version_control.drift import DriftService
+    from backend.services.version_control.drift.ports import ApprovedTarget, ApprovedTargets
+    from backend.tests.test_vc_reconcile import NOW, reconcile_setup, reconcile_request
+    from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
+
+    service, observer, ledger, policy, approvals, identity = reconcile_setup()
+    source = ledger.get_version(binding_fixture(), version_id(1))
+    base = ledger.get_version(binding_fixture(), version_id(2))
+    rendered = snapshot("target-environment")
+    inputs = replace(policy.inputs(binding_fixture(), reconcile_request("reapply"), source, base, actor_fixture()),
+                     rendered_target_digest=rendered.state_digest, mapping_digest="e" * 64,
+                     transformer_version="map/1")
+    record = vc.ApprovalRecord(vc.ApprovalRequest(version_id(20), inputs, NOW), (), vc.FactStatus.APPROVED, "f" * 64)
+    preflight = vc.PreflightEvidence("VC/1.0", inputs.operation_id, binding_fixture(),
+                                     base.snapshot.fingerprints, rendered.fingerprints, None,
+                                     "b" * 64, "c" * 64, inputs.preflight_evidence_digest, NOW)
+    targets = Mock(spec=ApprovedTargets)
+    targets.resolve.return_value = ApprovedTarget(version_id(1), record, rendered, preflight)
+    service = DriftService(canonicalizer=FakeCanonicalizer(), approved_targets=targets)
+    versions = lookup({version_id(1): source.snapshot, version_id(2): rendered})
+    return service, targets, versions
+
+
+def test_target_approval_uses_rendered_fingerprint_not_source_environment_hash():
+    from backend.tests.vc_fakes.fixtures import binding_fixture
+
+    service, targets, versions = rendered_setup()
+    result = service.classify(vc.Heads(version_id(2), version_id(1), version_id(2)), versions,
+                              "reachable", target_binding=binding_fixture())
+    assert result.state == vc.DriftState.CLEAN
+    assert result.policy_target == version_id(1)
+    targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
+    assert versions.get(version_id(1)).fingerprints != targets.resolve.return_value.rendered.fingerprints
+
+
+@pytest.mark.parametrize("failure", ["missing", "wrong_binding", "not_approved", "wrong_digest",
+                                    "wrong_preflight", "wrong_head", "incompatible", "no_target"])
+def test_rendered_target_requires_bound_approved_evidence(failure):
+    from backend.tests.vc_fakes.fixtures import binding_fixture
+
+    service, targets, versions = rendered_setup()
+    evidence = targets.resolve.return_value
+    if failure == "missing":
+        targets.resolve.side_effect = LookupError("missing target evidence")
+    elif failure == "wrong_binding":
+        inputs = replace(evidence.approval.request.inputs, target_binding=replace(binding_fixture(), space_id="other"))
+        evidence = replace(evidence, approval=replace(evidence.approval, request=replace(evidence.approval.request, inputs=inputs)))
+    elif failure == "not_approved":
+        evidence = replace(evidence, approval=replace(evidence.approval, status=vc.FactStatus.REQUESTED))
+    elif failure == "wrong_digest":
+        evidence = replace(evidence, rendered=snapshot("tampered"))
+    elif failure == "wrong_preflight":
+        evidence = replace(evidence, preflight=replace(evidence.preflight, preflight_evidence_digest="0" * 64))
+    elif failure == "wrong_head":
+        evidence = replace(evidence, head_id=version_id(99))
+    elif failure == "incompatible":
+        evidence = replace(evidence, rendered=replace(evidence.rendered, fingerprints=replace(
+            evidence.rendered.fingerprints, canonicalizer_version="future/9")))
+    targets.resolve.return_value = evidence
+    result = service.classify(vc.Heads(version_id(2), version_id(1), version_id(2)), versions,
+                              "reachable", target_binding=None if failure == "no_target" else binding_fixture())
+    assert result.state == vc.DriftState.UNKNOWN
+    assert result.allowed_actions == ()

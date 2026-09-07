@@ -44,6 +44,18 @@ class BundleInventory(Protocol):
     def for_binding(self, binding: vc.BindingRef) -> BundleSnapshot: ...
 
 
+@dataclass(frozen=True)
+class ApprovedTarget(vc.WireValue):
+    head_id: str
+    approval: vc.ApprovalRecord
+    rendered: vc.Snapshot
+    preflight: vc.PreflightEvidence
+
+
+class ApprovedTargets(Protocol):
+    def resolve(self, binding: vc.BindingRef, head_id: str) -> ApprovedTarget: ...
+
+
 class BindingInventory(Protocol):
     def page(self, workspace_id: str, cursor: str | None, limit: int) -> vc.Page[ScanEntry]: ...
 
