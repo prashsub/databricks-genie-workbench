@@ -136,7 +136,7 @@
       "desc": "Cross-module actor_kind vocab drift + M04 retry short-circuit fix (integrator-sanctioned)",
       "worker": "codex",
       "conversation_id": "3773493063976171",
-      "status": "FIX2 DONE + VERIFIED (commits f0907ce,7d1d936,7886390,6ad2069; HEAD 6ad2069; pushed). _requires_verify_only helper: unconditional short-circuit for APPLIED_UNVERIFIED/APPLIED_PARTIAL/CONFIRMED/NOOP; CONFLICTED/QUARANTINED only post-send (attempt_id not None AND StageEvidence AND stage != CONFIG_PENDING). Gate pre-admission conflict now records CONFIG_PENDING. All 3 RED props mutation-verified by polly (presend-conflict proceeds, NOOP short-circuits, postsend-conflict no-double-PATCH). 45 module + 1084 full offline pass, owned-paths clean (mutation_gate.py+test). IN RE-REVIEW claude_code conv 3773493063976235.",
+      "status": "FIX2 APPROVED (re-review conv 3773493063976235: discriminator correct 10/10 real producer triples, both arms load-bearing, no-double-PATCH preserved, NOOP terminal, guards intact, 3 tests genuine RED, +9 tests 0 regressions). HEAD 6ad2069. Doing NB-1 arm-coverage hardening (conv 3773493063976232): 2 tests pinning each discriminator arm individually + 1-line coupling comment. Then integrate whole xmod-fix onto trunk (unblocks M07 task17).",
       "review_conversation_id": "3773493063976190",
       "fix2_conversation_id": "3773493063976232",
       "fix2_review_conversation_id": "3773493063976235"
@@ -155,5 +155,9 @@
       "vendor": "codex",
       "note": "BLOCKER1 actor_kind service_principal->service + human/user drift in M08 identity.py; BLOCKER2 M04 retry-on-requested-only investigation"
     }
-  }
+  },
+  "backlog": [
+    "XMOD NB-2 (verify): confirm router maps CoordinationError/_RejectionReleased (recovery-closed pre-send history on retry) to HTTP 409 file-new-request, not 500. Fail-closed+correct per C5.5; only the surfacing changed.",
+    "XMOD NB-3 done inline (coupling comment). NB-1 done inline (arm-coverage tests)."
+  ]
 }
