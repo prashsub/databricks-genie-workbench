@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { VersionControlError } from '@/lib/version-control-api'
+import { createMutationIntent, VersionControlError } from '@/lib/version-control-api'
 import type { VersionControlApi } from '@/lib/version-control-api'
 import type { Operation, RestoreCommand } from '@/types/version-control'
 import { OperationStatusView } from './reconcile'
@@ -29,11 +29,13 @@ export function RestorePanel({ api, bindingId, command, disabled, onComplete }: 
   const [busy, setBusy] = useState(false)
   const [operation, setOperation] = useState<Operation | null>(null)
   const [error, setError] = useState('')
+  const [intent] = useState(createMutationIntent)
   const submit = async () => {
     if (disabled || busy) return
     setBusy(true)
     setError('')
-    try { setOperation(await submitRestore(api, bindingId, { ...command, approval_id: approvalId }, confirmed, crypto.randomUUID(), setOperation)); onComplete() }
+    const body = { ...command, approval_id: approvalId }
+    try { setOperation(await submitRestore(api, bindingId, body, confirmed, intent.key({ bindingId, body }), setOperation)); onComplete() }
     catch (error) { setError(String(error)) }
     finally { setBusy(false) }
   }

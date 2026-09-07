@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
+import { createMutationIntent } from '@/lib/version-control-api'
 import type { ApprovalInputs, ApprovalRecord } from '@/types/version-control'
 
 export function ApprovalDetails({ record }: { record: ApprovalRecord }) {
@@ -26,6 +27,7 @@ export function ApprovalsPanel({ api, approvalId, inputs, disabled, onApproval, 
   const [record, setRecord] = useState<ApprovalRecord | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [intent] = useState(createMutationIntent)
   useEffect(() => {
     let active = true
     setRecord(null)
@@ -39,14 +41,14 @@ export function ApprovalsPanel({ api, approvalId, inputs, disabled, onApproval, 
   const request = async () => {
     if (busy || disabled) return
     setBusy(true)
-    try { const result = await api.requestApproval(inputs, crypto.randomUUID()); onApproval(result.approval_id) }
+    try { const result = await api.requestApproval(inputs, intent.key({ action: 'request', inputs })); onApproval(result.approval_id) }
     catch (error) { setError(String(error)) }
     finally { setBusy(false) }
   }
   const vote = async (decision: 'approve' | 'reject') => {
     if (!record || busy || disabled) return
     setBusy(true)
-    try { const result = await voteApproval(api, record, decision, crypto.randomUUID()); setRecord(result); onRecord(result) }
+    try { const result = await voteApproval(api, record, decision, intent.key({ approvalId: record.approval_id, decision })); setRecord(result); onRecord(result) }
     catch (error) { setError(String(error)) }
     finally { setBusy(false) }
   }

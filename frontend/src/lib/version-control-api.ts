@@ -17,6 +17,15 @@ export class VersionControlError extends Error implements ApiError {
 }
 
 const bindingPath = (bindingId: string) => `/bindings/${encodeURIComponent(bindingId)}`
+export function createMutationIntent() {
+  let previous = ''
+  let key = ''
+  return { key: (body: unknown) => {
+    const serialized = JSON.stringify(body)
+    if (!key || serialized !== previous) { previous = serialized; key = crypto.randomUUID() }
+    return key
+  } }
+}
 const pageQuery = (cursor?: string, limit = 25) => {
   const query = new URLSearchParams({ limit: String(Math.min(100, Math.max(1, limit))) })
   if (cursor) query.set('cursor', cursor)
@@ -25,6 +34,7 @@ const pageQuery = (cursor?: string, limit = 25) => {
 
 export class VersionControlApi {
   private transport: typeof fetch
+  private commands = new Map<string, { intent: string; result: Promise<unknown> }>()
   constructor(transport: typeof fetch) { this.transport = transport }
   private async request<Result>(path: string, init: RequestInit): Promise<Result> {
     const response = await this.transport(`/api/version-control${path}`, init)
@@ -34,7 +44,15 @@ export class VersionControlApi {
   }
   private get<Result>(path: string, signal?: AbortSignal) { return this.request<Result>(path, { signal }) }
   private post<Result>(path: string, body: unknown, key: string) {
-    return this.request<Result>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) })
+    const intent = JSON.stringify({ path, body })
+    const prior = this.commands.get(key)
+    if (prior) {
+      if (prior.intent !== intent) return Promise.reject(new VersionControlError(409, { code: 'IDEMPOTENCY_MISMATCH', message: 'Key belongs to a different intent; conflict preserved.', stale: true, retryable: false }))
+      return prior.result as Promise<Result>
+    }
+    const result = this.request<Result>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) })
+    this.commands.set(key, { intent, result })
+    return result
   }
   overview(cursor?: string, signal?: AbortSignal) { return this.get<OverviewPage>(`/overview?${pageQuery(cursor)}`, signal) }
   status(bindingId: string, signal?: AbortSignal) { return this.get<BindingStatus>(`${bindingPath(bindingId)}/status`, signal) }

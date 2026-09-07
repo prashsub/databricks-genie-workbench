@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
-import { VersionControlApi } from './version-control-api'
+import { createMutationIntent, VersionControlApi } from './version-control-api'
+import { fingerprints } from '@/components/version-control/fixtures'
 
 it('loads_vc_contract_fixtures_without_type_or_nullability_drift', async () => {
   const fixture = {
@@ -18,4 +19,25 @@ it('loads_vc_contract_fixtures_without_type_or_nullability_drift', async () => {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'intent-1' },
     body: JSON.stringify({ reason: 'open' }),
   }])
+})
+
+it('double_click_or_network_loss_does_not_generate_new_mutation_key', async () => {
+  const intent = createMutationIntent()
+  const body = { version_id: 'version-1', expected_base: fingerprints, binding_revision: 3, approval_id: 'approval-1' }
+  const key = intent.key({ bindingId: 'binding-1', body })
+  expect(intent.key({ bindingId: 'binding-1', body })).toBe(key)
+  const transport = vi.fn().mockRejectedValue(new Error('Network lost after admission'))
+  const api = new VersionControlApi(transport)
+  const first = api.restore('binding-1', body, key)
+  const second = api.restore('binding-1', body, key)
+  await expect(first).rejects.toThrow('Network lost')
+  await expect(second).rejects.toThrow('Network lost')
+  await expect(api.restore('binding-1', body, key)).rejects.toThrow('Network lost')
+  expect(transport).toHaveBeenCalledTimes(1)
+  const changed = { ...body, version_id: 'version-2' }
+  const newKey = intent.key({ bindingId: 'binding-1', body: changed })
+  expect(newKey).not.toBe(key)
+  await expect(api.restore('binding-1', changed, key)).rejects.toThrow('different intent')
+  await expect(api.restore('binding-1', changed, newKey)).rejects.toThrow('Network lost')
+  expect(transport).toHaveBeenCalledTimes(2)
 })

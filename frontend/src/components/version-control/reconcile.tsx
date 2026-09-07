@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
+import { createMutationIntent } from '@/lib/version-control-api'
 import type { ApprovalInputs, ApprovalRecord, Operation, ReviewedCommand } from '@/types/version-control'
 import { canMutate } from '@/hooks/use-version-control'
 import type { VersionControlState } from '@/hooks/use-version-control'
@@ -31,11 +32,13 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [intent] = useState(createMutationIntent)
   const action = async (action: 'adopt' | 'reapply' | 'acknowledge') => {
     if (!canMutate(state, action) || busy || !state.status) return
     setBusy(true)
     try {
-      const result = await reconcileAction(api, state.bindingId, action, { binding_revision: state.status.binding_revision, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }, inputs, approval, crypto.randomUUID())
+      const reviewed = { binding_revision: state.status.binding_revision, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }
+      const result = await reconcileAction(api, state.bindingId, action, reviewed, inputs, approval, intent.key({ bindingId: state.bindingId, action, reviewed, inputs }))
       if ('approval_id' in result) { onApproval(result.approval_id); setMessage(`Approval requested: ${result.approval_id}. Not yet approved.`) }
       else { setMessage(`Operation ${result.operation_id}: ${result.status}. Acknowledgement does not align heads.`); onComplete() }
     } catch (error) { setError(String(error)) }

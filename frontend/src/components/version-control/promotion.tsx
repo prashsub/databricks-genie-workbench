@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
+import { createMutationIntent } from '@/lib/version-control-api'
 import type { ApprovalInputs, ApprovalRecord, DeploymentReceipt, OperationHandle, ReleaseCommand } from '@/types/version-control'
 import { pollOperation } from './restore'
 import { ApprovalsPanel } from './approvals'
@@ -80,13 +81,14 @@ export function PromotionPanel({ api, bindingId, sourceVersionId, inputs, disabl
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [intent] = useState(createMutationIntent)
   const selection = { source_binding: bindingId, source_version_id: sourceVersionId, target_binding: target, mapping_digest: mapping, policy }
   const change = (setter: (value: string) => void, value: string) => { setter(value); setReleaseId(''); setApprovalId(''); setApproval(null); setError('') }
   const validate = async () => {
     if (disabled || busy) return
     setBusy(true)
     flow.configure(selection)
-    try { setReleaseId(await flow.validate(crypto.randomUUID())); setMessage('Preflight confirmed. Request target-local approval next.') }
+    try { setReleaseId(await flow.validate(intent.key({ action: 'validate', selection }))); setMessage('Preflight confirmed. Request target-local approval next.') }
     catch (error) { setError(String(error)) }
     finally { setBusy(false) }
   }
@@ -94,7 +96,7 @@ export function PromotionPanel({ api, bindingId, sourceVersionId, inputs, disabl
     if (disabled || busy || !releaseId) return
     setBusy(true)
     flow.configure(selection)
-    try { const operation = await flow.promote(approval, crypto.randomUUID()); setMessage(`Promotion operation ${operation.operation_id}: ${operation.status}. Read the durable receipt before declaring deployment success.`) }
+    try { const operation = await flow.promote(approval, intent.key({ action: 'promote', selection, approvalId: approval?.approval_id })); setMessage(`Promotion operation ${operation.operation_id}: ${operation.status}. Read the durable receipt before declaring deployment success.`) }
     catch (error) { setError(String(error)) }
     finally { setBusy(false) }
   }
