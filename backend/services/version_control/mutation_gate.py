@@ -35,7 +35,10 @@ class MutationGate:
         if self.canonicalizer.compare(snapshot, desired) == vc.Comparison.EQUAL:
             return self._finish(request, executor, claim, vc.OperationStatus.NOOP, preimage)
         self.coordination.assert_owner(claim)
-        self.transport.patch_config_once(request.binding, vc.to_wire(request.serialized_space), claim)
+        try:
+            self.transport.patch_config_once(request.binding, vc.to_wire(request.serialized_space), claim)
+        except Exception:
+            return self._unverified(request, executor, claim, "Config send outcome unknown")
         checkpoint = self.canonicalizer.observe(self.transport.get(request.binding, executor))
         middle = self._capture(request, executor, claim, checkpoint, "config_checkpoint", preimage.version_id)
         self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, middle)
@@ -61,11 +64,30 @@ class MutationGate:
         return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_PARTIAL,
                                   claim.preimage, observation, True, (reason,))
 
+    def _unverified(self, request, executor, claim, reason):
+        self.coordination.quarantine(claim, reason)
+        self._record(request, executor, claim, vc.OperationStatus.APPLIED_UNVERIFIED)
+        return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_UNVERIFIED,
+                                  claim.preimage, None, True, (reason,))
+
+    def verify_only(self, operation_id, executor):
+        request = self.facts.get_request(operation_id).request
+        snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
+        return vc.OperationResult(operation_id, vc.OperationStatus.APPLIED_UNVERIFIED,
+                                  None, None, True, (snapshot.state_digest,))
+
     def _checkpoint(self, claim, stage, observation):
         self.coordination.checkpoint(claim, stage, vc.StageEvidence(
             "VC/1.0", stage, datetime.now(timezone.utc), observation.state_digest, observation))
 
     def _finish(self, request, executor, claim, status, postimage=None):
+        self._record(request, executor, claim, status, postimage)
+        result = vc.OperationResult(request.identity.operation_id, status, claim.preimage,
+                                    postimage, False, ())
+        self.coordination.finish(claim, result)
+        return result
+
+    def _record(self, request, executor, claim, status, postimage=None):
         evidence = vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
                                     datetime.now(timezone.utc),
                                     postimage.state_digest if postimage else request.identity.request_digest,
@@ -79,10 +101,6 @@ class MutationGate:
             attempt_id=claim.attempt_id, generation=claim.generation,
             pre_version_id=claim.preimage.version_id,
             post_version_id=postimage.version_id if postimage else None))
-        result = vc.OperationResult(request.identity.operation_id, status, claim.preimage,
-                                    postimage, False, ())
-        self.coordination.finish(claim, result)
-        return result
 
     def _capture(self, request, executor, fence, snapshot, reason, parent=None):
         context = vc.CaptureContext(

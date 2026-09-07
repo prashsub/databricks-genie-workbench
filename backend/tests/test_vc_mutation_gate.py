@@ -170,3 +170,19 @@ def test_final_readback_must_match_all_fingerprints(rig):
     result = rig.gate.execute(rig.request, rig.executor)
     assert result.status == vc.OperationStatus.APPLIED_PARTIAL
     assert result.unresolved
+
+
+def test_config_timeout_matching_readback_never_replays_or_sends_description(rig):
+    def lost_response(*args):
+        rig.config(*args)
+        raise TimeoutError("response lost after apply")
+    rig.transport.patch_config_once.side_effect = lost_response
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    assert result.unresolved
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+    verified = rig.gate.verify_only(rig.identity.operation_id, rig.executor)
+    assert verified.unresolved
+    rig.transport.patch_config_once.assert_called_once()
+    rig.transport.patch_description_once.assert_not_called()
+    rig.coordination.finish.assert_not_called()
