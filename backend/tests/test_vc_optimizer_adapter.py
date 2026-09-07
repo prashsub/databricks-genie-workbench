@@ -66,3 +66,34 @@ def test_optimizer_write_switches_default_off(rig):
     with pytest.raises(PermissionError):
         adapter.apply("run", "champion", source.binding, source.expected_base, executor)
     gate.execute.assert_not_called()
+
+
+def test_retry_or_second_champion_in_same_run_cannot_append_second_optimizer_version(rig):
+    adapter, source, executor, gate, requests, _ = rig
+    durable_requests = {}
+    versions = {}
+
+    def prepare(request, requester):
+        existing = durable_requests.setdefault(request.identity.idempotency_key, request)
+        if existing.identity.request_digest != request.identity.request_digest:
+            raise ValueError("Run already has a different champion/digest")
+        return existing
+
+    def execute(request, job):
+        return versions.setdefault(request.identity.operation_id, gate.execute.return_value)
+
+    requests.prepare.side_effect = prepare
+    gate.execute.side_effect = execute
+    first = adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+    restarted = OptimizerChampionAdapter(sources=adapter.sources, gate=gate,
+                                         requests=requests, flags=adapter.flags)
+    assert restarted.apply("run", "champion", source.binding, source.expected_base,
+                            replace(executor, execution_ref="job/new-attempt")) is first
+    for changed in (replace(source, champion_id="other"),
+                    replace(source, description="changed",
+                            payload_digest=source_digest(source.serialized_space, "changed"))):
+        adapter.sources.load.return_value = changed
+        with pytest.raises(ValueError, match="different champion/digest"):
+            adapter.apply("run", changed.champion_id, source.binding, source.expected_base, executor)
+    assert len(durable_requests) == len(versions) == 1
+    assert gate.execute.call_count == 2

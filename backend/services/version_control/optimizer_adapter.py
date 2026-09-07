@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Protocol
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
 
@@ -43,7 +43,12 @@ class ChampionSources(Protocol):
 
 class ChampionRequests(Protocol):
     def prepare(self, request: ChampionMutationRequest, requester_id: str) -> ChampionMutationRequest:
-        """Durably register the immutable request before the mutation gate."""
+        """Atomically put-if-absent by run/binding-revision key, never overwrite.
+
+        Return the original request on exact retry; reject different digests.
+        Retain the key after coordination reuse and process/Job termination.
+        Ambiguous persistence must raise, never return optimistic success.
+        """
         ...
 
 
@@ -74,10 +79,17 @@ class OptimizerChampionAdapter:
         if source.payload_digest != source_digest(source.serialized_space, source.description):
             raise ValueError("Champion source payload digest mismatch")
         digest = vc.canonical_json_hash("vc-optimizer-request/1", vc.to_wire(source))
+        key = vc.canonical_json_hash("vc-optimizer-run/1", {
+            "run_id": run_id, "binding_id": binding.binding_id,
+            "binding_revision": binding.binding_revision, "workspace_id": binding.workspace_id,
+        })
         request = ChampionMutationRequest(
-            vc.RequestIdentity(str(uuid4()), str(uuid4()), digest), binding, "optimizer_apply",
+            vc.RequestIdentity(str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key)), key, digest),
+            binding, "optimizer_apply",
             source.source_version_id, expected_base, source.serialized_space, source.description,
             source.approval_id, vc.Origin.OPTIMIZER, run_id, champion_id, source.payload_digest,
         )
-        request = self.requests.prepare(request, source.requester_id)
+        persisted = self.requests.prepare(request, source.requester_id)
+        if persisted != request:
+            raise ValueError("Run already has a different champion/digest")
         return self.gate.execute(request, executor)
