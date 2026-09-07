@@ -102,3 +102,37 @@ def test_runtime_principal_cannot_update_delete_or_alter_fact_tables(live_platfo
         live_platform.assert_sql_succeeds("runtime", f"{name}.insert")
         for action in ("update", "delete", "alter", "drop", "replace"):
             live_platform.assert_sql_denied("runtime", f"{name}.{action}")
+
+
+def test_coordination_grants_require_separate_serialized_enrollment():
+    verify = getattr(platform, "verify_coordination_permissions", None)
+    assert callable(verify), "Enrollment must be separate from UPDATE-only executors"
+    proof = dict(owner="provisioner", executor="executor", enrollment="enrollment",
+                 executor_privileges={"SELECT", "UPDATE"},
+                 enrollment_privileges={"SELECT", "INSERT"},
+                 max_concurrent_runs=1, queue_enabled=True, isolation="Serializable")
+    assert verify(proof) is True
+    for key, value in (("executor_privileges", {"SELECT", "MODIFY"}),
+                       ("executor_privileges", {"SELECT", "UPDATE", "INSERT"}),
+                       ("enrollment_privileges", {"SELECT", "INSERT", "UPDATE"}),
+                       ("enrollment", "executor"), ("owner", "executor"),
+                       ("max_concurrent_runs", 2), ("queue_enabled", False),
+                       ("isolation", "WriteSerializable")):
+        assert verify(dict(proof, **{key: value})) is False
+    assert verify({}) is False
+
+
+@pytest.mark.integration
+def test_executor_cannot_insert_coordination_and_enrollment_is_serialized(live_platform):
+    live_platform.assert_sql_denied("executor", "genie_ops_coordination.insert")
+    live_platform.assert_sql_succeeds("executor", "genie_ops_coordination.update")
+    live_platform.assert_sql_succeeds("enrollment", "genie_ops_coordination.enroll")
+    table = live_platform.table("genie_ops_coordination")
+    assert table["properties"]["delta.isolationLevel"] == "Serializable"
+    assert len({table["owner"], live_platform.principal("executor"),
+                live_platform.principal("enrollment")}) == 3
+    job = live_platform.api("provisioner", "get",
+                            f"/api/2.2/jobs/get?job_id={live_platform.config['enrollment_job_id']}")
+    assert job["settings"]["max_concurrent_runs"] == 1
+    assert job["settings"]["queue"]["enabled"] is True
+    assert job["settings"]["run_as"]["service_principal_name"] == live_platform.principal("enrollment")
