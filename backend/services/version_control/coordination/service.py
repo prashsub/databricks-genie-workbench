@@ -130,3 +130,28 @@ class CoordinationService:
             self._fact(row, operation, c.FactStatus.CONFLICTED)
             raise
         return c.Reservation(self._fence(row), operation, executor, row.lease_expires_at)
+
+    def _owned(self, fence, *, allow_quarantine=False):
+        binding = self._io(self.resolve_binding, fence.binding_id)
+        row = self._row(binding)
+        if ((row.binding.binding_revision, row.attempt_id, row.generation) !=
+                (fence.binding_revision, fence.attempt_id, fence.generation)
+                or fence.row_version > row.row_version or not row.unresolved
+                or row.state == c.CoordinationState.IDLE
+                or (row.state == c.CoordinationState.QUARANTINED and not allow_quarantine)):
+            raise OwnershipError('Stale attempt/revision/generation or quarantined claim')
+        if not allow_quarantine and (row.lease_expires_at is None or
+                                    row.lease_expires_at <= self.clock.now()):
+            raise OwnershipError('Expired lease; no takeover or renewal')
+        return row
+
+    def renew(self, claim: c.FenceToken) -> c.FenceToken:
+        row = self._owned(claim)
+        updated = self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
+                           lease_expires_at=self.clock.now() + timedelta(seconds=60))
+        return self._fence(updated)
+
+    def assert_owner(self, claim: c.FenceToken) -> None:
+        row = self._owned(claim)
+        if not isinstance(claim, c.AdmissionClaim) or row.state != c.CoordinationState.ADMITTED:
+            raise OwnershipError('Reservation/observation is not write admission')

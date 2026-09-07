@@ -125,3 +125,22 @@ def test_two_concurrent_reservations_have_exactly_one_winner(h):
     h.store.compare_and_swap = Mock(return_value=True)
     with pytest.raises(CoordinationError):
         h.service.reserve(other, h.request, h.executor)
+
+
+@pytest.mark.parametrize('change', ['attempt', 'generation', 'revision'])
+def test_same_sp_stale_attempt_cannot_renew_or_patch(h, change):
+    enroll(h)
+    reservation = reserve(h)
+    renewed = h.service.renew(reservation.fence)
+    assert renewed.row_version > reservation.fence.row_version
+    row = h.store.read(h.binding.binding_id)
+    changes = {'attempt_id': uid()} if change == 'attempt' else {'generation': row.generation + 1}
+    if change == 'revision':
+        changes = {'binding': replace(h.binding, binding_revision=2)}
+        h.resolve_binding.return_value = changes['binding']
+    h.store.state.rows[:] = [replace(row, **changes)]
+    assert h.store.state.rows[0].holder == h.executor.principal_id
+    with pytest.raises(CoordinationError):
+        h.service.renew(renewed)
+    with pytest.raises(CoordinationError):
+        h.service.assert_owner(renewed)
