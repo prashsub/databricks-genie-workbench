@@ -49,7 +49,10 @@ class MutationGate:
             return self._partial(request, claim, middle, "Config or approved metadata checkpoint changed")
         if request.description is not None and snapshot.fingerprints.metadata != desired.fingerprints.metadata:
             self.coordination.assert_owner(claim)
-            self.transport.patch_description_once(request.binding, request.description, claim)
+            try:
+                self.transport.patch_description_once(request.binding, request.description, claim)
+            except Exception:
+                return self._unverified(request, executor, claim, "Description send outcome unknown")
             final = self.canonicalizer.observe(self.transport.get(request.binding, executor))
             postimage = self._capture(request, executor, claim, final, "postimage", preimage.version_id)
             self._checkpoint(claim, vc.PatchStage.DESCRIPTION_OBSERVED, postimage)

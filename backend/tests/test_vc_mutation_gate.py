@@ -186,3 +186,18 @@ def test_config_timeout_matching_readback_never_replays_or_sends_description(rig
     rig.transport.patch_config_once.assert_called_once()
     rig.transport.patch_description_once.assert_not_called()
     rig.coordination.finish.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timeout"), RuntimeError("HTTP 503")])
+def test_description_timeout_and_5xx_quarantine_without_replay(rig, error):
+    def lost_response(*args):
+        rig.description(*args)
+        raise error
+    rig.transport.patch_description_once.side_effect = lost_response
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    assert result.unresolved
+    rig.transport.patch_config_once.assert_called_once()
+    rig.transport.patch_description_once.assert_called_once()
+    rig.coordination.quarantine.assert_called_once()
+    rig.coordination.finish.assert_not_called()
