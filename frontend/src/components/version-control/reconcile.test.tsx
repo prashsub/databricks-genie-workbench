@@ -18,14 +18,24 @@ it('adopt_requests_approval_and_reapply_does_not_reuse_invalid_approval', async 
   expect(transport).toHaveBeenCalledTimes(1)
 })
 
-it('quarantine_and_partial_outcome_never_offer_blind_retry', () => {
+it('quarantine_and_partial_outcome_never_offer_blind_retry', async () => {
   for (const status of ['quarantined', 'applied_partial', 'applied_unverified', 'conflicted'] as const) {
     const html = renderToStaticMarkup(<OperationStatusView operation={{ operation_id: 'unresolved-1', status, job_run_id: null, checkpoints: ['Description write incomplete'], audit: ['Operator must inspect captured evidence'], receipt_references: [] }} onVerify={vi.fn()} />)
     expect(html).toContain(status)
     expect(html).toContain('Description write incomplete')
     expect(html).toContain('Operator must inspect captured evidence')
     expect(html).toContain('Verify operation status')
-    expect(html).not.toMatch(/>Retry|>Reapply|>Restore|>Promote/)
+    // A just-returned partial result must lock the real controls even before a refresh returns.
+    const api = new VersionControlApi(vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ operation_id: 'unresolved-1', status, job_run_id: null, checkpoints: [], audit: [], receipt_references: [] }))))
+    const host = document.createElement('div'); const root = createRoot(host)
+    try {
+      await act(async () => root.render(<ReconcilePanel api={api} state={permissiveState} inputs={approvalInputsFixture} approval={null} onApproval={vi.fn()} onComplete={vi.fn()} onCompare={vi.fn()} />))
+      const buttons = () => [...host.querySelectorAll('button')].filter(button => /adoption|Adopt captured|Reapply|Acknowledge/.test(button.textContent ?? ''))
+      expect(buttons().filter(button => !button.disabled)).toHaveLength(2)
+      await act(async () => buttons().find(button => button.textContent?.includes('Acknowledge'))!.click())
+      expect(buttons()).toHaveLength(3)
+      expect(buttons().every(button => button.disabled)).toBe(true)
+    } finally { await act(async () => root.unmount()) }
     expect(html).toContain('No mutation replay')
   }
 })
@@ -66,5 +76,27 @@ it('adopt_with_fresh_bound_approval_posts_reconcile_action_adopt', async () => {
     await reconcileAction(new VersionControlApi(staleTransport), 'demo-binding', 'adopt', reviewed, approvalInputsFixture, { ...approval, inputs }, 'stale')
     expect(staleTransport).toHaveBeenCalledTimes(1)
     expect(staleTransport.mock.calls[0][0]).toBe('/api/version-control/approvals')
+  }
+})
+
+import { RestorePanel } from './restore'
+import { PromotionPanel } from './promotion'
+import { canMutate } from '@/hooks/use-version-control'
+import type { VersionControlState } from '@/hooks/use-version-control'
+const permissiveState: VersionControlState = { bindingId: 'demo-binding', loading: false, captured: true, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
+it('reconcile_and_restore_controls_render_disabled_for_quarantined_and_partial_bindings', () => {
+  const api = new VersionControlApi(vi.fn())
+  for (const changes of [{ quarantined: true }, { unresolved_operation_id: 'op-1' }]) {
+    const state = { ...permissiveState, status: { ...bindingFixture, ...changes } }
+    const html = renderToStaticMarkup(<>
+      <ReconcilePanel api={api} state={state} inputs={approvalInputsFixture} approval={null} onApproval={vi.fn()} onComplete={vi.fn()} onCompare={vi.fn()} />
+      <RestorePanel api={api} bindingId="demo-binding" command={{ binding_revision: 3, expected_base: fingerprints, version_id: 'version' }} disabled={!canMutate(state, 'restore')} onComplete={vi.fn()} />
+      <PromotionPanel api={api} bindingId="demo-binding" sourceVersionId="version" inputs={approvalInputsFixture} disabled={!canMutate(state, 'promote')} />
+    </>)
+    const host = document.createElement('div'); host.innerHTML = html
+    // Exclude only the read-only compare control; new mutation buttons are included automatically.
+    const mutations = [...host.querySelectorAll('button')].filter(button => button.textContent !== 'Compare approved with observed')
+    expect(mutations).toHaveLength(6)
+    expect(mutations.filter(button => button.disabled)).toHaveLength(mutations.length)
   }
 })

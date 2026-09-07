@@ -53,7 +53,7 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
   const [error, setError] = useState('')
   const [intent] = useState(createMutationIntent)
   const action = async (action: 'adopt' | 'reapply' | 'acknowledge') => {
-    if (!canMutate(state, action) || busy || !state.status) return
+    if (!canMutate(state, action) || busy || operation || !state.status) return
     setBusy(true)
     try {
       const reviewed = { binding_revision: state.status.binding_revision, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }
@@ -67,7 +67,7 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
     <h3>Reconcile captured external changes</h3>
     <p>Capture is evidence, not approval. Reapply requires approval for the current base.</p>
     <button onClick={onCompare} disabled={!state.status?.heads.approved || !state.status.heads.observed}>Compare approved with observed</button>
-    {(['adopt', 'reapply', 'acknowledge'] as const).map(kind => <button key={kind} disabled={busy || Boolean(error) || !canMutate(state, kind) || (kind === 'reapply' && !approval?.valid)} onClick={() => void action(kind)}>{kind === 'adopt' ? hasFreshApproval(state.bindingId, { binding_revision: state.status?.binding_revision ?? -1, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }, approval) ? 'Adopt captured state with approval' : 'Request adoption approval' : kind === 'reapply' ? 'Reapply approved state' : 'Acknowledge scoped divergence'}</button>)}
+    {(['adopt', 'reapply', 'acknowledge'] as const).map(kind => <button key={kind} disabled={busy || Boolean(operation) || Boolean(error) || !canMutate(state, kind) || (kind === 'reapply' && !approval?.valid)} onClick={() => void action(kind)}>{kind === 'adopt' ? hasFreshApproval(state.bindingId, { binding_revision: state.status?.binding_revision ?? -1, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }, approval) ? 'Adopt captured state with approval' : 'Request adoption approval' : kind === 'reapply' ? 'Reapply approved state' : 'Acknowledge scoped divergence'}</button>)}
     {busy && <p role="status">Reconciliation pending…</p>}
     {message && <p role="status">{message}</p>}
     {operation && <OperationStatusView operation={operation} onVerify={() => { void api.operation(operation.operation_id).then(setOperation).catch(error => setError(String(error))) }} />}

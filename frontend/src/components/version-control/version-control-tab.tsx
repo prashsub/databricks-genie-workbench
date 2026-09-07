@@ -54,7 +54,7 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
     {comparing && <p role="status">Loading comparison…</p>}
     {error && <p role="alert">{error}</p>}
     {diff && <SemanticDiffView diff={diff} />}
-    {base && inputs && <ReconcilePanel api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
+    {base && inputs && <ReconcilePanel key={`${bindingId}-${base.version_id}-${state.status?.binding_revision}`} api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
     <ApprovalsPanel api={api} approvalId={approvalId} inputs={inputs} disabled={!canMutate(state, 'adopt')} onApproval={setApprovalId} onRecord={setApproval} />
     <PromotionPanel key={`${bindingId}-${selected?.version_id ?? ''}-${state.status?.binding_revision}`} api={api} bindingId={bindingId} sourceVersionId={selected?.version_id ?? ''} inputs={inputs} disabled={!canMutate(state, 'promote')} />
   </div>
