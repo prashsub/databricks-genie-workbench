@@ -355,6 +355,7 @@ def test_historical_approval_reuse_and_different_request_digest_are_rejected(fau
     approval = approve(context)
     request = context.request
     if fault == 'consumed':
+        context.service.authorize(context.request, context.executor)
         record = context.service.get(approval.approval_id)
         context.facts.append(fact(
             binding=request.binding, request=request.identity, requester_id='requester',
@@ -383,8 +384,12 @@ def test_historical_approval_reuse_and_different_request_digest_are_rejected(fau
     else:
         context.facts.append(fact(binding=request.binding, request=request.identity,
                                  transition_sequence=10, status=FactStatus.CONFIRMED))
-    with pytest.raises((PermissionError, ValueError, OSError)):
-        context.service.authorize(request, context.executor)
+    if fault == 'consumed':
+        with pytest.raises(PermissionError, match='consumed'):
+            context.service.authorize(request, context.executor)
+    else:
+        with pytest.raises((PermissionError, ValueError, OSError)):
+            context.service.authorize(request, context.executor)
 
 
 def test_approval_request_rejects_inputs_not_bound_to_durable_request():
