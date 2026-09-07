@@ -18,6 +18,15 @@ export function createVersionControlStore(api: VersionControlApi) {
   return {
     getSnapshot: () => state,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    async nextPage() {
+      if (!state.history.next_cursor || state.loading) return
+      update({ loading: true })
+      try {
+        const page = await api.versions(state.bindingId, state.history.next_cursor)
+        update({ history: { items: [...state.history.items, ...page.items], next_cursor: page.next_cursor } })
+      } catch (error) { update({ error: String(error), stale: true }) }
+      finally { update({ loading: false }) }
+    },
     async open(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return' = 'open') {
       update({ bindingId, loading: true, captured: false, error: '' })
       try {
@@ -41,5 +50,5 @@ export function useVersionControl(bindingId: string, api: VersionControlApi = de
     window.addEventListener('focus', onReturn)
     return () => window.removeEventListener('focus', onReturn)
   }, [store, bindingId])
-  return { ...state, refresh: (reason: 'history' | 'refresh' = 'refresh') => store.open(bindingId, reason) }
+  return { ...state, nextPage: store.nextPage, refresh: (reason: 'history' | 'refresh' = 'refresh') => store.open(bindingId, reason) }
 }
