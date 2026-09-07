@@ -5,7 +5,9 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
-from backend.services.version_control.contracts import ApprovalInputs, from_wire, to_wire
+from backend.services.version_control.contracts import (
+    ApprovalInputs, BreakGlassRequest, OperationHandle, OperationStatus, from_wire, to_wire,
+)
 
 
 class VoteBody(BaseModel):
@@ -55,5 +57,14 @@ def build_router(service, identity):
                 raise PermissionError('Approval read scope denied')
             return record
         return invoke(read)
+
+    @router.post('/break-glass', status_code=202)
+    def break_glass(body: dict, request: Request):
+        def override():
+            actor = authenticated_actor(request, identity)
+            scoped = from_wire(BreakGlassRequest, body)
+            service.break_glass(scoped, actor)
+            return OperationHandle(scoped.identity.operation_id, OperationStatus.QUARANTINED, None)
+        return invoke(override)
 
     return router
