@@ -5,7 +5,7 @@ from uuid import UUID, uuid5, NAMESPACE_URL
 import pytest
 
 from backend.services.version_control.contracts import (
-    FactKind, FactStatus, OperationFact, PatchStage, RequestIdentity, StageEvidence,
+    FactKind, FactStatus, MutationRequest, OperationFact, PatchStage, RequestIdentity, StageEvidence,
     to_wire,
 )
 from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
@@ -80,3 +80,30 @@ def test_fact_writes_default_off():
     ledger = DurableOperationFacts(lambda: (), lambda *args: pytest.fail('write'))
     with pytest.raises(PermissionError, match='disabled'):
         ledger.append(fact())
+
+
+def test_completed_request_and_consumed_approval_remain_after_coordination_reuse():
+    ledger, store = durable()
+    initial = fact()
+    request = MutationRequest(initial.request, initial.binding, 'edit', uid(3),
+                              DIGEST, {'instructions': []}, None, uid(4))
+    ledger.record_request(request, initial)
+    consumed = fact(fact_kind=FactKind.APPROVAL_CONSUMED, status=FactStatus.CONSUMED,
+                    approval_id=uid(4), approval_digest=DIGEST,
+                    attempt_id=uid(5), generation=1)
+    ledger.append(consumed)
+    ledger.append(fact(transition_sequence=1, status=FactStatus.CONFIRMED))
+    ledger.append(fact(operation_id=uid(6), request=RequestIdentity(uid(6), 'later', DIGEST)))
+    restarted, _ = durable(store)
+    history = restarted.lookup_request(initial.binding, 'client-key')
+    assert not history.ambiguous
+    assert any(row.status == FactStatus.CONFIRMED for row in history.facts)
+    assert restarted.get_request(uid(2)).request == request
+    use = restarted.approval_use(initial.binding, uid(4))
+    assert use.operation_ids == (uid(2),)
+    assert len(use.consumptions) == 1
+    with pytest.raises(ValueError, match='idempotency'):
+        restarted.append(fact(operation_id=uid(7), request=RequestIdentity(uid(7), 'client-key', 'b' * 64)))
+    store.seed(replace(store.state.rows[0], payload=to_wire(fact(
+        operation_id=uid(8), request=RequestIdentity(uid(8), 'client-key', 'b' * 64)))))
+    assert restarted.lookup_request(initial.binding, 'client-key').ambiguous
