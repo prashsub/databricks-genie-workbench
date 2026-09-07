@@ -20,9 +20,15 @@ export function createVersionControlStore(api: VersionControlApi) {
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     async open(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return' = 'open') {
       update({ bindingId, loading: true, captured: false, error: '' })
-      const observation = await api.observe(bindingId, reason, crypto.randomUUID())
-      const history = await api.versions(bindingId)
-      update({ status: observation.status, history, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale, loading: false })
+      try {
+        const observation = await api.observe(bindingId, reason, crypto.randomUUID())
+        update({ status: observation.status, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale })
+      } catch (error) {
+        update({ captured: false, stale: true, error: error instanceof Error ? error.message : 'Capture unavailable' })
+      }
+      try { update({ history: await api.versions(bindingId) }) }
+      catch (error) { update({ stale: true, captured: false, error: `${state.error} History unavailable: ${String(error)}` }) }
+      finally { update({ loading: false }) }
     },
   }
 }
