@@ -85,6 +85,71 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+def test_approved_and_deployed_heads_cannot_regress(h):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
+    v1, v2, v3 = uid(), uid(), uid()
+    parents = {v1: None, v2: v1, v3: v2}
+
+    def version(vid, parent, binding=None):
+        return c.Version(vid, snapshot, c.CaptureContext(binding or h.binding, 'obs',
+            h.clock.now(), 'open', c.ActorContext('a', h.binding.workspace_id, 'service'),
+            c.Origin.EXTERNAL, attempt_id=uid(), generation=0, parent_version_id=parent))
+
+    chain = dict(parents)
+    extra = {}
+
+    def get_version(binding, version_id):
+        if version_id in extra:
+            return extra[version_id]
+        if version_id in chain:
+            return version(version_id, chain[version_id])
+        return None
+
+    h.ledger.get_version.side_effect = get_version
+    h.authorize_heads.return_value = True
+
+    # 1. baseline: advance both heads to v2.
+    heads = h.service.advance_heads(claim, c.HeadUpdate(None, v2, v2, 'ref'))
+    assert heads == c.Heads(None, v2, v2)
+
+    original_cas = h.store.compare_and_swap
+    h.store.compare_and_swap = Mock(wraps=original_cas)
+    before = h.store.read(h.binding.binding_id).heads
+
+    # 2/3. regress approved to an ancestor -> raises, no CAS.
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(claim, c.HeadUpdate(None, v1, None, 'ref'))
+    assert h.store.read(h.binding.binding_id).heads == before
+    assert h.store.compare_and_swap.call_count == 0
+
+    # 4. deployed leading approved raises (approved still v2).
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(claim, c.HeadUpdate(None, None, v3, 'ref'))
+    assert h.store.read(h.binding.binding_id).heads == before
+
+    # 5. an unrelated chain (parent never reaches v2) raises.
+    unrelated = uid()
+    extra[unrelated] = version(unrelated, uid())  # parent is an unknown id
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(claim, c.HeadUpdate(None, unrelated, None, 'ref'))
+
+    # 6. a lineage cycle terminates with a CoordinationError.
+    va, vb = uid(), uid()
+    extra[va] = version(va, vb)
+    extra[vb] = version(vb, va)
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(claim, c.HeadUpdate(None, va, None, 'ref'))
+
+    # 7. genuine forward advance v2 -> v3 for both heads succeeds.
+    h.store.compare_and_swap = original_cas
+    heads = h.service.advance_heads(claim, c.HeadUpdate(None, v3, v3, 'ref'))
+    assert heads == c.Heads(None, v3, v3)
+
+
 @pytest.mark.parametrize('head', ['approved', 'deployed'])
 @pytest.mark.parametrize('defect', ['unknown-id', 'foreign-binding', 'old-revision', 'uncommitted'])
 def test_approved_and_deployed_heads_require_committed_versions_of_this_binding(h, head, defect):

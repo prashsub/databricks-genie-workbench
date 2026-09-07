@@ -586,6 +586,21 @@ class CoordinationService:
             observed_sequence=row.observed_sequence + 1)
         return c.ObservationLease(self._fence(row), row.observed_sequence, row.lease_expires_at)
 
+    def _advances(self, binding, current, candidate):
+        """True iff candidate is current, or a descendant of current, by committed lineage."""
+        if current is None:
+            return True
+        seen, node = set(), candidate
+        while node is not None and node not in seen:
+            if node == current:
+                return True
+            seen.add(node)
+            version = self._io(self.ledger.get_version, binding, node)
+            if version is None or version.context.binding != binding:
+                raise CoordinationError('Head lineage is not committed to this binding')
+            node = version.context.parent_version_id
+        return False
+
     def _committed_head(self, row, version_id, name):
         """Prove `version_id` is a version committed to this exact binding/revision."""
         version = self._io(self.ledger.get_version, row.binding, version_id)
@@ -633,9 +648,17 @@ class CoordinationService:
                     or context.parent_version_id != row.heads.observed
                     or not self._io(self.ledger.verify_committed, ref)):
                 raise CoordinationError('Observation is stale, uncommitted or regresses the serialized head')
-        heads = c.Heads(update.observed or row.heads.observed,
-                        update.approved or row.heads.approved,
-                        update.deployed or row.heads.deployed)
+        # Governed heads may only advance along committed lineage, never regress.
+        for name in ('approved', 'deployed'):
+            value = getattr(update, name)
+            if value is not None and not self._advances(row.binding, getattr(row.heads, name), value):
+                raise CoordinationError(f'{name} head cannot regress or leave the committed lineage')
+        final_approved = row.heads.approved if update.approved is None else update.approved
+        final_deployed = row.heads.deployed if update.deployed is None else update.deployed
+        if final_deployed is not None and not self._advances(row.binding, final_deployed, final_approved):
+            raise CoordinationError('Deployed head must not lead the approved head')
+        heads = c.Heads(row.heads.observed if update.observed is None else update.observed,
+                        final_approved, final_deployed)
         row = self._cas(row, lambda r: r.attempt_id == fence.attempt_id, heads=heads)
         if observing:
             self._release(row)  # advance_heads is observation lease finalization.
