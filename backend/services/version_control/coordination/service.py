@@ -110,11 +110,21 @@ class CoordinationService:
         if result is None:
             raise OwnershipError('Serializable CAS lost; do not retry acquisition')
         observed = self._row(row.binding)
+        def _mismatch(key, value):
+            got = getattr(observed, key)
+            if got == value:
+                return False
+            # JSON columns re-read as frozen mappings/tuples; compare canonical wire
+            # form so a stored dict/list equals its read-back proxy/tuple.
+            try:
+                return c.to_wire(got) != c.to_wire(value)
+            except TypeError:
+                return True
         if (observed.row_version != row.row_version + 1
                 or observed.holder != changes.get('holder', row.holder)
                 or observed.attempt_id != changes.get('attempt_id', row.attempt_id)
                 or observed.generation != changes.get('generation', row.generation)
-                or any(getattr(observed, key) != value for key, value in changes.items())):
+                or any(_mismatch(key, value) for key, value in changes.items())):
             raise AuthorityUnavailable('CAS read-back did not prove exact ownership/claim')
         return observed
 
@@ -273,7 +283,7 @@ class CoordinationService:
             row.attempt_id, row.generation, row.row_version, reservation.request,
             preimage, row.approval_id, row.approval_digest)
         try:
-            self._publish_consumption(claim)
+            row = self._publish_consumption(claim, row)
         except CoordinationError:
             self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
                       state=c.CoordinationState.QUARANTINED,
@@ -281,10 +291,17 @@ class CoordinationService:
             raise
         return claim
 
-    def _publish_consumption(self, claim):
+    def _publish_consumption(self, claim, row=None):
         self._io(self.facts.publish_consumption, claim)
         if not self._io(self.facts.verify_flush, claim):
             raise AuthorityUnavailable('Consumption facts not durably verified')
+        # Truthful column: a durable consumption fact exists for the approval bound
+        # to THIS row. No approval bound means nothing was consumed.
+        if (row is not None and claim.approval_id is not None
+                and not row.approval_consumption_published):
+            return self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
+                             approval_consumption_published=True)
+        return row
 
     def _history(self, row, request):
         history = self._io(self.facts.lookup_request, row.binding, request.idempotency_key)
@@ -327,7 +344,7 @@ class CoordinationService:
                 raise CoordinationError('Terminal observation not committed to this binding')
         elif result.status in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP}:
             raise CoordinationError('Successful completion requires committed postimage')
-        self._publish_consumption(claim)
+        row = self._publish_consumption(claim, row)
         ref = self._fact(row, claim.request, c.FactStatus(result.status.value),
                          kind=c.FactKind.RECEIPT,
                          post_version_id=result.postimage.version_id if result.postimage else None)
@@ -368,6 +385,10 @@ class CoordinationService:
                 or trusted.attempt_id != row.attempt_id or trusted.execution_ref != row.executor_ref):
             raise CoordinationError('Trusted termination of the exact prior attempt is required')
         self._validate_termination(trusted)
+        # Persist validated evidence BEFORE any fact append, so a crash between the
+        # audit append and release leaves durable proof for the next worker.
+        row = self._cas(row, lambda r: r.attempt_id == evidence.fence.attempt_id,
+                        termination_evidence=c.to_wire(trusted))
         human = bool(evidence.human_authorization_reference and evidence.human_reason
                      and evidence.human_reason.strip() and evidence.residual_risk_acknowledged
                      and self._io(self.authorize_human_recovery, binding, evidence))
@@ -375,7 +396,7 @@ class CoordinationService:
         if not evidence.checkpoint_classification.strip():
             raise CoordinationError('Recovery checkpoint classification required')
         if row.admitted_at is not None:
-            self._publish_consumption(self._claim_from_row(row))
+            row = self._publish_consumption(self._claim_from_row(row), row)
         request = self._request(row)
         # Strip AdmissionClaim's extra fields at the frozen FenceToken wire seam.
         evidence = replace(evidence, fence=self._fence(row))
@@ -448,15 +469,14 @@ class CoordinationService:
                     or not self._io(self.validate_stage_evidence, claim, row, evidence)):
                 self._quarantine_row(row, 'GET does not prove synchronous send completion')
                 raise CoordinationError('Trusted send completion and committed observation required')
-        self._publish_consumption(claim)
+        row = self._publish_consumption(claim, row)
         checkpoint = dict(row.checkpoint or {})
         checkpoint.update(evidence=c.to_wire(evidence),
             resume_classification=('read-only-possible-send' if stage in {
                 c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
                 else 'read-only-unless-next-stage-proven-unsent'))
         self._cas(row, lambda r: r.mutation_stage == row.mutation_stage,
-                  mutation_stage=stage, checkpoint=checkpoint,
-                  approval_consumption_published=True)
+                  mutation_stage=stage, checkpoint=checkpoint)
 
     def observe_exclusively(self, binding: c.BindingRef,
                             executor: c.ExecutorContext) -> c.ObservationLease:

@@ -261,7 +261,15 @@ def test_admission_atomically_binds_key_digest_approval_and_preimage(h):
             h.service.admit(reservation, h.preimage, bad)
     assert h.store.compare_and_swap.call_count == 0
     claim = h.service.admit(reservation, h.preimage, h.grant)
-    assert h.store.compare_and_swap.call_count == 1
+    # The key/digest/approval/preimage binding is exactly ONE CAS (state=ADMITTED).
+    # BLOCK-10 adds a distinct post-admission CAS that only records the truthful
+    # approval_consumption_published column; it binds no admission fields.
+    admit_cas = [ca for ca in h.store.compare_and_swap.call_args_list
+                 if ca.kwargs.get('state') == c.CoordinationState.ADMITTED]
+    assert len(admit_cas) == 1
+    consumption_cas = [ca for ca in h.store.compare_and_swap.call_args_list
+                       if set(ca.kwargs) == {'approval_consumption_published'}]
+    assert h.store.compare_and_swap.call_count == len(admit_cas) + len(consumption_cas)
     row = h.store.read(h.binding.binding_id)
     assert (row.active_operation_id, row.idempotency_key, row.request_digest) == (
         h.request.operation_id, h.request.idempotency_key, h.request.request_digest)
@@ -425,6 +433,58 @@ def test_crashes_between_evidence_cas_consumption_patch_and_release_remain_safe(
     else:
         assert point == 'release'
         assert any(r.payload['fact_kind'] == 'receipt' for r in h.durable.state.rows)
+
+
+def test_consumption_and_termination_columns_are_truthful(h):
+    from backend.tests.vc_fakes.stores import CrashBoundary
+    durable_facts(h)
+    enroll(h)
+    # 1. approval-bearing admit: column True and fact table agrees.
+    claim = admit(h)
+    row = h.store.read(h.binding.binding_id)
+    assert row.approval_consumption_published is True
+    assert h.facts.approval_use(h.binding, h.grant.approval_id).operation_ids == (
+        claim.request.operation_id,)
+
+    # 5. _release resets it.
+    complete(h, claim)
+    row = h.store.read(h.binding.binding_id)
+    assert row.approval_consumption_published is False and row.approval_id is None
+
+    # 2. approval-less case: never claims a consumption.
+    h.request = c.RequestIdentity(uid(), 'key-noapproval', 'a' * 64)
+    h.grant = replace(h.grant, request=h.request, approval_id=None, approval_digest=None)
+    reservation = reserve(h)
+    claim2 = h.service.admit(reservation, h.preimage, h.grant)
+    assert h.store.read(h.binding.binding_id).approval_consumption_published is False
+    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
+    # 4. checkpoint does not flip the column on its own.
+    original = h.store.compare_and_swap
+    seen = []
+    h.store.compare_and_swap = lambda *a, **k: (seen.append(k), original(*a, **k))[1]
+    h.service.checkpoint(claim2, send.stage, send)
+    h.store.compare_and_swap = original
+    assert h.store.read(h.binding.binding_id).approval_consumption_published is False
+    assert not any(k.get('approval_consumption_published') is True for k in seen)
+    # Release claim2 so the binding is free for case 3.
+    h.service.quarantine(claim2, 'test teardown')
+    h.store.state.rows[:] = [replace(h.store.state.rows[0],
+        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
+        approval_id=None, approval_consumption_published=False, mutation_stage=None,
+        checkpoint=None, active_operation_id=None, idempotency_key=None, request_digest=None,
+        lease_expires_at=None, admitted_at=None, pre_version_id=None, preimage_digest=None)]
+
+    # 3. crash-before-publish is distinguishable: (approval bound, not published).
+    h.request = c.RequestIdentity(uid(), 'key-crash', 'b' * 64)
+    h.grant = replace(h.grant, request=h.request, approval_id=uid(), approval_digest='7' * 64)
+    reservation = reserve(h)
+    h.durable.failures.inject(CrashBoundary('before-commit'))
+    with pytest.raises(CoordinationError):
+        h.service.admit(reservation, h.preimage, h.grant)
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.QUARANTINED
+    assert row.approval_consumption_published is False
+    assert row.approval_id == h.grant.approval_id
 
 
 def test_checkpoint_is_monotonic_and_matching_get_cannot_finish_in_flight(h):

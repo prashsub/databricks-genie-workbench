@@ -104,6 +104,73 @@ def test_recovery_needs_exact_attempt_termination_and_three_post_termination_rea
         assert h.store.read(h.binding.binding_id).unresolved
 
 
+def test_recovery_persists_validated_termination_evidence_before_releasing(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    h.service.quarantine(claim, 'unknown send outcome')
+    evidence = recovery_evidence(h, claim)
+    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
+    h.termination.for_attempt.return_value = evidence.termination
+
+    # 6. evidence is durable at the moment the recovery fact is appended.
+    seen = {}
+    real_append = h.facts.append.side_effect
+
+    def capture(fact):
+        if fact.fact_kind == c.FactKind.RECOVERY:
+            seen['at_append'] = h.store.read(h.binding.binding_id).termination_evidence
+        return real_append(fact)
+
+    h.facts.append.side_effect = capture
+    result = h.service.recover(h.binding, evidence)
+    assert not result.unresolved
+    assert c.to_wire(seen['at_append']) == c.to_wire(evidence.termination)
+    # 9. released row clears the column; the durable RECOVERY fact persists.
+    assert h.store.read(h.binding.binding_id).termination_evidence is None
+    assert any(r.payload['fact_kind'] == 'recovery' for r in h.durable.state.rows)
+
+
+def test_recovery_does_not_persist_invalid_termination(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    h.service.quarantine(claim, 'unknown send outcome')
+    evidence = recovery_evidence(h, claim)
+    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
+    h.termination.for_attempt.return_value = evidence.termination
+    # 7. invalid termination never reaches the column.
+    bad = replace(evidence, termination=replace(evidence.termination, attempt_id=uid()))
+    with pytest.raises(CoordinationError):
+        h.service.recover(h.binding, bad)
+    assert h.store.read(h.binding.binding_id).termination_evidence is None
+
+
+def test_recovery_crash_between_audit_and_release_keeps_termination_durable(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    h.service.quarantine(claim, 'unknown send outcome')
+    evidence = recovery_evidence(h, claim)
+    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
+    h.termination.for_attempt.return_value = evidence.termination
+    # 8. crash between recovery append and release leaves evidence durable.
+    real_append = h.facts.append.side_effect
+
+    def append_then_break(fact):
+        ref = real_append(fact)
+        if fact.fact_kind == c.FactKind.RECOVERY:
+            h.facts.lookup_request.side_effect = OSError('audit read-back unavailable')
+        return ref
+
+    h.facts.append.side_effect = append_then_break
+    with pytest.raises(CoordinationError):
+        h.service.recover(h.binding, evidence)
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.QUARANTINED
+    assert c.to_wire(row.termination_evidence) == c.to_wire(evidence.termination)
+
+
 @pytest.mark.parametrize('missing', [None, 'authorization', 'reason', 'risk', 'trusted-policy'])
 def test_unknown_request_lifetime_disables_auto_clear(h, missing):
     durable_facts(h)
