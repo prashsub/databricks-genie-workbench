@@ -201,3 +201,21 @@ def test_description_timeout_and_5xx_quarantine_without_replay(rig, error):
     rig.transport.patch_description_once.assert_called_once()
     rig.coordination.quarantine.assert_called_once()
     rig.coordination.finish.assert_not_called()
+
+
+@pytest.mark.parametrize("read_number", [2, 3])
+def test_successful_patch_then_failed_readback_is_applied_unverified(rig, read_number):
+    reads = 0
+    def get(*args):
+        nonlocal reads
+        reads += 1
+        if reads == read_number:
+            raise RuntimeError("GET unavailable")
+        return rig.get(*args)
+    rig.transport.get.side_effect = get
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    assert result.unresolved
+    rig.coordination.finish.assert_not_called()
+    rig.coordination.quarantine.assert_called_once()
+    assert rig.facts.append.call_args.args[0].status == vc.FactStatus.APPLIED_UNVERIFIED

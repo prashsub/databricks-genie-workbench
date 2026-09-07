@@ -39,9 +39,12 @@ class MutationGate:
             self.transport.patch_config_once(request.binding, vc.to_wire(request.serialized_space), claim)
         except Exception:
             return self._unverified(request, executor, claim, "Config send outcome unknown")
-        checkpoint = self.canonicalizer.observe(self.transport.get(request.binding, executor))
-        middle = self._capture(request, executor, claim, checkpoint, "config_checkpoint", preimage.version_id)
-        self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, middle)
+        try:
+            checkpoint = self.canonicalizer.observe(self.transport.get(request.binding, executor))
+            middle = self._capture(request, executor, claim, checkpoint, "config_checkpoint", preimage.version_id)
+            self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, middle)
+        except Exception:
+            return self._unverified(request, executor, claim, "Config read-back evidence unavailable")
         if (checkpoint.fingerprints.config != desired.fingerprints.config
                 or checkpoint.fingerprints.benchmark != desired.fingerprints.benchmark
                 or checkpoint.fingerprints.metadata != snapshot.fingerprints.metadata
@@ -53,9 +56,12 @@ class MutationGate:
                 self.transport.patch_description_once(request.binding, request.description, claim)
             except Exception:
                 return self._unverified(request, executor, claim, "Description send outcome unknown")
-            final = self.canonicalizer.observe(self.transport.get(request.binding, executor))
-            postimage = self._capture(request, executor, claim, final, "postimage", preimage.version_id)
-            self._checkpoint(claim, vc.PatchStage.DESCRIPTION_OBSERVED, postimage)
+            try:
+                final = self.canonicalizer.observe(self.transport.get(request.binding, executor))
+                postimage = self._capture(request, executor, claim, final, "postimage", preimage.version_id)
+                self._checkpoint(claim, vc.PatchStage.DESCRIPTION_OBSERVED, postimage)
+            except Exception:
+                return self._unverified(request, executor, claim, "Description read-back evidence unavailable")
             if self.canonicalizer.compare(final, desired) != vc.Comparison.EQUAL:
                 return self._partial(request, claim, postimage, "Final state differs from desired")
         else:
