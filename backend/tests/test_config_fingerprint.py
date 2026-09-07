@@ -134,6 +134,25 @@ def test_metric_view_flattening_honours_declared_table_type() -> None:
         assert to_wire(adapter.observe(marked).serialized_space) == marked
 
 
+def test_vc_data_sources_addressed_order_independent_with_unaddressed_entry() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    submitted = _space()
+    submitted["data_sources"]["tables"] = [
+        {"identifier": "cat.sch.a"},
+        {"identifier": "cat.sch.b"},
+        {"name": "no-identifier"},
+    ]
+    observed = deepcopy(submitted)
+    tables = observed["data_sources"]["tables"]
+    tables[0], tables[1] = tables[1], tables[0]
+    assert (
+        adapter.observe(submitted).fingerprints.config
+        == adapter.observe(observed).fingerprints.config
+    )
+
+
 def test_absent_and_empty_metric_views_are_equal() -> None:
     from backend.services.config_fingerprint import Canonicalizer
 
