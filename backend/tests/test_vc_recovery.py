@@ -28,3 +28,29 @@ def test_expired_lease_quarantines_without_takeover(h, entry):
     assert any(call.args[0].status == c.FactStatus.QUARANTINED for call in h.facts.append.call_args_list)
     with pytest.raises(CoordinationError):
         reserve(h)
+
+
+def recovery_evidence(h, claim):
+    terminal = h.clock.now()
+    termination = c.TerminationEvidence(claim.attempt_id, h.executor.execution_ref,
+                                        'app-worker', terminal, (), 'a' * 64)
+    samples = tuple(c.RecoverySample(terminal + timedelta(seconds=i),
+                                     h.preimage.state_digest, 'b' * 64) for i in (1, 12, 23))
+    h.clock.advance(timedelta(seconds=30))
+    return c.RecoveryEvidence('VC/1.0', claim, termination, samples, 20.0,
+                              'verified-lifetime-reference', 'observed-preimage', None, None, False)
+
+
+def test_matching_get_after_timeout_cannot_resolve_attempt(h):
+    enroll(h)
+    claim = admit(h)
+    h.service.quarantine(claim, 'PATCH timeout; matching GET is observation only')
+    evidence = recovery_evidence(h, claim)
+    with pytest.raises(CoordinationError, match='termination'):
+        h.service.recover(h.binding, evidence)
+    with pytest.raises(CoordinationError):
+        h.service.assert_owner(claim)
+    with pytest.raises(CoordinationError):
+        h.service.finish(claim, c.OperationResult(claim.request.operation_id,
+            c.OperationStatus.CONFIRMED, claim.preimage, h.preimage, False, ('GET-matched',)))
+    assert h.store.read(h.binding.binding_id).unresolved

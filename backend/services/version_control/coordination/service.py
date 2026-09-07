@@ -319,3 +319,16 @@ class CoordinationService:
     def quarantine(self, claim: c.FenceToken, reason: str) -> None:
         row = self._owned(claim, allow_quarantine=True)
         self._quarantine_row(row, reason)
+
+    def recover(self, binding: c.BindingRef, evidence: c.RecoveryEvidence) -> c.RecoveryResult:
+        self._current(binding)
+        if evidence.fence.binding_id != binding.binding_id:
+            raise OwnershipError('Recovery fence belongs to another binding')
+        row = self._owned(evidence.fence, allow_quarantine=True)
+        if row.binding != binding or row.state != c.CoordinationState.QUARANTINED:
+            raise OwnershipError('Only the quarantined exact attempt can be recovered')
+        trusted = self._io(self.termination.for_attempt, row.executor_ref, row.attempt_id)
+        if (trusted is None or trusted != evidence.termination
+                or trusted.attempt_id != row.attempt_id or trusted.execution_ref != row.executor_ref):
+            raise CoordinationError('Trusted termination of the exact prior attempt is required')
+        raise CoordinationError('Automatic recovery disabled pending verified request lifetime')
