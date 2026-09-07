@@ -85,6 +85,91 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+@pytest.mark.parametrize('shape', ['config-only', 'description-only', 'config-and-description'])
+def test_checkpoint_stage_machine_is_scoped_to_the_admitted_operation(h, shape):
+    durable_facts(h)
+    enroll(h)
+    plans = {
+        'config-only': (c.PatchStage.CONFIG_PENDING, c.PatchStage.CONFIG_IN_FLIGHT,
+                        c.PatchStage.CONFIG_OBSERVED),
+        'description-only': (c.PatchStage.CONFIG_PENDING, c.PatchStage.DESCRIPTION_PENDING,
+                             c.PatchStage.DESCRIPTION_IN_FLIGHT, c.PatchStage.DESCRIPTION_OBSERVED),
+        'config-and-description': tuple(c.PatchStage),
+    }
+    h.service._planned_stages = staticmethod(lambda auth: plans[shape])
+    claim = admit(h)
+
+    def cp(stage, observation=None):
+        h.service.checkpoint(claim, stage,
+            c.StageEvidence('VC/1.0', stage, h.clock.now(), 'a' * 64, observation))
+
+    planned = plans[shape]
+    if shape == 'config-only':
+        cp(c.PatchStage.CONFIG_IN_FLIGHT)
+        cp(c.PatchStage.CONFIG_OBSERVED, h.preimage)
+        # 2. a description stage is not part of this operation.
+        with pytest.raises(CoordinationError, match='not part of this admitted operation'):
+            cp(c.PatchStage.DESCRIPTION_PENDING)
+        assert h.store.read(h.binding.binding_id).mutation_stage == c.PatchStage.CONFIG_OBSERVED
+        # 1. terminate from CONFIG_OBSERVED.
+        complete(h, claim)
+        assert not h.store.read(h.binding.binding_id).unresolved
+        return
+
+    if shape == 'description-only':
+        # 3. first checkpoint is DESCRIPTION_PENDING and succeeds from CONFIG_PENDING.
+        cp(c.PatchStage.DESCRIPTION_PENDING)
+        assert h.store.read(h.binding.binding_id).mutation_stage == c.PatchStage.DESCRIPTION_PENDING
+        # 4. a config stage is not part of this operation.
+        with pytest.raises(CoordinationError):
+            cp(c.PatchStage.CONFIG_IN_FLIGHT)
+        return
+
+    # config-and-description: walk all planned transitions.
+    for stage in planned[1:]:
+        obs = h.preimage if stage in {c.PatchStage.CONFIG_OBSERVED,
+                                      c.PatchStage.DESCRIPTION_OBSERVED} else None
+        cp(stage, obs)
+    assert h.store.read(h.binding.binding_id).mutation_stage == planned[-1]
+
+
+def test_checkpoint_replay_skip_and_attempt_fencing(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
+    h.service.checkpoint(claim, send.stage, send)
+    # 5. replay current stage raises.
+    with pytest.raises(CoordinationError):
+        h.service.checkpoint(claim, send.stage, send)
+    # skipping a planned stage raises.
+    with pytest.raises(CoordinationError):
+        h.service.checkpoint(claim, c.PatchStage.DESCRIPTION_PENDING,
+            c.StageEvidence('VC/1.0', c.PatchStage.DESCRIPTION_PENDING, h.clock.now(), 'a' * 64, None))
+
+    # 6. attempt fencing: a foreign attempt_id row is rejected without change.
+    row = h.store.read(h.binding.binding_id)
+    foreign = replace(row, attempt_id=uid())
+    h.store.state.rows[:] = [foreign]
+    observed = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED, h.clock.now(), 'a' * 64, h.preimage)
+    with pytest.raises(CoordinationError):
+        h.service.checkpoint(claim, observed.stage, observed)
+    after = h.store.read(h.binding.binding_id)
+    assert after.attempt_id == foreign.attempt_id
+    assert after.mutation_stage == c.PatchStage.CONFIG_IN_FLIGHT
+
+    # 7. recorded_at bounds raise with a distinguishable message.
+    h.store.state.rows[:] = [row]
+    with pytest.raises(CoordinationError, match='recorded'):
+        h.service.checkpoint(claim, c.PatchStage.CONFIG_OBSERVED,
+            c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED,
+                            h.clock.now() + timedelta(seconds=1), 'a' * 64, h.preimage))
+    with pytest.raises(CoordinationError, match='recorded'):
+        h.service.checkpoint(claim, c.PatchStage.CONFIG_OBSERVED,
+            c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_OBSERVED,
+                            row.admitted_at - timedelta(seconds=1), 'a' * 64, h.preimage))
+
+
 @pytest.mark.parametrize('case', ['confirmed-no-postimage', 'wrong-preimage',
     'wrong-operation-id', 'compensation-attempted', 'noop-no-postimage'])
 def test_finish_releases_only_on_proven_presend_failure(h, case):

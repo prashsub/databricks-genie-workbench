@@ -286,7 +286,8 @@ class CoordinationService:
             approval_id=authorization.approval_id, approval_digest=authorization.approval_digest,
             expected_base_fingerprint=authorization.expected_base_fingerprints.state_digest,
             admitted_at=self.clock.now(), mutation_stage=c.PatchStage.CONFIG_PENDING,
-            checkpoint={'schema_version': 'VC/1.0', 'preimage': c.to_wire(preimage)},
+            checkpoint={'schema_version': 'VC/1.0', 'preimage': c.to_wire(preimage),
+                        'stages': [s.value for s in self._planned_stages(authorization)]},
             **evidence)
         claim = c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
             row.attempt_id, row.generation, row.row_version, reservation.request,
@@ -504,14 +505,28 @@ class CoordinationService:
                 or (not human and (samples[-1].observed_at - samples[0].observed_at).total_seconds() <= capability[0])):
             raise CoordinationError('Need three stable post-termination GETs spanning beyond verified lifetime')
 
+    @staticmethod
+    def _planned_stages(authorization):
+        # M03 does not decide which fields change; M04's rendering does. Derive the
+        # planned sequence from the validated grant, defaulting conservatively to
+        # the full config+description march when no plan is declared (NB-5).
+        planned = getattr(authorization, 'planned_stages', None)
+        if not planned:
+            return tuple(c.PatchStage)
+        return tuple(planned)
+
     def checkpoint(self, claim: c.AdmissionClaim, stage: c.PatchStage,
                    evidence: c.StageEvidence) -> None:
         self.assert_owner(claim)
         row = self._owned(claim)
-        stages = list(c.PatchStage)
         if (evidence.stage != stage or evidence.recorded_at > self.clock.now()
-                or evidence.recorded_at < row.admitted_at
-                or stages.index(stage) != stages.index(row.mutation_stage) + 1):
+                or evidence.recorded_at < row.admitted_at):
+            raise CoordinationError('Checkpoint evidence has a stale stage or recorded_at')
+        planned = [c.PatchStage(v) for v in ((row.checkpoint or {}).get('stages')
+                                             or [s.value for s in c.PatchStage])]
+        if row.mutation_stage not in planned or stage not in planned:
+            raise CoordinationError('Stage is not part of this admitted operation')
+        if planned.index(stage) != planned.index(row.mutation_stage) + 1:
             raise CoordinationError('Checkpoint stage must advance exactly once, never replay or skip')
         observed = stage in {c.PatchStage.CONFIG_OBSERVED, c.PatchStage.DESCRIPTION_OBSERVED}
         if observed:
@@ -529,7 +544,8 @@ class CoordinationService:
             resume_classification=('read-only-possible-send' if stage in {
                 c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
                 else 'read-only-unless-next-stage-proven-unsent'))
-        self._cas(row, lambda r: r.mutation_stage == row.mutation_stage,
+        self._cas(row, lambda r: (r.attempt_id == claim.attempt_id
+                                  and r.mutation_stage == row.mutation_stage),
                   mutation_stage=stage, checkpoint=checkpoint)
 
     def observe_exclusively(self, binding: c.BindingRef,
