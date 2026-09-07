@@ -1,6 +1,29 @@
 """Validate effective privileges, including inheritance, without widening grants."""
 
 FACT_TABLES = frozenset({"genie_space_versions", "genie_space_registry", "genie_space_operations"})
+ARTIFACT_VOLUMES = frozenset({"vc_snapshots", "vc_approval_evidence", "vc_outbound_packages", "vc_target_receipts"})
+
+
+def verify_artifact_permissions(volumes, expected_writers, operation_writers, source_principals) -> bool:
+    if set(volumes) != ARTIFACT_VOLUMES or set(expected_writers) != ARTIFACT_VOLUMES:
+        return False
+    if not operation_writers or set(operation_writers) & set(source_principals):
+        return False
+    if len(set(expected_writers.values())) != len(ARTIFACT_VOLUMES) or not all(expected_writers.values()):
+        return False
+    securables = set()
+    runtime_principals = set(expected_writers.values()) | set(source_principals) | set(operation_writers)
+    for name, volume in volumes.items():
+        securable = volume.get("securable", "")
+        if (len(securable.split(".")) != 3 or not securable.endswith(f".{name}")
+                or "/" in securable or volume.get("privileges_verified") is not True
+                or not volume.get("owner") or volume["owner"] in runtime_principals
+                or set(volume.get("writers", ())) != {expected_writers[name]}):
+            return False
+        if name != "vc_outbound_packages" and expected_writers[name] in source_principals:
+            return False
+        securables.add(securable)
+    return len(securables) == len(ARTIFACT_VOLUMES)
 
 
 def verify_coordination_permissions(proof) -> bool:

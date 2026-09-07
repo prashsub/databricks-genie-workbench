@@ -2,7 +2,7 @@
 
 from .bundles import bundle_detection_evidence, deployment_inventory, guard_bundle, preflight_deployment
 from .provisioning import provision
-from .permissions import verify_coordination_permissions, verify_fact_permissions
+from .permissions import verify_artifact_permissions, verify_coordination_permissions, verify_fact_permissions
 from .capabilities import storage_write_ready
 from .identity import PlatformIdentityProvider, TrustedSnapshotReader, verify_configured_job_run_as, verify_job_run_as
 from .jobs import GovernedJobRuntime, LocalJobDispatcher

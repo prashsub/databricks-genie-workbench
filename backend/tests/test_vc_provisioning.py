@@ -186,3 +186,37 @@ def test_bundle_inventory_guard_rejects_governed_content_and_exports_detection_e
     assert deploy.index("_preflight_check_vc_bundle_content") < deploy.index("DEPLOYER=$(databricks current-user")
     installer = (ROOT / "scripts/deploy_lib/install.py").read_text()
     assert installer.index("preflight_deployment(Path(cfg.repo_root") < installer.index("ensure_app(w, cfg)")
+
+
+def test_artifact_grants_require_distinct_volume_securables_and_writers():
+    verify = getattr(platform, "verify_artifact_permissions", None)
+    assert callable(verify), "Volume prefixes are not separate grant boundaries"
+    writers = dict(vc_snapshots="observer", vc_approval_evidence="approval-service",
+                   vc_outbound_packages="source", vc_target_receipts="target")
+    volumes = {name: {"securable": f"catalog.control.{name}", "writers": {writer},
+                      "owner": "provisioner", "privileges_verified": True}
+               for name, writer in writers.items()}
+    assert verify(volumes, writers, {"target"}, {"source"}) is True
+    for name in ("vc_approval_evidence", "vc_target_receipts"):
+        bad = {key: dict(row) for key, row in volumes.items()}
+        bad[name]["writers"] = {"source", writers[name]}
+        assert verify(bad, writers, {"target"}, {"source"}) is False
+    shared = {key: dict(row, securable="catalog.control.shared") for key, row in volumes.items()}
+    assert verify(shared, writers, {"target"}, {"source"}) is False
+    assert verify(volumes, writers, {"target", "source"}, {"source"}) is False
+    assert verify(volumes, writers, {"target"}, {"source", "provisioner"}) is False
+
+
+@pytest.mark.integration
+def test_package_approval_receipt_securables_have_separate_writers(live_platform):
+    expected = {"vc_snapshots": "observer", "vc_approval_evidence": "approval",
+                "vc_outbound_packages": "source", "vc_target_receipts": "executor"}
+    for volume, writer in expected.items():
+        live_platform.assert_sql_succeeds(writer, f"{volume}.write")
+        for other in set(expected.values()) - {writer}:
+            live_platform.assert_sql_denied(other, f"{volume}.write")
+    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
+    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
+    for action in ("insert", "update", "delete", "alter"):
+        live_platform.assert_sql_denied("source", f"genie_space_operations.{action}")
+    live_platform.assert_sql_denied("source", "genie_space_operations.read")
