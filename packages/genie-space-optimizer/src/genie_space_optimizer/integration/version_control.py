@@ -82,6 +82,8 @@ class ChampionRun:
         self.abandoned = False
         self.receipt = None
         self.post_version = None
+        self.pre_version = None
+        self.evidence_references = ()
 
     def record_iteration(self, champion_id: str, payload: dict, score: float):
         from copy import deepcopy
@@ -95,6 +97,8 @@ class ChampionRun:
             raise PermissionError("An abandoned run cannot apply a champion")
         receipt = self.adapter.apply(self.run_id, champion_id, binding, expected_base, executor)
         self.receipt = receipt
+        self.pre_version = receipt.preimage
+        self.evidence_references = receipt.evidence_references
         if receipt.status != "confirmed" or receipt.unresolved or receipt.postimage is None:
             raise RuntimeError("Champion has no verified final post-version")
         self.post_version = receipt.postimage
