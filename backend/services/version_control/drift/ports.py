@@ -14,6 +14,12 @@ class ReconcilePolicy(Protocol):
     def authorize_acknowledgement(self, inputs: vc.ApprovalInputs, actor: vc.ActorContext) -> bool: ...
 
 
+class CoordinationReadiness(Protocol):
+    def assert_available(self, binding: vc.BindingRef) -> None:
+        """Require authoritative coordination/evidence; never a memory or Lakebase fallback."""
+        ...
+
+
 @dataclass(frozen=True)
 class ScanEntry(vc.WireValue):
     binding: vc.BindingRef

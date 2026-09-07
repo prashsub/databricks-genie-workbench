@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control.drift.errors import ReconcileError
 
 
 class ReconcileBody(BaseModel):
@@ -23,6 +24,8 @@ def _invoke(call):
         return vc.to_wire(call())
     except HTTPException:
         raise
+    except ReconcileError as error:
+        raise HTTPException(error.http_status, detail=vc.to_wire(error.error)) from error
     except PermissionError as error:
         code, status, stale = "scope_denied", 403, False
         message = str(error)

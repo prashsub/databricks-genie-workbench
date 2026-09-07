@@ -103,7 +103,7 @@ def test_unreachable_and_unverified_override_ordinary_badges(
 
 def projection_setup():
     from backend.services.version_control.drift import DriftService
-    from backend.services.version_control.drift.ports import Projections
+    from backend.services.version_control.drift.ports import CoordinationReadiness, Projections
     from backend.tests.test_vc_reconcile import NOW, observed_result
     from backend.tests.vc_fakes.fixtures import binding_fixture
 
@@ -115,7 +115,8 @@ def projection_setup():
     registry.resolve.return_value = binding_fixture()
     authorize = Mock(return_value=True)
     service = DriftService(canonicalizer=FakeCanonicalizer(), projections=projections, observer=observer,
-                           registry=registry, authorize_history=authorize, clock=lambda: NOW)
+                           registry=registry, authorize_history=authorize, clock=lambda: NOW,
+                           readiness=Mock(spec=CoordinationReadiness))
     return service, projections, observer, registry, authorize
 
 

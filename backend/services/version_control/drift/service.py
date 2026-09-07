@@ -6,7 +6,8 @@ from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
 
-from .ports import ApprovedTargets, BindingInventory, BundleInventory, Projections, ReconcilePolicy
+from .errors import ReconcileError
+from .ports import ApprovedTargets, BindingInventory, BundleInventory, CoordinationReadiness, Projections, ReconcilePolicy
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,8 @@ class DriftService:
                  scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30),
                  bundles: BundleInventory | None = None, coordination: vc.Coordination | None = None,
                  registry: vc.Registry | None = None, authorize_history=None,
-                 stale_after=timedelta(minutes=30), approved_targets: ApprovedTargets | None = None):
+                 stale_after=timedelta(minutes=30), approved_targets: ApprovedTargets | None = None,
+                 readiness: CoordinationReadiness | None = None):
         if not 1 <= batch_size <= 100 or full_fetch_interval <= timedelta(0):
             raise ValueError("Invalid scan bounds or full-fetch interval")
         self.canonicalizer = canonicalizer
@@ -56,6 +58,7 @@ class DriftService:
         self.authorize_history = authorize_history
         self.stale_after = stale_after
         self.approved_targets = approved_targets
+        self.readiness = readiness
 
     def overview(self, actor: vc.ActorContext, cursor: str | None = None, limit: int = 100) -> vc.OverviewPage:
         if not 1 <= limit <= 100:
@@ -78,6 +81,18 @@ class DriftService:
             raise RuntimeError("Projection reader unavailable")
         return self._projected_status(binding, self.projections.get(binding, actor))
 
+    def history(self, binding: vc.BindingRef, actor: vc.ActorContext,
+                cursor: str | None = None, limit: int = 100) -> vc.VersionPage:
+        self._history_scope(binding, actor)
+        if not 1 <= limit <= 100:
+            raise ValueError("History limit must be between 1 and 100")
+        if self.ledger is None:
+            raise RuntimeError("History reader unavailable")
+        page = self.ledger.history(binding, cursor, limit)
+        if len(page.items) > limit or any(item.binding_id != binding.binding_id for item in page.items):
+            raise PermissionError("History page scope or bound mismatch")
+        return page
+
     def _history_scope(self, binding, actor):
         if (binding.workspace_id != actor.workspace_id or self.authorize_history is None
                 or self.authorize_history(actor, binding) is not True):
@@ -86,6 +101,11 @@ class DriftService:
     def _projected_status(self, binding, status):
         if status.binding_id != binding.binding_id or status.binding_revision != binding.binding_revision:
             raise PermissionError("Projection binding scope mismatch")
+        try:
+            self._require_coordination(binding)
+        except Exception:
+            status = replace(status, stale=True, allowed_actions=(),
+                             reasons=(*status.reasons, "Coordination unavailable; history remains read-only"))
         stale = (status.stale or status.projection_as_of > self.clock()
                  or self.clock() - status.projection_as_of >= self.stale_after
                  or status.observed_at is None or status.observed_at > self.clock()
@@ -135,8 +155,10 @@ class DriftService:
                     results.append(status)
                     continue
                 conflicts = ()
-                if entry.governed_by == "workbench" and self.bundles is not None:
+                if entry.governed_by == "workbench":
                     status = replace(status, drift=vc.DriftState.UNKNOWN, allowed_actions=())
+                    if self.bundles is None:
+                        raise RuntimeError("Sanctioned bundle inventory unavailable")
                     bundle_snapshot = self.bundles.for_binding(entry.binding)
                     if not bundle_snapshot.complete:
                         raise RuntimeError("Sanctioned bundle inventory incomplete")
@@ -159,6 +181,7 @@ class DriftService:
                     if captured.busy or status.stale:
                         status = self._bundle_status(status, conflicts)
                         raise RuntimeError("Observation busy or unavailable")
+                    status = self._observed_status(entry.binding, status)
                     status = self._bundle_status(status, conflicts)
                     full_fetch_at = self.clock()
                 self.projections.publish(entry.binding, status, full_fetch_at, entry.api_update_time)
@@ -184,6 +207,27 @@ class DriftService:
 
     def reconcile(self, binding: vc.BindingRef, action: vc.ReconcileRequest,
                   actor: vc.ActorContext) -> vc.OperationHandle:
+        try:
+            return self._reconcile(binding, action, actor)
+        except ReconcileError as error:
+            if error.error.operation_id is None:
+                error.error = replace(error.error, operation_id=action.identity.operation_id)
+            raise
+        except (ValueError, TypeError) as error:
+            raise ReconcileError("request_conflict", str(error), http_status=409,
+                                 operation_id=action.identity.operation_id) from error
+        except PermissionError:
+            raise
+        except Exception as error:
+            raise ReconcileError("evidence_unavailable", "Coordination or evidence unavailable; poll operation, do not replay",
+                                 operation_id=action.identity.operation_id) from error
+
+    def _require_coordination(self, binding):
+        if self.readiness is None:
+            raise RuntimeError("Authoritative coordination readiness unavailable")
+        self.readiness.assert_available(binding)
+
+    def _reconcile(self, binding, action, actor):
         if self.reconcile_enabled is not True:
             raise PermissionError("VC reconciliation writes disabled")
         if (self.identity is None or actor.workspace_id != binding.workspace_id
@@ -199,6 +243,7 @@ class DriftService:
             raise PermissionError("VC reconciliation Job dispatch disabled")
         if self.ledger is None or self.policy is None or self.approvals is None:
             raise RuntimeError("Reconciliation policy/evidence unavailable")
+        self._require_coordination(binding)
         captured = self.prepare_choice(binding)
         base = self.ledger.get_version(binding, captured.status.heads.observed)
         if (base.context.binding != binding or base.version_id != captured.status.heads.observed
@@ -289,19 +334,11 @@ class DriftService:
             raise RuntimeError("Target-local observer unavailable")
         captured = self.observer.capture(binding, "reconcile", self.executor)
         status = captured.status
-        if status.drift == vc.DriftState.UNKNOWN and not captured.busy and not status.stale and self.ledger is not None:
-            class BoundVersions:
-                def get(inner, reference):
-                    version = self.ledger.get_version(binding, reference)
-                    if version.context.binding != binding or version.version_id != reference:
-                        raise PermissionError("History binding mismatch")
-                    return version.snapshot
-
-            result = self.classify(status.heads, BoundVersions(), "reachable",
-                                   quarantined=status.quarantined,
-                                   unresolved_operation_id=status.unresolved_operation_id, target_binding=binding)
-            status = replace(status, drift=result.state, reasons=result.reasons,
-                             allowed_actions=result.allowed_actions)
+        if (status.quarantined or status.unresolved_operation_id
+                or status.drift == vc.DriftState.APPLIED_UNVERIFIED):
+            raise ReconcileError("binding_locked", "Quarantine or unresolved operation requires authorized recovery", http_status=423)
+        if not captured.busy and not status.stale:
+            status = self._observed_status(binding, status)
             captured = replace(captured, status=status)
         if (captured.busy or status.stale or status.quarantined or status.unresolved_operation_id
                 or status.binding_id != binding.binding_id
@@ -311,6 +348,22 @@ class DriftService:
                                     vc.DriftState.APPLIED_UNVERIFIED, vc.DriftState.CONFLICTED)):
             raise RuntimeError("Fresh durable observation unavailable or binding blocked")
         return captured
+
+    def _observed_status(self, binding, status):
+        if (self.ledger is None or status.drift in (vc.DriftState.UNREACHABLE, vc.DriftState.CONFLICTED,
+                                                   vc.DriftState.APPLIED_UNVERIFIED)):
+            return status
+
+        class BoundVersions:
+            def get(inner, reference):
+                version = self.ledger.get_version(binding, reference)
+                if version.context.binding != binding or version.version_id != reference:
+                    raise PermissionError("History binding mismatch")
+                return version.snapshot
+
+        result = self.classify(status.heads, BoundVersions(), "reachable", quarantined=status.quarantined,
+                               unresolved_operation_id=status.unresolved_operation_id, target_binding=binding)
+        return replace(status, drift=result.state, reasons=result.reasons, allowed_actions=result.allowed_actions)
 
     def classify(self, heads: vc.Heads, versions: vc.VersionLookup, reachability: str, *,
                  unresolved_operation_id=None, quarantined=False, conflicted=False, target_binding=None):
