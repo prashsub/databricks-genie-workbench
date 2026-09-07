@@ -129,5 +129,19 @@
       "conversation_id": "3773493063976023",
       "worktree": "worktrees/m10"
     }
-  ]
+  ],
+  "reviews": {
+    "m07": {
+      "status": "in_review",
+      "conversation_id": "3773493063976118",
+      "vendor": "claude_code",
+      "diff": ".polly/m07.diff"
+    },
+    "xmod_identity_fix": {
+      "status": "in_progress",
+      "conversation_id": "3773493063976114",
+      "vendor": "codex",
+      "note": "BLOCKER1 actor_kind service_principal->service + human/user drift in M08 identity.py; BLOCKER2 M04 retry-on-requested-only investigation"
+    }
+  }
 }
