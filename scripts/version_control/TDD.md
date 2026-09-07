@@ -21,6 +21,7 @@ No live profile was selected and no platform mutations were attempted.
 | t14 | Missing artifact-grant verifier assertion | Four distinct Volume securables/writers, nonowner runtime identities and target-only operations writers required. Live positive/negative Volume writes, package/receipt reads and source-denied operations probes integration-marked, NOT EXECUTED. |
 | t15 | Missing composition safety gate assertion | First enable requires every storage/identity/evidence/authorization/recovery/live-permission/concurrency/failure-matrix capability, required ports and all writer routes. No success caching; outages leave history readable and writes denied. All App switches explicitly false; root composition still has no integrations. |
 | t16 | Missing repeatability runner and topology verifier assertions | Offline command-order/selection/content-change and unsupported-topology gates pass. Real root+package strict validation, root deployment/provisioning twice, unchanged full Genie content and stable resource identities tests marked integration; source/target transport probe also marked integration. NOT EXECUTED: deployment blockers. |
+| t09 follow-up | SDK-shaped SP identity (`userName`, numeric SCIM id) wrongly rejected | Verify raw SCIM SP applicationId/userName and live X-Databricks-Org-Id; never trust SDK cached workspace config. OBO still binds the user SCIM id and never falls back. |
 
 The five integration tests can be collected/run with the same three-file command
 plus `-m integration`. The fixture verifies each explicit profile's live host,

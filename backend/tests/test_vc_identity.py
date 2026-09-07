@@ -48,6 +48,7 @@ def test_explicit_profile_host_workspace_mismatch_is_rejected():
     client.config.auth_type = "oauth-m2m"
     client.get_workspace_id.return_value = "target"
     client.current_user.me.return_value = SimpleNamespace(application_id="target-sp", id="scim-id")
+    client.api_client.do.return_value = {"userName": "target-sp", "id": "scim-id", "X-Databricks-Org-Id": "target"}
     factory = Mock(return_value=client)
     provider = provider_type(profiles={"target-test": factory})
     selection = ExplicitExecutorSelection("target", "https://target.example", "target-sp", "42", "target-test")
@@ -117,13 +118,14 @@ def test_obo_executor_is_request_bound_and_never_falls_back():
     client.config.auth_type = "pat"
     client.get_workspace_id.return_value = "target"
     client.current_user.me.return_value = SimpleNamespace(application_id=None, id="viewer")
+    client.api_client.do.return_value = {"id": "viewer", "X-Databricks-Org-Id": "target"}
     provider = platform.PlatformIdentityProvider(obo_executors={"session": lambda: client})
     selection = ExplicitExecutorSelection("target", "https://target.example", "viewer", "session", None)
     assert provider.executor(selection).actor_kind == "user"
     from dataclasses import replace
     with pytest.raises(PermissionError):
         provider.executor(replace(selection, execution_ref="other-session"))
-    client.current_user.me.side_effect = PermissionError("expired user token")
+    client.api_client.do.side_effect = PermissionError("expired user token")
     with pytest.raises(PermissionError):
         provider.executor(selection)
 
@@ -165,3 +167,22 @@ def test_worker_termination_evidence_is_positive_and_attempt_specific():
     assert provider.for_attempt("worker:1", attempt_id).app_worker_proof_digest == "b" * 64
     worker.return_value["terminated_at"] = now + timedelta(hours=1)
     assert provider.for_attempt("worker:1", attempt_id) is None
+
+
+def test_executor_uses_live_scim_workspace_header_not_cached_config():
+    client = Mock()
+    client.config.host = "https://target.example"
+    client.config.auth_type = "oauth-m2m"
+    client.get_workspace_id.return_value = "target"
+    client.current_user.me.return_value = SimpleNamespace(id="123", user_name="target-sp")
+    raw = {"id": "123", "userName": "target-sp", "X-Databricks-Org-Id": "target"}
+    client.api_client.do.return_value = raw
+    provider = platform.PlatformIdentityProvider(profiles={"target-test": lambda: client})
+    selection = ExplicitExecutorSelection("target", "https://target.example", "target-sp", "42", "target-test")
+    assert provider.executor(selection).principal_id == "target-sp"
+    raw["X-Databricks-Org-Id"] = "source"
+    with pytest.raises(PermissionError, match="workspace"):
+        provider.executor(selection)
+    del raw["X-Databricks-Org-Id"]
+    with pytest.raises(PermissionError, match="workspace"):
+        provider.executor(selection)

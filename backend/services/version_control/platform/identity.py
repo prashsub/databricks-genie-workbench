@@ -76,10 +76,18 @@ class PlatformIdentityProvider:
 
     @staticmethod
     def _verify_client(client, host, workspace_id, principal_id):
-        if canonical_host(client.config.host) != host or str(client.get_workspace_id()) != workspace_id:
+        if canonical_host(client.config.host) != host:
             raise PermissionError("Executor host/workspace mismatch")
-        identity = client.current_user.me()
-        actual = getattr(identity, "application_id", None) or getattr(identity, "id", None)
+        identity = client.api_client.do("GET", "/api/2.0/preview/scim/v2/Me",
+                                        response_headers=["X-Databricks-Org-Id"])
+        if str(identity.get("X-Databricks-Org-Id", "")) != workspace_id:
+            raise PermissionError("Executor host/workspace mismatch")
+        if client.config.auth_type == "oauth-m2m":
+            actual = identity.get("applicationId") or identity.get("userName")
+        elif client.config.auth_type == "pat":
+            actual = identity.get("id")
+        else:
+            raise PermissionError("Executor authentication type changed")
         if actual != principal_id:
             raise PermissionError("Executor principal mismatch")
 
