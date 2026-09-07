@@ -109,7 +109,9 @@
     {
       "id": "M05",
       "desc": "Drift/reconciliation",
-      "status": "DISPATCHING (M04 integrated, unblocked)"
+      "status": "DISPATCHED codex/Astra conv 3773493063975966, worktree worktrees/m05 @ 6c5ae3a. Strict TDD, mocks M01-M04/M06/M08 via VC/1.0 ports. Owned: drift/ pkg, routers/vc_reconcile.py, jobs/vc_reconcile.py, tests test_vc_drift/test_vc_reconcile/test_vc_dual_authority. Badges compare approved/deployed not live==observed, states distinct, dual-authority (DAB resources.genie_spaces) detection, adopt=new approval, reapply=fresh auth. Write switches default-off. Integration tests as honest blockers. Incremental commits mandatory. Offline baseline 975.",
+      "conversation_id": "3773493063975966",
+      "worktree": "worktrees/m05"
     },
     {
       "id": "M07",
@@ -119,7 +121,9 @@
     {
       "id": "M10",
       "desc": "Optimizer champion integration",
-      "status": "QUEUED (M04 integrated, unblocked; dispatch after M05 or on free endpoint)"
+      "status": "DISPATCHED pi/Astra conv 3773493063975984, worktree worktrees/m10 @ 6c5ae3a. Strict TDD, mocks backend VC modules via VC/1.0 ports (optimizer_adapter.py is the seam). Owned: packages/genie-space-optimizer/** EXCEPT databricks.yml (M08), NEW backend/services/version_control/optimizer_adapter.py + test_vc_optimizer_adapter.py, package tests test_vc_champion_apply/candidate_isolation/revert_guard. REAL revert.py = packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py (located by integrator). Candidates isolated resources not managed binding, <=1 optimizer-origin version/run, RETIRE in-process revert for guarded Job restore, champion apply thru M04 gate. Write switches default-off. Incremental commits mandatory. Offline baseline 975.",
+      "conversation_id": "3773493063975984",
+      "worktree": "worktrees/m10"
     }
   ]
 }
