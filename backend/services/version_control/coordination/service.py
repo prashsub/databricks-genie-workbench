@@ -358,15 +358,23 @@ class CoordinationService:
     def finish(self, claim: c.AdmissionClaim, result: c.OperationResult) -> None:
         self.assert_owner(claim)
         row = self._owned(claim)
+        # Argument checks that cannot depend on mutation state run first and reject
+        # a caller mistake without touching row state (409, binding intact).
+        if (result.operation_id != row.active_operation_id
+                or result.preimage != claim.preimage):
+            raise CoordinationError('Result does not identify this admitted operation')
+        # Possible-send: assume-possible-send obligation (C5.7); quarantine.
         if (row.mutation_stage in {c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
                 or result.unresolved or result.status in {
                     c.OperationStatus.APPLIED_UNVERIFIED, c.OperationStatus.APPLIED_PARTIAL}):
             self._quarantine_row(row, 'Possible send remains unresolved; GET cannot prove termination')
             raise CoordinationError('In-flight or ambiguous result cannot release the attempt')
-        if (result.operation_id != row.active_operation_id or result.preimage != claim.preimage
-                or result.unresolved or result.status not in {
-                    c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP,
-                    c.OperationStatus.CONFLICTED, c.OperationStatus.FAILED}):
+        if result.status not in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP,
+                                 c.OperationStatus.CONFLICTED, c.OperationStatus.FAILED}:
+            if self._presend(row):
+                return self._reject(row, claim.request,
+                    'Non-terminal result on a proven pre-send attempt',
+                    status=c.FactStatus.FAILED)
             raise CoordinationError('Not a resolved terminal result')
         if result.postimage is not None:
             if ((result.postimage.binding_id, result.postimage.binding_revision) !=
@@ -374,6 +382,10 @@ class CoordinationService:
                     or not self._io(self.ledger.verify_committed, result.postimage)):
                 raise CoordinationError('Terminal observation not committed to this binding')
         elif result.status in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP}:
+            if self._presend(row):
+                return self._reject(row, claim.request,
+                    'Successful completion requires committed postimage',
+                    status=c.FactStatus.FAILED)
             raise CoordinationError('Successful completion requires committed postimage')
         row = self._publish_consumption(claim, row)
         ref = self._fact(row, claim.request, c.FactStatus(result.status.value),

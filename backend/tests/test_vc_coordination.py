@@ -85,6 +85,94 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
         reserve(h)
 
 
+@pytest.mark.parametrize('case', ['confirmed-no-postimage', 'wrong-preimage',
+    'wrong-operation-id', 'compensation-attempted', 'noop-no-postimage'])
+def test_finish_releases_only_on_proven_presend_failure(h, case):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    row = h.store.read(h.binding.binding_id)
+    # _presend holds: CONFIG_PENDING and no resume_classification.
+    assert row.mutation_stage == c.PatchStage.CONFIG_PENDING
+    assert 'resume_classification' not in (row.checkpoint or {})
+
+    if case == 'confirmed-no-postimage':
+        result = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
+                                   claim.preimage, None, False, ('x',))
+    elif case == 'wrong-preimage':
+        result = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
+            c.ObservationRef(uid(), h.binding.binding_id, 1, '2' * 64, '5' * 64), h.preimage, False, ('x',))
+    elif case == 'wrong-operation-id':
+        result = c.OperationResult(uid(), c.OperationStatus.CONFIRMED,
+                                   claim.preimage, h.preimage, False, ('x',))
+    elif case == 'compensation-attempted':
+        result = c.OperationResult(claim.request.operation_id,
+            c.OperationStatus.COMPENSATION_ATTEMPTED, claim.preimage, None, False, ('x',))
+    elif case == 'noop-no-postimage':
+        result = c.OperationResult(claim.request.operation_id, c.OperationStatus.NOOP,
+                                   claim.preimage, None, False, ('x',))
+
+    with pytest.raises(CoordinationError):
+        h.service.finish(claim, result)
+
+    # wrong-preimage / wrong-operation-id are argument errors: rejected before any
+    # state change (row still ADMITTED+unresolved). The other three are proven
+    # pre-send failures and must release.
+    row = h.store.read(h.binding.binding_id)
+    if case in {'wrong-preimage', 'wrong-operation-id'}:
+        assert row.state == c.CoordinationState.ADMITTED and row.unresolved
+        return
+
+    assert row.state == c.CoordinationState.IDLE and not row.unresolved
+    assert row.attempt_id is None and row.quarantine_reason is None
+    assert row.heads == c.Heads(None, None, None)
+    assert row.observed_sequence == 0
+    facts = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows
+             if c.from_wire(c.OperationFact, r.payload).request.idempotency_key == claim.request.idempotency_key
+             and c.from_wire(c.OperationFact, r.payload).status == c.FactStatus.FAILED]
+    assert len(facts) == 1
+    assert facts[0].fact_kind == c.FactKind.OPERATION
+    assert facts[0].attempt_id == claim.attempt_id
+    # binding reusable.
+    h.request = c.RequestIdentity(uid(), 'key-after', 'a' * 64)
+    fresh = h.service.reserve(h.binding, h.request, h.executor)
+    assert isinstance(fresh, c.Reservation)
+
+
+def test_finish_possible_send_and_publication_failures_stay_unresolved(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    send = c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(), 'a' * 64, None)
+    h.service.checkpoint(claim, send.stage, send)
+    # 7. caller error on a possible-send row is not released (quarantined).
+    bad = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
+        c.ObservationRef(uid(), h.binding.binding_id, 1, '2' * 64, '5' * 64), h.preimage, False, ('x',))
+    with pytest.raises(CoordinationError):
+        h.service.finish(claim, bad)
+    assert h.store.read(h.binding.binding_id).unresolved
+
+    # 8. publication failure still strands a fully valid result.
+    h.service = CoordinationService(**{k: getattr(h, k) for k in (
+        'store', 'facts', 'ledger', 'clock', 'resolve_binding', 'verify_enrollment',
+        'insert_enrolled', 'validate_authorization', 'verify_create_intent',
+        'termination', 'authorize_human_recovery', 'authorize_heads', 'validate_stage_evidence')})
+    # reset to a fresh admitted claim on a clean binding
+    h.store.state.rows[:] = [replace(h.store.state.rows[0],
+        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
+        active_operation_id=None, idempotency_key=None, request_digest=None, approval_id=None,
+        approval_consumption_published=False, lease_expires_at=None, mutation_stage=None,
+        checkpoint=None, admitted_at=None, pre_version_id=None, preimage_digest=None,
+        expected_base_fingerprint=None, quarantine_reason=None)]
+    h.request = c.RequestIdentity(uid(), 'key-flush', 'a' * 64)
+    h.grant = replace(h.grant, request=h.request, approval_id=uid(), approval_digest='7' * 64)
+    claim2 = admit(h)
+    h.facts.verify_flush.side_effect = lambda _: False
+    with pytest.raises(CoordinationError):
+        complete(h, claim2)
+    assert h.store.read(h.binding.binding_id).unresolved
+
+
 @pytest.mark.parametrize('terminal', ['failed', 'conflicted'])
 def test_terminal_non_success_receipt_is_a_conflict_not_a_completion(h, terminal):
     from backend.services.version_control.coordination import ExistingReceipt
