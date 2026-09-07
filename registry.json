@@ -109,9 +109,10 @@
     {
       "id": "M05",
       "desc": "Drift/reconciliation",
-      "status": "RESUMING solo codex/Astra conv 3773493063975987 (2-concurrent Astra 429'd both M05+M10; back to 1-at-a-time). Tasks 1-2 COMMITTED (91842fc task01 classify 3 policy heads, f6e966a... task02 unknown/missing/incompatible history). 14 total tasks; continuing 3-14 from committed state. worktree worktrees/m05. Owned: drift/, vc_reconcile router+job, test_vc_drift/reconcile/dual_authority. Offline baseline 975.",
+      "status": "COMPLETE all 14 tasks (429'd only after task14 final commit; incremental commits saved all: HEAD 851f677). I VERIFIED: 86 M05 unit tests pass, full offline suite 1061 passed (+86), owned-paths clean (drift/, vc_reconcile router+job, 3 test files), no new integration files (M05 adds none - pure classification over ports, acceptable), write switches default-off, integration collection 14. Pushed vc/m05. CROSS-REVIEW dispatched claude_code conv 3773493063976022 (badges approved/deployed-not-live, states distinct, adopt=new approval/reapply=fresh auth, dual-authority DAB detection, fail-closed outages, target-rendered fingerprint, TDD quality). NOT integrated until review clean.",
       "conversation_id": "3773493063975987",
-      "worktree": "worktrees/m05"
+      "worktree": "worktrees/m05",
+      "review_conversation_id": "3773493063976022"
     },
     {
       "id": "M07",
@@ -121,8 +122,8 @@
     {
       "id": "M10",
       "desc": "Optimizer champion integration",
-      "status": "QUEUED (429'd under 2-concurrent; task 1 COMMITTED 0ea5541 separate iteration telemetry from champion apply, 13 total tasks; RESUME solo on Astra after M05 frees the slot). worktree worktrees/m10. REAL revert.py = packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py.",
-      "conversation_id": "3773493063975984",
+      "status": "RESUMING solo codex/Astra conv 3773493063976023 (task 1 committed 0ea5541; 13 total; continuing 2-13 from committed state). worktree worktrees/m10 @ 6c5ae3a. REAL revert.py = packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py. Retire in-process revert for guarded Job restore, champion apply thru M04 gate, candidates isolated, <=1 optimizer-origin version/run, write switches default-off. Incremental commits. Offline baseline 975 (trunk 6c5ae3a, M05 not yet integrated in this worktree).",
+      "conversation_id": "3773493063976023",
       "worktree": "worktrees/m10"
     }
   ]
