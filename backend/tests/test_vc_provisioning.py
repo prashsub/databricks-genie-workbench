@@ -1,5 +1,8 @@
 from pathlib import Path
 import re
+import subprocess
+import sys
+import tomllib
 from unittest.mock import Mock
 
 import pytest
@@ -9,6 +12,49 @@ from backend.tests.integration.conftest import live_platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_platform_package_import_requires_only_declared_root_dependencies():
+    dependencies = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert "pyyaml==6.0.3" in dependencies
+    script = """
+import importlib.metadata
+import re
+import sys
+import tomllib
+from pathlib import Path
+dependencies = tomllib.loads(Path('pyproject.toml').read_text())['project']['dependencies']
+declared = {re.split(r'[=<>!~\\[]', name)[0].lower().replace('_', '-') for name in dependencies}
+distributions = importlib.metadata.packages_distributions()
+before = set(sys.modules)
+import backend.services.version_control.platform as platform
+for module in set(sys.modules) - before:
+    root = module.split('.')[0]
+    if root == 'backend' or root in sys.stdlib_module_names:
+        continue
+    owners = {name.lower().replace('_', '-') for name in distributions.get(root, [])}
+    assert owners & declared, (module, owners)
+for name in ('bundles', 'provisioning', 'permissions', 'capabilities', 'identity', 'jobs', 'termination'):
+    assert f'{platform.__name__}.{name}' not in sys.modules, name
+assert 'backend.services.version_control.contracts' not in sys.modules
+provider = platform.PlatformIdentityProvider
+assert f'{platform.__name__}.identity' in sys.modules
+assert platform.__dict__['PlatformIdentityProvider'] is provider
+assert platform.PlatformIdentityProvider is provider
+assert f'{platform.__name__}.jobs' not in sys.modules
+try:
+    platform.nonexistent_adapter
+except AttributeError:
+    pass
+else:
+    raise AssertionError('Unknown exports must raise AttributeError')
+"""
+    result = subprocess.run([sys.executable, "-c", script], cwd=ROOT,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    installer = (ROOT / "scripts/deploy_lib/install.py").read_text()
+    assert "from backend.services.version_control.platform.bundles import preflight_deployment" in installer
+    assert "from backend.services.version_control.platform import preflight_deployment" not in installer
 
 
 def test_bundle_guard_precedes_every_databricks_invocation_on_every_branch():

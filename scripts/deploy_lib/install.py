@@ -20,7 +20,7 @@ from .lakebase import ensure_lakebase
 from .uc import ensure_uc_objects_and_grants
 from .verify import verify_app_deployment
 from .workspace_source import prepare_workspace_source
-from backend.services.version_control.platform import preflight_deployment
+from backend.services.version_control.platform.bundles import preflight_deployment
 
 
 def _default_status(message: str) -> None:

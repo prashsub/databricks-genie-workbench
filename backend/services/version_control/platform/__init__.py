@@ -1,27 +1,43 @@
-"""Fail-closed VC/1.0 platform adapters; no ambient credentials."""
-
-from .bundles import bundle_detection_evidence, deployment_inventory, guard_bundle, preflight_deployment
-from .provisioning import provision, repeatable_sandbox_provision
-from .permissions import verify_artifact_permissions, verify_coordination_permissions, verify_fact_permissions
-from .capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS, capabilities_ready, storage_write_ready, topology_read_ready
-from .identity import PlatformIdentityProvider, TrustedSnapshotReader, verify_configured_job_run_as, verify_job_run_as
-from .jobs import GovernedJobRuntime, LocalJobDispatcher
-from .termination import PlatformTerminationEvidenceProvider
+"""Lazy, explicitly injected VC/1.0 adapters; no ambient credentials or clients."""
 
 from collections.abc import Callable
+from importlib import import_module
 from threading import RLock
 from typing import TypeVar, cast
 
 from .feature_flags import FeatureFlags, WRITE_SWITCHES
-from .. import contracts
 
 
 Service = TypeVar("Service")
-REQUIRED_WRITE_PORTS = frozenset({
-    contracts.Coordination, contracts.OperationFacts, contracts.MutationGate,
-    contracts.IdentityProvider, contracts.Registry, contracts.VersionLedger,
-    contracts.GenieTransport, contracts.ApprovalService, contracts.TerminationEvidenceProvider,
-})
+_EXPORTS = {
+    name: module
+    for module, names in {
+        "bundles": ("bundle_detection_evidence", "deployment_inventory", "guard_bundle", "preflight_deployment"),
+        "provisioning": ("provision", "repeatable_sandbox_provision"),
+        "permissions": ("verify_artifact_permissions", "verify_coordination_permissions", "verify_fact_permissions"),
+        "capabilities": ("FIRST_WRITE_CAPABILITIES", "REQUIRED_WRITER_PATHS", "capabilities_ready", "storage_write_ready", "topology_read_ready"),
+        "identity": ("PlatformIdentityProvider", "TrustedSnapshotReader", "verify_configured_job_run_as", "verify_job_run_as"),
+        "jobs": ("GovernedJobRuntime", "LocalJobDispatcher"),
+        "termination": ("PlatformTerminationEvidenceProvider",),
+    }.items()
+    for name in names
+}
+
+
+def __getattr__(name):
+    if name in {"contracts", "REQUIRED_WRITE_PORTS"}:
+        contracts = import_module("..contracts", __name__)
+        value = contracts if name == "contracts" else frozenset({
+            contracts.Coordination, contracts.OperationFacts, contracts.MutationGate,
+            contracts.IdentityProvider, contracts.Registry, contracts.VersionLedger,
+            contracts.GenieTransport, contracts.ApprovalService, contracts.TerminationEvidenceProvider,
+        })
+    elif name in _EXPORTS:
+        value = getattr(import_module(f".{_EXPORTS[name]}", __name__), name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 
 
 class Composition:
@@ -42,6 +58,9 @@ class Composition:
             return False
         if name not in WRITE_SWITCHES:
             return True
+        from . import REQUIRED_WRITE_PORTS
+        from .capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS, capabilities_ready
+
         with self._lock:
             integrated = (REQUIRED_WRITE_PORTS <= self._factories.keys()
                           and REQUIRED_WRITER_PATHS <= self._routed_writers)
