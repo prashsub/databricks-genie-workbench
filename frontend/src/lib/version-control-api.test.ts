@@ -41,3 +41,21 @@ it('double_click_or_network_loss_does_not_generate_new_mutation_key', async () =
   await expect(api.restore('binding-1', changed, newKey)).rejects.toThrow('Network lost')
   expect(transport).toHaveBeenCalledTimes(2)
 })
+
+it('interleaved_intents_reuse_the_original_key_when_the_first_intent_returns', async () => {
+  const intent = createMutationIntent()
+  const a = { version_id: 'a', expected_base: fingerprints, binding_revision: 3, approval_id: 'approval-1' }
+  const b = { ...a, version_id: 'b' }
+  const k1 = intent.key(a); const k2 = intent.key(b)
+  expect(intent.key(a)).toBe(k1)
+  expect(k2).not.toBe(k1)
+  const transport = vi.fn(async () => new Response(JSON.stringify({ operation_id: 'operation', status: 'requested', job_run_id: null })))
+  const api = new VersionControlApi(transport)
+  await api.restore('binding-1', a, k1)
+  await api.restore('binding-1', b, k2)
+  await api.restore('binding-1', a, intent.key(a))
+  expect(transport).toHaveBeenCalledTimes(2)
+  await api.restore('binding-1', a, 'mismanaged-new-key')
+  expect(transport).toHaveBeenCalledTimes(2)
+  await expect(api.restore('binding-1', b, 'mismanaged-new-key')).rejects.toThrow('different intent')
+})

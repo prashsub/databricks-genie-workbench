@@ -18,12 +18,11 @@ export class VersionControlError extends Error implements ApiError {
 
 const bindingPath = (bindingId: string) => `/bindings/${encodeURIComponent(bindingId)}`
 export function createMutationIntent() {
-  let previous = ''
-  let key = ''
+  const keys = new Map<string, string>()
   return { key: (body: unknown) => {
     const serialized = JSON.stringify(body)
-    if (!key || serialized !== previous) { previous = serialized; key = crypto.randomUUID() }
-    return key
+    if (!keys.has(serialized)) keys.set(serialized, crypto.randomUUID())
+    return keys.get(serialized)!
   } }
 }
 const pageQuery = (cursor?: string, limit = 25) => {
@@ -35,6 +34,7 @@ const pageQuery = (cursor?: string, limit = 25) => {
 export class VersionControlApi {
   private transport: typeof fetch
   private commands = new Map<string, { intent: string; result: Promise<unknown> }>()
+  private intents = new Map<string, Promise<unknown>>()
   constructor(transport: typeof fetch) { this.transport = transport }
   private async request<Result>(path: string, init: RequestInit): Promise<Result> {
     const response = await this.transport(`/api/version-control${path}`, init)
@@ -43,15 +43,16 @@ export class VersionControlApi {
     return payload as Result
   }
   private get<Result>(path: string, signal?: AbortSignal) { return this.request<Result>(path, { signal }) }
-  private post<Result>(path: string, body: unknown, key: string) {
+  private post<Result>(path: string, body: unknown, key: string, dedupeIntent = true) {
     const intent = JSON.stringify({ path, body })
     const prior = this.commands.get(key)
     if (prior) {
       if (prior.intent !== intent) return Promise.reject(new VersionControlError(409, { code: 'IDEMPOTENCY_MISMATCH', message: 'Key belongs to a different intent; conflict preserved.', stale: true, retryable: false }))
       return prior.result as Promise<Result>
     }
-    const result = this.request<Result>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) })
+    const result = (dedupeIntent ? this.intents.get(intent) as Promise<Result> | undefined : undefined) ?? this.request<Result>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) })
     this.commands.set(key, { intent, result })
+    if (dedupeIntent) this.intents.set(intent, result)
     return result
   }
   overview(cursor?: string, signal?: AbortSignal) { return this.get<OverviewPage>(`/overview?${pageQuery(cursor)}`, signal) }
@@ -59,7 +60,7 @@ export class VersionControlApi {
   versions(bindingId: string, cursor?: string, signal?: AbortSignal) { return this.get<VersionPage>(`${bindingPath(bindingId)}/versions?${pageQuery(cursor)}`, signal) }
   version(bindingId: string, versionId: string) { return this.get<VersionDetail>(`${bindingPath(bindingId)}/versions/${encodeURIComponent(versionId)}`) }
   diff(bindingId: string, left: string, right: string) { return this.get<SemanticDiff>(`${bindingPath(bindingId)}/diff?${new URLSearchParams({ left, right })}`) }
-  observe(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return', key: string) { return this.post<ObservationResult>(`${bindingPath(bindingId)}/observe`, { reason }, key) }
+  observe(bindingId: string, reason: 'open' | 'history' | 'refresh' | 'return', key: string) { return this.post<ObservationResult>(`${bindingPath(bindingId)}/observe`, { reason }, key, false) }
   restore(bindingId: string, body: RestoreCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/restore`, body, key) }
   reconcile(bindingId: string, body: ReconcileCommand, key: string) { return this.post<OperationHandle>(`${bindingPath(bindingId)}/reconcile`, body, key) }
   requestApproval(inputs: ApprovalRequestInputs, key: string) {
