@@ -1,14 +1,16 @@
 from dataclasses import fields, replace
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from backend.services.version_control.contracts import (
-    ActorContext, ApprovalInputs, ApprovalVote, Fingerprints, MutationRequest,
-    RequestIdentity, from_wire, to_wire,
+    ActorContext, ApprovalInputs, ApprovalVote, AuthenticatedRequest, Fingerprints, MutationRequest,
+    RequestIdentity, canonical_json_hash, from_wire, to_wire,
 )
-from backend.tests.test_vc_operation_facts import NOW, DIGEST, uid
-from backend.tests.vc_fakes.fixtures import binding_fixture
+from backend.tests.test_vc_operation_facts import NOW, DIGEST, durable, fact, uid
+from backend.tests.vc_fakes.fixtures import FakeIdentityProvider, binding_fixture, executor_fixture
+from backend.tests.vc_fakes.stores import ManualClock
 
 
 def inputs():
@@ -83,3 +85,70 @@ def test_request_digest_is_distinct_from_idempotency_key_and_payload_is_immutabl
     assert request_digest(request) != request_digest(replace(request, description='changed'))
     with pytest.raises(TypeError):
         request.serialized_space['nested'] = []
+
+
+def setup_approval(environment='prod', operation_type='edit'):
+    from backend.services.version_control.governance.approvals import ApprovalService, request_digest
+
+    ledger, store = durable()
+    identity = FakeIdentityProvider()
+    target_identity = FakeIdentityProvider()
+    clock = ManualClock(NOW)
+    bound = replace(inputs(), target_binding=replace(binding_fixture(), environment=environment),
+                    operation_type=operation_type)
+    request = MutationRequest(RequestIdentity(uid(2), 'key', DIGEST), bound.target_binding,
+                              operation_type, uid(3), bound.expected_base_fingerprints.state_digest,
+                              {'instructions': []}, None, uid(2))
+    bound = replace(bound, rendered_target_digest=canonical_json_hash(
+        'vc-rendered-target/1', {'serialized_space': request.serialized_space, 'description': request.description}))
+    request = replace(request, identity=replace(request.identity, request_digest=request_digest(request)))
+    ledger.record_request(request, fact(binding=request.binding, request=request.identity,
+                                       requester_id='requester', operation_type=operation_type))
+    registry = SimpleNamespace(binding=bound.target_binding)
+    registry.resolve = lambda binding_id: registry.binding
+    for subject in ('human-1', 'human-2', 'requester'):
+        identity.actors[subject] = ActorContext(subject, '123', 'human')
+        identity.memberships[(subject, '123')] = frozenset({'approvers'})
+        target_identity.memberships[(subject, '123')] = frozenset({'target-approvers'})
+    identity.edit_rights.add(('requester', '123', request.binding.binding_id, 1))
+    executor = executor_fixture()
+    target_identity.run_as[executor.execution_ref] = executor.principal_id
+    service = ApprovalService(ledger, identity, registry, clock.now,
+                              target_identity=lambda selected: target_identity, writes_enabled=True)
+    return SimpleNamespace(service=service, facts=ledger, store=store, identity=identity,
+                           target_identity=target_identity, clock=clock, bound=bound,
+                           request=request, registry=registry, executor=executor)
+
+
+def submit(context):
+    return context.service.request(context.bound, context.identity.actors['requester'])
+
+
+def test_vote_identity_is_server_derived_not_request_body():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.routers.vc_approvals import build_router
+
+    context = setup_approval()
+    approval = submit(context)
+    app = FastAPI()
+
+    @app.middleware('http')
+    async def authenticate(request, call_next):
+        request.state.vc_auth = AuthenticatedRequest('human-1', '123')
+        return await call_next(request)
+
+    app.include_router(build_router(context.service, context.identity))
+    client = TestClient(app)
+    url = f'/api/vc/approvals/{approval.approval_id}/votes'
+    assert client.post(url, json={'decision': 'approve', 'actor_id': 'human-2'}).status_code == 422
+    response = client.post(url, json={'decision': 'approve'})
+    assert response.status_code == 200
+    assert response.json()['votes'][0]['approver_id'] == 'human-1'
+    record = context.service.get(approval.approval_id)
+    assert record.votes[0].approver_id == 'human-1'
+    assert context.service.vote(approval.approval_id, 'approve', context.identity.actors['human-1']) == record
+    with pytest.raises(ValueError, match='immutable'):
+        context.service.vote(approval.approval_id, 'reject', context.identity.actors['human-1'])
+    with pytest.raises(PermissionError, match='requester'):
+        context.service.request(replace(context.bound, requester_id='spoof'), context.identity.actors['requester'])
