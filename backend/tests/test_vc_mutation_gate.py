@@ -133,6 +133,7 @@ def test_requested_only_history_proceeds_to_first_execution(rig):
     vc.FactStatus.APPLIED_UNVERIFIED,
     vc.FactStatus.APPLIED_PARTIAL,
     vc.FactStatus.CONFIRMED,
+    vc.FactStatus.CONFLICTED,
 ])
 def test_execution_outcome_history_routes_to_verify_only_without_second_patch(rig, status):
     fact = vc.OperationFact(
@@ -141,7 +142,7 @@ def test_execution_outcome_history_routes_to_verify_only_without_second_patch(ri
         "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
         status, vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
                                  datetime.now(timezone.utc), rig.identity.request_digest, None),
-        datetime.now(timezone.utc),
+        datetime.now(timezone.utc), attempt_id=rig.fence.attempt_id,
     )
     rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
     rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
