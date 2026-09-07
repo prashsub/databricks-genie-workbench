@@ -13,6 +13,7 @@ import { AdminDashboard } from "@/pages/AdminDashboard"
 import { HowItWorks } from "@/pages/HowItWorks"
 import { CreateAgentChat } from "@/components/CreateAgentChat"
 import { getSpaceDetail } from "@/lib/api"
+import { VersionControlWorkbench } from "@/pages/VersionControlWorkbench"
 import {
   LIST_ROUTE,
   buildAppRouteUrl,
@@ -62,6 +63,13 @@ function stringField(value: unknown): string | undefined {
 }
 
 export default function App() {
+  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === "version-control") {
+    return <VersionControlWorkbench />
+  }
+  return <WorkbenchApp />
+}
+
+function WorkbenchApp() {
   useTheme()
   const [route, setRoute] = useState<AppRoute>(initialRoute)
   const [detailState, setDetailState] = useState<DetailState | null>(null)
@@ -175,6 +183,7 @@ export default function App() {
 
           {/* Nav links */}
           <nav className="flex items-center gap-1">
+            <a href="?view=version-control" className="px-3 py-1.5 rounded-lg text-sm font-medium text-muted hover:text-secondary">Version Control demo</a>
             <button
               onClick={handleNavList}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
