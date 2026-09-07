@@ -178,6 +178,81 @@ def test_recovery_needs_exact_attempt_termination_and_three_post_termination_rea
         assert h.store.read(h.binding.binding_id).unresolved
 
 
+@pytest.mark.parametrize('path', ['automatic', 'human'])
+def test_recovery_closes_the_operation_and_forbids_a_second_admission(h, path):
+    from backend.services.version_control.coordination import ExistingReceipt
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    h.service.quarantine(claim, 'unknown send outcome')
+    evidence = recovery_evidence(h, claim)
+    h.termination.for_attempt.return_value = evidence.termination
+    if path == 'automatic':
+        h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
+    else:
+        evidence = replace(evidence, maximum_request_lifetime_seconds=None,
+            lifetime_bound_reference=None, human_authorization_reference='audited-operator/123',
+            human_reason='Orphan inspection complete; reconcile under new governed request',
+            residual_risk_acknowledged=True)
+        h.authorize_human_recovery.return_value = True
+
+    result = h.service.recover(h.binding, evidence)
+    # 1. baseline.
+    assert result.status == c.OperationStatus.CONFLICTED and not result.unresolved
+
+    # 2/3. both a RECOVERY and a RECEIPT fact exist for the key, CONFLICTED.
+    hist = h.facts.lookup_request(h.binding, claim.request.idempotency_key)
+    assert not hist.ambiguous
+    recov = [f for f in hist.facts if f.fact_kind == c.FactKind.RECOVERY]
+    receipts = [f for f in hist.facts if f.fact_kind == c.FactKind.RECEIPT]
+    assert len(recov) == 1 and len(receipts) == 1
+    for f in (recov[0], receipts[0]):
+        assert f.status == c.FactStatus.CONFLICTED
+        assert f.attempt_id == claim.attempt_id
+        assert f.post_version_id is None
+    assert recov[0].event_key != receipts[0].event_key
+
+    # 4/5. the operation cannot be admitted again; reserve must not return a
+    # Reservation, and after BLOCK-8 a CONFLICTED receipt is a conflict (not a
+    # completion), so reserve raises CoordinationError and releases the row.
+    second = replace(h.request, operation_id=uid())
+    with pytest.raises(CoordinationError) as caught:
+        h.service.reserve(h.binding, second, h.executor)
+    assert not isinstance(caught.value, ExistingReceipt)
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.IDLE and not row.unresolved
+
+    # 6. genuinely new work (different idempotency key) still admits.
+    h.request = c.RequestIdentity(uid(), 'key-new', 'a' * 64)
+    h.grant = replace(h.grant, request=h.request, approval_id=uid(), approval_digest='7' * 64)
+    fresh_claim = admit(h)
+    assert isinstance(fresh_claim, c.AdmissionClaim)
+
+
+def test_recovery_publication_failure_keeps_row_quarantined(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    h.service.quarantine(claim, 'unknown send outcome')
+    evidence = recovery_evidence(h, claim)
+    h.termination.for_attempt.return_value = evidence.termination
+    h.service.verified_request_lifetime = (20.0, 'verified-lifetime-reference')
+    # 7. read-back after the appends fails -> stays QUARANTINED.
+    real_append = h.facts.append.side_effect
+    count = {'receipt_seen': False}
+
+    def append_then_break(fact):
+        ref = real_append(fact)
+        if fact.fact_kind == c.FactKind.RECEIPT:
+            h.facts.lookup_request.side_effect = OSError('receipt read-back unavailable')
+        return ref
+
+    h.facts.append.side_effect = append_then_break
+    with pytest.raises(CoordinationError):
+        h.service.recover(h.binding, evidence)
+    assert h.store.read(h.binding.binding_id).state == c.CoordinationState.QUARANTINED
+
+
 def test_recovery_persists_validated_termination_evidence_before_releasing(h):
     durable_facts(h)
     enroll(h)

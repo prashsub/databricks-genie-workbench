@@ -455,16 +455,23 @@ class CoordinationService:
         request = self._request(row)
         # Strip AdmissionClaim's extra fields at the frozen FenceToken wire seam.
         evidence = replace(evidence, fence=self._fence(row))
+        # Recovery CLOSES the operation: append the audit AND a terminal receipt so
+        # the same idempotency key cannot be re-admitted (C5.5, C5.7). CONFLICTED,
+        # never CONFIRMED/NOOP — recovery proves the executor is dead, not success.
         ref = self._fact(row, request, c.FactStatus.CONFLICTED,
                          evidence=evidence, kind=c.FactKind.RECOVERY)
-        history = self._history(row, request)
-        if not any(f.event_id == ref.event_id for f in history.facts):
-            raise AuthorityUnavailable('Recovery audit publication not verified')
+        receipt = self._fact(row, request, c.FactStatus.CONFLICTED,
+                             evidence=evidence, kind=c.FactKind.RECEIPT)
+        history = self._history_raw(row, request.idempotency_key)
+        if not {ref.event_id, receipt.event_id} <= {f.event_id for f in history.facts}:
+            raise AuthorityUnavailable(
+                'Recovery audit/receipt publication not verified; row stays unresolved')
         released = self._release(row, generation=row.generation + 1)
         # A recovery result is a historical fence, not a new write capability.
         fence = c.FenceToken(binding.binding_id, binding.binding_revision,
                             row.attempt_id, released.generation, released.row_version)
-        return c.RecoveryResult(binding, c.OperationStatus.CONFLICTED, fence, False, (ref.event_id,))
+        return c.RecoveryResult(binding, c.OperationStatus.CONFLICTED, fence, False,
+                                (ref.event_id, receipt.event_id))
 
     def _claim_from_row(self, row):
         if not row.checkpoint or 'preimage' not in row.checkpoint:
