@@ -82,10 +82,14 @@ class Canonicalizer:
         if isinstance(serialized, str):
             serialized = json.loads(serialized)
         metadata = {key: response[key] for key in ("description",) if key in response}
-        canonical = {"config": _canonical_config(serialized), "metadata": metadata}
+        canonical = {
+            "config": _canonical_config(serialized),
+            "benchmark": _canonical_benchmark(serialized),
+            "metadata": metadata,
+        }
         fingerprints = Fingerprints(
             config=canonical_json_hash("vc-config/1", {"value": canonical["config"]}),
-            benchmark=benchmark_fingerprint(serialized),
+            benchmark=canonical_json_hash("vc-benchmark/1", {"value": canonical["benchmark"]}),
             metadata=canonical_json_hash("vc-metadata/1", {"value": canonical["metadata"]}),
             canonicalizer_version=version,
         )
@@ -101,6 +105,15 @@ class Canonicalizer:
             fingerprints=fingerprints,
             state_digest=fingerprints.state_digest,
         )
+
+
+def _canonical_benchmark(serialized: dict) -> dict:
+    benchmarks = serialized.get("benchmarks") or {}
+    return canonicalize(
+        {**benchmarks, "questions": benchmarks.get("questions") or []},
+        normalize_boundary_quotes=False,
+        _collection_keys=_VC_COLLECTION_KEYS,
+    )
 
 
 def _canonical_config(serialized: dict) -> dict:

@@ -145,6 +145,29 @@ def test_description_changes_only_metadata_fingerprint() -> None:
     )
 
 
+def test_benchmark_change_does_not_change_config_identity() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    space = {**_space(), "benchmarks": {"questions": [_benchmark_question("b1")]}}
+    original = adapter.observe(space)
+    changed_space = deepcopy(space)
+    changed_space["benchmarks"]["questions"][0]["answer"][0]["content"] = ["SELECT 2"]
+    changed = adapter.observe(changed_space)
+    assert original.fingerprints.config == changed.fingerprints.config
+    assert original.fingerprints.metadata == changed.fingerprints.metadata
+    assert original.fingerprints.benchmark != changed.fingerprints.benchmark
+    assert original.state_digest != changed.state_digest
+    assert original.canonical_state["benchmark"] != changed.canonical_state["benchmark"]
+    config_edit = {**space, "instructions": _space(instruction="Changed")["instructions"]}
+    assert adapter.observe(config_edit).fingerprints.benchmark == original.fingerprints.benchmark
+    empties = [_space(), {**_space(), "benchmarks": {}}, {**_space(), "benchmarks": {"questions": []}}]
+    assert len({adapter.observe(empty).state_digest for empty in empties}) == 1
+    quoted = deepcopy(space)
+    quoted["benchmarks"]["questions"][0]["answer"][0]["content"] = ["SELECT '2'"]
+    assert adapter.observe(quoted).fingerprints.benchmark != changed.fingerprints.benchmark
+
+
 def test_unwrap_bare_serialized_space() -> None:
     assert unwrap_serialized_space(_space()) == _space()
 
