@@ -127,6 +127,24 @@ def test_unordered_ids_sort_but_meaningful_order_survives() -> None:
     assert adapter.observe(original).fingerprints.config != adapter.observe(changed).fingerprints.config
 
 
+def test_description_changes_only_metadata_fingerprint() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    envelope = {"serialized_space": _space(), "description": "Revenue", "title": "Title"}
+    original = adapter.observe(envelope)
+    changed = adapter.observe({**envelope, "description": "'Revenue'"})
+    assert original.fingerprints.config == changed.fingerprints.config
+    assert original.fingerprints.benchmark == changed.fingerprints.benchmark
+    assert original.fingerprints.metadata != changed.fingerprints.metadata
+    assert original.state_digest != changed.state_digest
+    assert to_wire(changed.canonical_state["metadata"]) == {"description": "'Revenue'"}
+    assert original.fingerprints == adapter.observe({**envelope, "title": "Other"}).fingerprints
+    assert adapter.observe({"serialized_space": _space()}).fingerprints.metadata != (
+        adapter.observe({"serialized_space": _space(), "description": ""}).fingerprints.metadata
+    )
+
+
 def test_unwrap_bare_serialized_space() -> None:
     assert unwrap_serialized_space(_space()) == _space()
 
