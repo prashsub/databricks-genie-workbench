@@ -217,3 +217,46 @@ def test_target_membership_rechecked_by_target_executor_at_execution(fault):
         context.target_identity.groups = unavailable
     with pytest.raises((PermissionError, OSError)):
         context.service.authorize(context.request, executor)
+
+
+@pytest.mark.parametrize('fault', ['over-24h', 'expired', 'expired-vote', 'stale-request', 'stale-execution', 'exact-24h'])
+def test_expiry_over_24_hours_and_stale_binding_revision_are_rejected(fault):
+    context = setup_approval()
+    if fault == 'over-24h':
+        context.bound = replace(context.bound, expires_at=NOW + timedelta(hours=24, seconds=1))
+        with pytest.raises(PermissionError, match='expiry'):
+            submit(context)
+    elif fault == 'stale-request':
+        context.registry.binding = replace(context.registry.binding, binding_revision=2)
+        with pytest.raises(PermissionError, match='binding'):
+            submit(context)
+    elif fault == 'expired-vote':
+        approval = submit(context)
+        context.clock.advance(timedelta(hours=1))
+        with pytest.raises(PermissionError, match='expiry'):
+            context.service.vote(approval.approval_id, 'approve', context.identity.actors['human-1'])
+    else:
+        if fault == 'exact-24h':
+            context.bound = replace(context.bound, expires_at=NOW + timedelta(hours=24))
+        approve(context)
+        if fault == 'expired':
+            context.clock.advance(timedelta(hours=1))
+        elif fault == 'stale-execution':
+            context.registry.binding = replace(context.registry.binding, binding_revision=2)
+        if fault == 'exact-24h':
+            assert context.service.authorize(context.request, context.executor).expires_at == context.bound.expires_at
+        else:
+            with pytest.raises(PermissionError, match='expiry|binding'):
+                context.service.authorize(context.request, context.executor)
+
+
+def test_approval_writes_default_off_and_non_utc_expiry_rejected():
+    from backend.services.version_control.governance.approvals import ApprovalService
+
+    context = setup_approval()
+    service = ApprovalService(context.facts, context.identity, context.registry, context.clock.now,
+                              target_identity=lambda executor: context.target_identity)
+    with pytest.raises(PermissionError, match='disabled'):
+        service.request(context.bound, context.identity.actors['requester'])
+    with pytest.raises(ValueError, match='UTC'):
+        replace(context.bound, expires_at=NOW.replace(tzinfo=None))

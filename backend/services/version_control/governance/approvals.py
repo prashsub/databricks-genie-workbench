@@ -1,6 +1,7 @@
 """Workbench-native approval policy over VC/1.0 ports."""
 
 from dataclasses import replace
+from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
@@ -41,6 +42,13 @@ class ApprovalService:
         if not self.writes_enabled:
             raise PermissionError('Approval writes disabled')
 
+    def _fresh(self, inputs, requested_at):
+        if (not timedelta(0) < inputs.expires_at - requested_at <= timedelta(hours=24)
+                or not requested_at <= self.now() < inputs.expires_at):
+            raise PermissionError('Approval expiry must be current and within 24 hours')
+        if self.registry.resolve(inputs.target_binding.binding_id) != inputs.target_binding:
+            raise PermissionError('Stale target binding revision')
+
     def get(self, approval_id):
         record = self.facts.get_request(approval_id).approval
         if record is None or record.request.approval_id != approval_id:
@@ -65,6 +73,7 @@ class ApprovalService:
         self._enabled()
         if inputs.requester_id != actor.subject_id or actor.workspace_id != inputs.target_binding.workspace_id:
             raise PermissionError('Authenticated requester mismatch')
+        self._fresh(inputs, self.now())
         stored = self.facts.get_request(inputs.operation_id)
         if stored.approval is not None:
             if stored.approval.request.inputs != inputs:
@@ -78,6 +87,7 @@ class ApprovalService:
         self._enabled()
         record = self.get(approval_id)
         inputs = record.request.inputs
+        self._fresh(inputs, record.request.requested_at)
         if actor.actor_kind != 'human' or actor.subject_id == inputs.requester_id:
             raise PermissionError('Only non-requester humans may approve')
         if 'approvers' not in self.identity.groups(actor.subject_id, actor.workspace_id):
@@ -100,6 +110,7 @@ class ApprovalService:
         self._enabled()
         record = self.get(request.approval_id)
         inputs = record.request.inputs
+        self._fresh(inputs, record.request.requested_at)
         approvers = {vote.approver_id for vote in record.votes if vote.decision == 'approve'}
         if (len(approvers) < 2 or any(vote.decision != 'approve' for vote in record.votes)
                 or inputs.requester_id in approvers or executor.principal_id in approvers):
