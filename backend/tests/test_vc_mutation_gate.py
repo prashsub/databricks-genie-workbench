@@ -203,6 +203,25 @@ def test_description_requires_expected_config_and_approved_metadata_preimage(rig
     rig.coordination.quarantine.assert_called_once()
 
 
+@pytest.mark.parametrize("status", [vc.FactStatus.APPLIED_PARTIAL, vc.FactStatus.CONFLICTED])
+def test_partial_and_conflicted_publish_distinguishable_terminal_facts(rig, status):
+    if status == vc.FactStatus.CONFLICTED:
+        rig.state["description"] = "external edit"
+    else:
+        def interfering_patch(*args):
+            rig.config(*args)
+            rig.state["description"] = "external edit"
+        rig.transport.patch_config_once.side_effect = interfering_patch
+    result = rig.gate.execute(rig.request, rig.executor)
+    terminal = [call.args[0] for call in rig.facts.append.call_args_list
+                if call.args[0].status == status]
+    assert len(terminal) == 1
+    assert terminal[0].pre_version_id == result.preimage.version_id
+    assert terminal[0].post_version_id == (result.postimage.version_id if result.postimage else None)
+    boundary = "quarantine" if status == vc.FactStatus.APPLIED_PARTIAL else "finish"
+    assert rig.trace.index("fact:" + status.value) < rig.trace.index(boundary)
+
+
 def test_final_readback_must_match_all_fingerprints(rig):
     rig.transport.patch_description_once.side_effect = lambda *args: None
     result = rig.gate.execute(rig.request, rig.executor)

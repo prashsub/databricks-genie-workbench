@@ -57,7 +57,7 @@ class MutationGate:
                 or checkpoint.fingerprints.benchmark != desired.fingerprints.benchmark
                 or checkpoint.fingerprints.metadata != snapshot.fingerprints.metadata
                 or checkpoint.fingerprints.canonicalizer_version != desired.fingerprints.canonicalizer_version):
-            return self._partial(request, claim, middle, "Config or approved metadata checkpoint changed")
+            return self._partial(request, executor, claim, middle, "Config or approved metadata checkpoint changed")
         if request.description is not None and snapshot.fingerprints.metadata != desired.fingerprints.metadata:
             self._checkpoint(claim, vc.PatchStage.DESCRIPTION_PENDING, middle)
             self._checkpoint(claim, vc.PatchStage.DESCRIPTION_IN_FLIGHT, None)
@@ -73,7 +73,7 @@ class MutationGate:
             except Exception:
                 return self._unverified(request, executor, claim, "Description read-back evidence unavailable")
             if self.canonicalizer.compare(final, desired) != vc.Comparison.EQUAL:
-                return self._partial(request, claim, postimage, "Final state differs from desired")
+                return self._partial(request, executor, claim, postimage, "Final state differs from desired")
         else:
             postimage = middle
         try:
@@ -129,7 +129,7 @@ class MutationGate:
             desired = self.canonicalizer.observe({"serialized_space": vc.to_wire(request.payload.serialized_space),
                 **({"description": request.payload.description} if request.payload.description is not None else {})})
             if self.canonicalizer.compare(snapshot, desired) != vc.Comparison.EQUAL:
-                return self._partial(mutation, claim, postimage, "Created state differs from approved payload")
+                return self._partial(mutation, executor, claim, postimage, "Created state differs from approved payload")
             return self._finish(mutation, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
         except Exception:
             return self._unverified(mutation, executor, claim, "Possible create orphan; audited identity resolution required")
@@ -148,7 +148,8 @@ class MutationGate:
         if executor.workspace_id != binding.workspace_id:
             raise PermissionError("Cross-workspace mutation disabled")
 
-    def _partial(self, request, claim, observation, reason):
+    def _partial(self, request, executor, claim, observation, reason):
+        self._record(request, executor, claim, vc.OperationStatus.APPLIED_PARTIAL, observation)
         self.coordination.quarantine(claim, reason)
         return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_PARTIAL,
                                   claim.preimage, observation, True, (reason,))
