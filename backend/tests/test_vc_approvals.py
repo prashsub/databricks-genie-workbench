@@ -237,6 +237,22 @@ def approve(context):
     return approval
 
 
+def test_durable_consumption_fact_blocks_reuse_after_grant_is_published():
+    context = setup_approval()
+    approval = approve(context)
+    context.service.authorize(context.request, context.executor)
+    record = context.service.get(approval.approval_id)
+    context.facts.append(fact(
+        binding=context.request.binding, request=context.request.identity, requester_id='requester',
+        fact_kind=FactKind.APPROVAL_CONSUMED, status=FactStatus.CONSUMED,
+        approval_id=approval.approval_id, approval_digest=record.approval_digest,
+        attempt_id=uid(5), generation=1, evidence=record,
+    ))
+    assert context.facts.get_request(uid(2)).approval.status == FactStatus.APPROVED
+    with pytest.raises(PermissionError, match='consumed'):
+        context.service.authorize(context.request, context.executor)
+
+
 @pytest.mark.parametrize('fault', ['revoked', 'source-only', 'wrong-workspace', 'wrong-run-as', 'human-executor', 'outage'])
 def test_target_membership_rechecked_by_target_executor_at_execution(fault):
     context = setup_approval()
