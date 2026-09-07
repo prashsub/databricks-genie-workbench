@@ -6,11 +6,14 @@ Admission serialization remains exclusively the Coordination port's concern.
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
+from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
-    ApprovalRecord, ApprovalUse, ApprovedOperation, CreateIntentRef, CreateRequest, FactKind,
-    FactRef, MutationRequest, OperationFact, RequestHistory,
+    ActorContext, AdmissionClaim, ApprovalRecord, ApprovalUse, ApprovedOperation,
+    CreateIntentRef, CreateRequest, FactKind, FactStatus, FactRef, MutationRequest,
+    OperationFact, RequestHistory,
     canonical_json_hash, from_wire, to_wire,
 )
 
@@ -32,7 +35,7 @@ class DurableOperationFacts:
 
     def _rows(self):
         return tuple(from_wire(OperationFact, {key: value for key, value in row.items()
-                                              if key != 'operation_request'})
+                                              if key not in ('operation_request', 'admission_claim')})
                      for row in self._read())
 
     def append(self, fact: OperationFact) -> FactRef:
@@ -43,7 +46,7 @@ class DurableOperationFacts:
             raise ValueError('Request identity mismatch')
         return self._append(fact, request)
 
-    def _append(self, fact, request=None):
+    def _append(self, fact, request=None, claim=None):
         if not self.writes_enabled:
             raise PermissionError('Fact writes disabled')
         fact = from_wire(OperationFact, to_wire(fact))
@@ -69,6 +72,8 @@ class DurableOperationFacts:
             payload = to_wire(fact)
             if request is not None:
                 payload['operation_request'] = to_wire(request)
+            if claim is not None:
+                payload['admission_claim'] = to_wire(claim)
             self._insert(fact.event_key, payload)
         if request is not None and self.get_request(request.identity.operation_id).request != request:
             raise ValueError('Immutable request conflict')
@@ -122,3 +127,55 @@ class DurableOperationFacts:
                            and row.evidence != records[-1].evidence for row in records):
             raise ValueError('Ambiguous approval evidence')
         return ApprovedOperation(requests[0], records[-1].evidence if records else None)
+
+    def _claims(self, operation_id):
+        return tuple((from_wire(AdmissionClaim, row['admission_claim']), row)
+                     for row in self._read() if row['operation_id'] == operation_id
+                     and row['fact_kind'] == FactKind.APPROVAL_CONSUMED.value
+                     and 'admission_claim' in row)
+
+    def verify_flush(self, claim):
+        claims = self._claims(claim.request.operation_id)
+        return bool(claims) and all(saved == claim for saved, row in claims)
+
+    def publish_consumption(self, claim):
+        if not self.writes_enabled:
+            raise PermissionError('Fact writes disabled')
+        existing = self._claims(claim.request.operation_id)
+        if existing:
+            if not self.verify_flush(claim):
+                raise PermissionError('Conflicting consumed admission claim')
+            payload = existing[0][1]
+            return FactRef(payload['event_id'], payload['event_key'],
+                           canonical_json_hash('vc-fact-evidence/1', payload['evidence']))
+        stored = self.get_request(claim.request.operation_id)
+        request = stored.request
+        record = stored.approval
+        if (request.identity != claim.request or request.binding.binding_id != claim.binding_id
+                or request.binding.binding_revision != claim.binding_revision
+                or claim.preimage.binding_id != claim.binding_id
+                or claim.preimage.binding_revision != claim.binding_revision):
+            raise ValueError('Admission claim binding or request mismatch')
+        if record is None or record.request.approval_id != claim.approval_id or record.approval_digest != claim.approval_digest:
+            raise PermissionError('Durable approval evidence does not match consumption')
+        use = self.approval_use(request.binding, claim.approval_id)
+        if use.ambiguous or use.consumptions:
+            raise PermissionError('Approval already consumed')
+        pre_version_id = getattr(claim.preimage, 'version_id', None)
+        if isinstance(request, MutationRequest) and getattr(claim.preimage, 'state_digest', None) != request.expected_base:
+            raise ValueError('Admission preimage differs from reviewed base')
+        provisional = OperationFact(
+            event_id=request.identity.operation_id, fact_kind=FactKind.APPROVAL_CONSUMED,
+            operation_id=request.identity.operation_id, transition_sequence=0, event_key='',
+            binding=request.binding, request=request.identity, operation_type=request.operation_type,
+            requester_id=record.request.inputs.requester_id,
+            actor=ActorContext('coordination', request.binding.workspace_id, 'system'),
+            status=FactStatus.CONSUMED, evidence=record, recorded_at=datetime.now(timezone.utc),
+            attempt_id=claim.attempt_id, generation=claim.generation, pre_version_id=pre_version_id,
+            approval_id=claim.approval_id, approval_digest=claim.approval_digest,
+        )
+        key = fact_key(provisional)
+        reference = self._append(replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key))), claim=claim)
+        if not self.verify_flush(claim):
+            raise PermissionError('Consumption flush unavailable')
+        return reference

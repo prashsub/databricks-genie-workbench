@@ -5,7 +5,8 @@ from uuid import UUID, uuid5, NAMESPACE_URL
 import pytest
 
 from backend.services.version_control.contracts import (
-    CreateIntentRef, FactKind, FactStatus, MutationRequest, OperationFact, PatchStage, RequestIdentity, StageEvidence,
+    AdmissionClaim, CreateIntentRef, FactKind, FactStatus, MutationRequest,
+    ObservationRef, OperationFact, OperationFacts, PatchStage, RequestIdentity, StageEvidence,
     to_wire,
 )
 from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
@@ -125,3 +126,47 @@ def test_create_intent_is_durable_without_fake_pre_version():
         durable()[0].append(replace(created, evidence=fact().evidence))
     with pytest.raises(ValueError, match='create intent'):
         durable()[0].append(replace(created, evidence=replace(intent, binding_revision=2)))
+
+
+class ClaimConsumer:
+    def __init__(self, facts: OperationFacts, claim):
+        self.facts = facts
+        self.claim = claim
+        self.unresolved = True
+
+    def finish(self):
+        self.facts.publish_consumption(self.claim)
+        if not self.facts.verify_flush(self.claim):
+            raise PermissionError('Unflushed claim must remain unresolved')
+        self.unresolved = False
+
+
+@pytest.mark.parametrize('boundary', list(CrashBoundary))
+def test_consumption_publish_failure_retains_unresolved_claim(boundary):
+    from backend.tests.test_vc_approvals import approve, setup_approval
+
+    context = setup_approval()
+    approve(context)
+    grant = context.service.authorize(context.request, context.executor)
+    observation = ObservationRef(uid(3), grant.binding.binding_id, 1,
+                                 context.request.expected_base, DIGEST)
+    claim = AdmissionClaim(grant.binding.binding_id, 1, uid(5), 1, 2,
+                           grant.request, observation, grant.approval_id, grant.approval_digest)
+    consumer = ClaimConsumer(context.facts, claim)
+    assert not context.facts.verify_flush(claim)
+    context.store.failures.inject(boundary)
+    with pytest.raises(InjectedCrash):
+        consumer.finish()
+    assert consumer.unresolved
+    restarted, _ = durable(context.store)
+    consumer.facts = restarted
+    consumer.finish()
+    assert not consumer.unresolved
+    assert restarted.verify_flush(claim)
+    assert len(restarted.approval_use(grant.binding, grant.approval_id).consumptions) == 1
+    assert not restarted.verify_flush(replace(claim, generation=2))
+    with pytest.raises((PermissionError, ValueError)):
+        restarted.publish_consumption(replace(claim, attempt_id=uid(55), generation=2))
+    context.service.facts = restarted
+    with pytest.raises(PermissionError, match='consumed'):
+        context.service.authorize(context.request, context.executor)
