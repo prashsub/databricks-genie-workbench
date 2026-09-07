@@ -10,8 +10,10 @@ from uuid import uuid4
 import pytest
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control.coordination import CoordinationService
 from backend.services.version_control.mutation_gate import MutationGate
 from backend.tests.vc_fakes.fixtures import FakeCanonicalizer, binding_fixture, executor_fixture
+from backend.tests.vc_fakes.stores import FakeCoordinationStore, FakeFactStore, ManualClock
 
 
 def uid():
@@ -69,6 +71,7 @@ def rig():
     coordination.assert_owner.side_effect = lambda *args: trace.append("assert_owner")
     coordination.checkpoint.side_effect = lambda claim, stage, evidence: trace.append(stage.value)
     coordination.finish.side_effect = lambda *args: trace.append("finish")
+    coordination.reject_reservation.side_effect = lambda *args: trace.append("reject_reservation")
     coordination.quarantine.side_effect = lambda *args: trace.append("quarantine")
     ledger.append_observation.side_effect = append
     ledger.verify_committed.side_effect = lambda ref: trace.append("verify_commit") or True
@@ -133,42 +136,73 @@ def test_reviewed_base_mismatch_preserves_external_preimage_and_blocks(rig):
     rig.transport.patch_description_once.assert_not_called()
 
 
-def test_pre_send_base_conflict_releases_binding_without_quarantine(rig):
-    occupied = False
-    reserve = rig.coordination.reserve.side_effect
+@pytest.mark.parametrize('shared_facts', [False, True])
+def test_pre_send_base_conflict_releases_binding_without_quarantine(rig, shared_facts):
+    clock = ManualClock(datetime.now(timezone.utc))
+    store = FakeCoordinationStore(clock)
+    durable = FakeFactStore(clock)
+    operation_durable = durable if shared_facts else FakeFactStore(clock)
 
-    def reserve_exclusively(*args):
-        nonlocal occupied
-        if occupied:
-            raise RuntimeError("An unresolved attempt already owns this binding")
-        occupied = True
-        return reserve(*args)
+    def facts_port(backing):
+        def append(fact):
+            backing.append(fact.event_key, vc.to_wire(fact))
+            return vc.FactRef(fact.event_id, fact.event_key, 'd' * 64)
 
-    def finish_presend(claim, result):
-        nonlocal occupied
-        assert claim.request == rig.identity
-        assert claim.preimage == result.preimage
-        assert result.status == vc.OperationStatus.CONFLICTED
-        assert not result.unresolved
-        assert "config_in_flight" not in rig.trace
-        assert rig.facts.append.call_args.args[0].status == vc.FactStatus.CONFLICTED
-        occupied = False
+        def lookup(binding, key):
+            facts = tuple(vc.from_wire(vc.OperationFact, row.payload) for row in backing.state.rows)
+            return vc.RequestHistory(tuple(fact for fact in facts if fact.binding == binding
+                and fact.request.idempotency_key == key), False)
 
-    rig.coordination.reserve.side_effect = reserve_exclusively
-    rig.coordination.finish.side_effect = finish_presend
+        return SimpleNamespace(append=append, lookup_request=lookup)
+
+    coordination_facts = facts_port(durable)
+    rig.gate.facts = coordination_facts if shared_facts else facts_port(operation_durable)
+    coordination = CoordinationService(
+        store=store, facts=coordination_facts, ledger=rig.ledger, clock=clock,
+        resolve_binding=lambda binding_id: rig.binding,
+        verify_enrollment=lambda binding, proof: True, insert_enrolled=store.seed,
+        validate_authorization=Mock(return_value=True), verify_create_intent=Mock(return_value=True),
+        termination=Mock(spec=vc.TerminationEvidenceProvider),
+        authorize_human_recovery=Mock(return_value=False), authorize_heads=Mock(return_value=False))
+    coordination.initialize(rig.binding, vc.EnrollmentProof(uid(), rig.binding.binding_id, 1,
+                                                           'serialized-enrollment'))
+    rig.gate.coordination = coordination
+    coordination.finish = Mock(wraps=coordination.finish)
+    coordination.quarantine = Mock(wraps=coordination.quarantine)
+    coordination.admit = Mock(wraps=coordination.admit)
     rig.state["description"] = "external edit"
+    external = deepcopy(rig.state)
     result = rig.gate.execute(rig.request, rig.executor)
+    assert result.operation_id == rig.identity.operation_id
     assert result.status == vc.OperationStatus.CONFLICTED
+    assert not result.unresolved
+    assert result.postimage is None
     rig.transport.patch_config_once.assert_not_called()
     rig.transport.patch_description_once.assert_not_called()
     assert rig.versions[result.preimage.version_id].snapshot.restorable_metadata["description"] == "external edit"
-    rig.coordination.quarantine.assert_not_called()
-    rig.coordination.finish.assert_called_once()
-    rig.coordination.admit.assert_not_called()
+    assert rig.state == external
+    coordination.quarantine.assert_not_called()
+    coordination.finish.assert_not_called()
+    coordination.admit.assert_not_called()
+    rig.approvals.authorize.assert_not_called()
+    row = store.read(rig.binding.binding_id)
+    assert row.state == vc.CoordinationState.IDLE
+    assert not row.unresolved
+    assert len(durable.state.rows) == 1
+    fact = vc.from_wire(vc.OperationFact, durable.state.rows[0].payload)
+    assert fact.status == vc.FactStatus.CONFLICTED
+    assert fact.request == rig.identity
+    assert len(operation_durable.state.rows) == 1
+    operation_fact = vc.from_wire(vc.OperationFact, operation_durable.state.rows[0].payload)
+    assert operation_fact.status == vc.FactStatus.CONFLICTED
+    assert operation_fact.request == rig.identity
+    if not shared_facts:
+        assert operation_fact.pre_version_id == result.preimage.version_id
     corrected = replace(rig.request, identity=vc.RequestIdentity(uid(), "corrected-key", "b" * 64),
                         expected_base=result.preimage.state_digest)
-    reservation = rig.coordination.reserve(corrected.binding, corrected.identity, rig.executor)
+    reservation = coordination.reserve(corrected.binding, corrected.identity, rig.executor)
     assert reservation.request == corrected.identity
+    assert store.read(rig.binding.binding_id).state == vc.CoordinationState.RESERVED
 
 
 def test_two_patch_happy_path_checkpoints_and_reasserts_each_send(rig):
@@ -218,7 +252,7 @@ def test_partial_and_conflicted_publish_distinguishable_terminal_facts(rig, stat
     assert len(terminal) == 1
     assert terminal[0].pre_version_id == result.preimage.version_id
     assert terminal[0].post_version_id == (result.postimage.version_id if result.postimage else None)
-    boundary = "quarantine" if status == vc.FactStatus.APPLIED_PARTIAL else "finish"
+    boundary = "quarantine" if status == vc.FactStatus.APPLIED_PARTIAL else "reject_reservation"
     assert rig.trace.index("fact:" + status.value) < rig.trace.index(boundary)
 
 

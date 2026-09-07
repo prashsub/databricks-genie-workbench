@@ -30,9 +30,12 @@ class MutationGate:
         snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
         preimage = self._capture(request, executor, reservation.fence, snapshot, "preimage")
         if snapshot.state_digest != request.expected_base:
-            claim = vc.AdmissionClaim(**vc.to_wire(reservation.fence), request=reservation.request,
-                                      preimage=preimage, approval_id=None, approval_digest=None)
-            return self._finish(request, executor, claim, vc.OperationStatus.CONFLICTED)
+            if getattr(self.coordination, "facts", None) is not self.facts:
+                self._record(request, executor, reservation.fence, vc.OperationStatus.CONFLICTED,
+                             preimage=preimage)
+            self.coordination.reject_reservation(reservation, "Reviewed base changed before admission")
+            return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.CONFLICTED,
+                                      preimage, None, False, (preimage.version_id,))
         authorization = self.approvals.authorize(request, executor)
         claim = self.coordination.admit(reservation, preimage, authorization)
         desired = self.canonicalizer.observe({
@@ -178,7 +181,8 @@ class MutationGate:
         self.coordination.finish(claim, result)
         return result
 
-    def _record(self, request, executor, claim, status, postimage=None):
+    def _record(self, request, executor, claim, status, postimage=None, *, preimage=None):
+        preimage = claim.preimage if preimage is None else preimage
         evidence = vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
                                     datetime.now(timezone.utc),
                                     postimage.state_digest if postimage else request.identity.request_digest,
@@ -190,7 +194,7 @@ class MutationGate:
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
             vc.FactStatus(status.value), evidence, datetime.now(timezone.utc),
             attempt_id=claim.attempt_id, generation=claim.generation,
-            pre_version_id=claim.preimage.version_id if isinstance(claim.preimage, vc.ObservationRef) else None,
+            pre_version_id=preimage.version_id if isinstance(preimage, vc.ObservationRef) else None,
             post_version_id=postimage.version_id if postimage else None))
 
     def _capture(self, request, executor, fence, snapshot, reason, parent=None):
