@@ -119,8 +119,9 @@
     {
       "id": "M07",
       "desc": "Cross-workspace promotion",
-      "status": "QUEUED (M05 integrated -> unblocked; 17 tasks; worktree worktrees/m07 @ 28c471b ready). Dispatch solo on Astra when M10 frees the slot (1-at-a-time). FINAL module. Owned: promotion/ pkg, routers/vc_releases.py, jobs/vc_promote.py, DDL 08-promotion-volumes.sql, tests test_vc_packages/mapping/promotion/dispatch + integration/test_vc_two_workspace_promotion.py.",
-      "worktree": "worktrees/m07"
+      "status": "IMPL COMPLETE 16/17 tasks (worktree worktrees/m07, pushed vc/m07). Task 17 legitimately blocked on 2 cross-module bugs (actor_kind drift, M04 requested-only retry). M07 own deliverable green: 78 unit tests, integration test honest blocker, owned-paths clean. IN CROSS-REVIEW claude_code conv 3773493063976172 (re-dispatched after runner-offline). Cross-module fix running separately. Integrate after review clear + xmod fix lands.",
+      "worktree": "worktrees/m07",
+      "review_conversation_id": "3773493063976172"
     },
     {
       "id": "M10",
@@ -128,6 +129,13 @@
       "status": "RE-RUNNING codex/Astra conv 3773493063976023 (prior resume dispatch ReadTimeout'd -> session idle w/ EMPTY history, never ran; re-sent input). Task 1 committed 0ea5541; continuing 2-13. worktree worktrees/m10 @ 6c5ae3a. REAL revert.py = packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py.",
       "conversation_id": "3773493063976023",
       "worktree": "worktrees/m10"
+    },
+    {
+      "id": "XMOD-ACTOR-RETRY",
+      "desc": "Cross-module actor_kind vocab drift + M04 retry short-circuit fix (integrator-sanctioned)",
+      "worker": "codex",
+      "conversation_id": "3773493063976171",
+      "status": "RUNNING codex/Astra conv 3773493063976171. BLOCKER1 actor_kind drift (M08 human/service fix) + BLOCKER2 M04 requested-only retry investigate/fix. Worktree worktrees/xmod-fix. TDD + incremental commits."
     }
   ],
   "reviews": {
