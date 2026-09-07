@@ -6,6 +6,16 @@ from unittest.mock import MagicMock
 
 import pytest
 from genie_space_optimizer.optimization import unified_loop
+from genie_space_optimizer.integration.version_control import CandidateSession, EvaluationBinding
+
+
+def _candidate(run_id):
+    registry = MagicMock()
+    registry.resolve_physical.return_value = None
+    registry.optimizer_owner.return_value = run_id
+    registry.workspace_id_for.return_value = "workspace"
+    return CandidateSession(EvaluationBinding("workspace", "space-1", run_id),
+                            registry, MagicMock(), writes_enabled=True)
 
 
 def _config(content: list[str]) -> dict:
@@ -99,6 +109,7 @@ def test_baseline_observation_is_captured_after_native_evaluation(monkeypatch) -
     result = unified_loop.run_unified_optimization_loop(
         MagicMock(),
         MagicMock(),
+        candidate_session=_candidate("run-1"),
         run_id="run-1",
         space_id="space-1",
         benchmarks=[],
@@ -191,6 +202,7 @@ def test_failed_baseline_read_error_preserves_prior_champion_metadata(
         unified_loop.run_unified_optimization_loop(
             MagicMock(),
             MagicMock(),
+            candidate_session=_candidate("run-restarted"),
             run_id="run-restarted",
             space_id="space-1",
             benchmarks=[],
@@ -289,6 +301,7 @@ def test_accepted_attempt_emits_bounded_decision_diagnostics(monkeypatch) -> Non
     result = unified_loop.run_unified_optimization_loop(
         MagicMock(),
         MagicMock(),
+        candidate_session=_candidate("run-1"),
         run_id="run-1",
         space_id="space-1",
         benchmarks=[],
@@ -403,6 +416,7 @@ def test_aggregate_improvement_is_rolled_back_without_paired_evidence(
     result = unified_loop.run_unified_optimization_loop(
         MagicMock(),
         MagicMock(),
+        candidate_session=_candidate("run-1"),
         run_id="run-1",
         space_id="space-1",
         benchmarks=[],

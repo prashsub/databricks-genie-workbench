@@ -2586,8 +2586,16 @@ def run_unified_optimization_loop(
     wide_schema_parent_artifact_id: str | None = None,
     wide_schema_profile_budget: dict[str, Any] | None = None,
     diagnostic_callback: Callable[..., None] | None = None,
+    candidate_session: Any = None,
 ) -> dict[str, Any]:
     """Run baseline eval plus bounded LLM patch attempts."""
+    if candidate_session is None:
+        raise PermissionError("An optimizer-owned CandidateSession is required")
+    resource = candidate_session.validate(run_id)
+    if apply_mode != "genie_config":
+        raise PermissionError("Candidate exploration cannot mutate shared UC artifacts")
+    space_id = resource.space_id
+    w = candidate_session.client
     target_accuracy = target_accuracy_percent(float(target_accuracy))
     allowed_levers = [int(l) for l in levers if int(l) in {1, 2, 3, 4, 5, 6}]
     if not allowed_levers:
