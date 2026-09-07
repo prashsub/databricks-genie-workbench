@@ -70,3 +70,24 @@ def test_reviewed_exact_sql_override_is_bound_in_mapping(package_rig):
     artifact = {'serialized_space': {'instructions': {'example_question_sqls': [{'sql': [sql]}]}}}
     rendered = MappingTransformer().render(artifact, mapping, package_rig.target)
     assert rendered.serialized_space['instructions']['example_question_sqls'][0]['sql'] == ['SELECT * FROM prod.sales.orders']
+
+
+@pytest.mark.parametrize('case', ['target', 'wrong_binding', 'injected_environment'])
+def test_warehouse_folder_binding_and_principals_remain_target_local(package_rig, case):
+    rig = package_rig
+    mapping = replace(rig.mapping, mappings={**dict(rig.mapping.mappings),
+        'target:warehouse_id': 'target-warehouse', 'target:parent_path': '/target/folder',
+        'target:consumer:analysts': 'target-analysts'})
+    artifact = {'serialized_space': {'data_sources': {'tables': [{'identifier': 'dev.sales.orders'}]}}}
+    target = replace(rig.target, binding_revision=2) if case == 'wrong_binding' else rig.target
+    if case == 'injected_environment':
+        artifact['serialized_space']['config'] = {'warehouse_id': 'source-warehouse'}
+    if case != 'target':
+        with pytest.raises(ValueError):
+            MappingTransformer().render(artifact, mapping, target)
+        return
+    result = MappingTransformer().render(artifact, mapping, target)
+    assert getattr(result, 'environment', None) == {'warehouse_id': 'target-warehouse',
+        'parent_path': '/target/folder', 'consumers': ('target-analysts',)}
+    assert 'warehouse_id' not in result.serialized_space
+    assert 'permissions' not in result.serialized_space

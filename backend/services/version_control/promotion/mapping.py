@@ -10,6 +10,7 @@ from backend.services.version_control import contracts as vc
 class RenderedPayload:
     serialized_space: dict
     description: str | None
+    environment: dict
 
 
 TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*|\s+|.")
@@ -80,6 +81,8 @@ def map_sql(sql, mappings):
 def map_executable_fields(value, mappings):
     if isinstance(value, dict):
         for key, child in value.items():
+            if key in {'warehouse_id', 'workspace_id', 'space_id', 'parent_path', 'permissions', 'principals'}:
+                raise ValueError('Environment bindings cannot appear in portable content')
             if key in {'expression', 'sql_expression', 'query', 'function_name'}:
                 raise ValueError('Unsupported executable field requires schema review')
             if key == 'sql' or (key == 'content' and value.get('format') == 'SQL'):
@@ -97,6 +100,8 @@ class MappingTransformer:
     version = 'vc-map/1'
 
     def render(self, artifact, mapping, target_binding):
+        if mapping.target_binding != target_binding or target_binding.space_id is None:
+            raise ValueError('Mapping requires exact pre-enrolled target binding')
         if mapping.transformer_version != self.version:
             raise ValueError('Unsupported mapping transformer version')
         content = vc.to_wire(artifact['serialized_space'])
@@ -108,4 +113,8 @@ class MappingTransformer:
                     raise ValueError('Unresolved structured identifier')
                 entry['identifier'] = mapping.mappings.get(identifier, identifier)
         map_executable_fields(content, mapping.mappings)
-        return RenderedPayload(content, artifact.get('description'))
+        environment = {key.removeprefix('target:'): value for key, value in mapping.mappings.items()
+                       if key in {'target:warehouse_id', 'target:parent_path'}}
+        environment['consumers'] = tuple(sorted(value for key, value in mapping.mappings.items()
+                                                if key.startswith('target:consumer:')))
+        return RenderedPayload(content, artifact.get('description'), environment)

@@ -10,3 +10,4 @@ All commands run from the m07 worktree. Each numbered task is committed separate
 | 3 | Named structured mapping: NotImplementedError | Mapping: 1 passed |
 | 4 | SQL golden assertion: source identifier unchanged | Mapping: 2 passed |
 | 5 | 16 failures: unsupported SQL accepted, executable fields ignored, override ignored | Mapping: 18 passed |
+| 6 | 3 failures: missing target environment, stale binding and injected warehouse accepted | Mapping: 21 passed |
