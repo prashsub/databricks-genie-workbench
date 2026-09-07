@@ -25,7 +25,7 @@ Fingerprint contract (all three steps matter equally):
    sorted. The legacy ``_collection_keys=None`` path retains blanket sorting
    of string-id arrays for persisted-hash compatibility. The VC path sorts
    only declared id-addressed collections (t4), retaining other array order.
-   Duplicate-id arrays retain their order in both paths. VC data sources
+   Duplicate-id arrays retain their order only in the VC path. VC data sources
    merge tables and metric views by identifier: read-back loses that split,
    so the hash must ignore it and its METRIC_VIEW type markers.
 3. **Hash** — SHA-256 over the compact JSON serialization.
@@ -401,8 +401,8 @@ def canonicalize(
       array sorting, frozen for compatibility with persisted fingerprints;
     * the VC path sorts only collections declared in ``_collection_keys`` by
       their identity field (t4), never arbitrary arrays containing id fields;
-    * duplicate-id arrays are no longer sorted: the uniqueness guard preserves
-      their input order in both paths rather than assuming stable addressing;
+    * the VC uniqueness guard preserves duplicate-id array input order rather
+      than assuming stable addressing; legacy sorting remains unchanged;
     * everything else (scalars and non-id array order) is preserved — those
       are meaningful configuration.
     """
@@ -452,7 +452,10 @@ def canonicalize(
                 and isinstance(value.get(identity_key), str)
                 for value in items
             )
-            and len({value[identity_key] for value in items}) == len(items)
+            and (
+                _collection_keys is None
+                or len({value[identity_key] for value in items}) == len(items)
+            )
         ):
             items.sort(key=lambda value: value[identity_key])
         return items
