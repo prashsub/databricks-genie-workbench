@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { VersionControlError } from '@/lib/version-control-api'
 import type { VersionControlApi } from '@/lib/version-control-api'
 import type { Operation, RestoreCommand } from '@/types/version-control'
+import { OperationStatusView } from './reconcile'
 
 export async function pollOperation(api: VersionControlApi, operationId: string, onUpdate?: (operation: Operation) => void) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -45,7 +46,7 @@ export function RestorePanel({ api, bindingId, command, disabled, onComplete }: 
     <label><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />Confirm reviewed version and base</label>
     <button disabled={disabled || busy || !confirmed || !approvalId.trim() || Boolean(error) || Boolean(operation)} onClick={() => void submit()}>Submit restore / roll forward</button>
     {busy && <p role="status">Operation pending — polling status, not replaying the command.</p>}
-    {operation && <p role="status">Operation {operation.operation_id}: {operation.status}</p>}
+    {operation && <OperationStatusView operation={operation} onVerify={() => { void api.operation(operation.operation_id).then(setOperation).catch(error => setError(String(error))) }} />}
     {error && <p role="alert">{error} Command outcome unresolved; do not blindly retry.</p>}
   </section>
 }

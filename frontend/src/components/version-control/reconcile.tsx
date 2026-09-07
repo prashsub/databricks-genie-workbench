@@ -1,9 +1,20 @@
 import { useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
-import type { ApprovalInputs, ApprovalRecord, ReviewedCommand } from '@/types/version-control'
+import type { ApprovalInputs, ApprovalRecord, Operation, ReviewedCommand } from '@/types/version-control'
 import { canMutate } from '@/hooks/use-version-control'
 import type { VersionControlState } from '@/hooks/use-version-control'
 import { pollOperation } from './restore'
+export function OperationStatusView({ operation, onVerify }: { operation: Operation; onVerify: () => void }) {
+  return <section aria-label="Operation verification and audit">
+    <h3>Operation {operation.operation_id}</h3>
+    <p role="status">{operation.status}</p>
+    <p>No mutation replay. Partial, unverified, conflicted or quarantined outcomes require operator evidence and authorized recovery.</p>
+    <h4>Checkpoints</h4><ul>{operation.checkpoints.map((checkpoint, index) => <li key={index}>{checkpoint}</li>)}</ul>
+    <h4>Audit evidence</h4><ul>{operation.audit.map((fact, index) => <li key={index}>{fact}</li>)}</ul>
+    <h4>Receipt references</h4><ul>{operation.receipt_references.map(reference => <li key={reference}>{reference}</li>)}</ul>
+    <button onClick={onVerify}>Verify operation status</button>
+  </section>
+}
 
 export async function reconcileAction(api: VersionControlApi, bindingId: string, action: 'adopt' | 'reapply' | 'acknowledge', reviewed: ReviewedCommand, inputs: ApprovalInputs, approval: ApprovalRecord | null, key: string) {
   if (action === 'adopt') return api.requestApproval(inputs, key)

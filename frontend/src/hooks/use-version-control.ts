@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
+import { VersionControlError } from '@/lib/version-control-api'
 import type { BindingStatus, VersionPage } from '@/types/version-control'
 import { demoApi } from '@/components/version-control/demo-api'
 
@@ -33,7 +34,8 @@ export function createVersionControlStore(api: VersionControlApi) {
         const observation = await api.observe(bindingId, reason, crypto.randomUUID())
         update({ status: observation.status, captured: !observation.busy && !observation.status.stale, busy: observation.busy, stale: observation.status.stale })
       } catch (error) {
-        update({ captured: false, stale: true, error: error instanceof Error ? error.message : 'Capture unavailable' })
+        const label = error instanceof VersionControlError ? error.status === 423 ? 'Quarantined / unresolved: ' : error.status === 409 ? 'Conflicted; preserved history: ' : error.status === 503 ? 'Evidence unreachable: ' : '' : ''
+        update({ captured: false, stale: true, error: label + (error instanceof Error ? error.message : 'Capture unavailable') })
       }
       try { update({ history: await api.versions(bindingId) }) }
       catch (error) { update({ stale: true, captured: false, error: `${state.error} History unavailable: ${String(error)}` }) }
