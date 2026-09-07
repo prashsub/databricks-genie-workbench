@@ -95,3 +95,39 @@ def test_job_runtime_refuses_unintegrated_handlers_and_verifies_retries():
     from backend.services.version_control.platform.jobs import main
     with pytest.raises(PermissionError, match="not integrated"):
         main(["--kind", "restore", "--operation-id", operation_id])
+
+
+def test_first_write_enable_requires_every_safety_capability():
+    container = platform.compose()
+    assert callable(getattr(container, "enabled", None)), "Feature requests alone must not enable writes"
+    from backend.services.version_control.platform.capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS
+    from backend.services.version_control.platform import REQUIRED_WRITE_PORTS
+    flags = FeatureFlags(**{name: True for name in WRITE_SWITCHES}, vc_history_enabled=True)
+    probe = Mock(return_value={name: True for name in FIRST_WRITE_CAPABILITIES})
+    factories = {port: Mock(return_value=object()) for port in REQUIRED_WRITE_PORTS}
+    container = platform.compose(factories, flags=flags, capability_probe=probe,
+                                  routed_writers=REQUIRED_WRITER_PATHS)
+    assert all(container.enabled(name) for name in WRITE_SWITCHES)
+    for missing in FIRST_WRITE_CAPABILITIES:
+        probe.return_value = {name: True for name in FIRST_WRITE_CAPABILITIES if name != missing}
+        assert all(not container.enabled(name) for name in WRITE_SWITCHES)
+        assert container.enabled("vc_history_enabled")
+    probe.return_value = {name: True for name in FIRST_WRITE_CAPABILITIES}
+    for missing in REQUIRED_WRITER_PATHS:
+        unintegrated = platform.compose(factories, flags=flags, capability_probe=probe,
+                                        routed_writers=REQUIRED_WRITER_PATHS - {missing})
+        assert not unintegrated.enabled("vc_writes_enabled")
+    for missing in REQUIRED_WRITE_PORTS:
+        unintegrated = platform.compose({port: factory for port, factory in factories.items() if port != missing},
+                                        flags=flags, capability_probe=probe, routed_writers=REQUIRED_WRITER_PATHS)
+        assert not unintegrated.enabled("vc_writes_enabled")
+    probe.side_effect = TimeoutError("coordination/evidence outage")
+    for name in WRITE_SWITCHES:
+        assert not container.enabled(name)
+        with pytest.raises(PermissionError):
+            container.require_write(name)
+    assert container.enabled("vc_history_enabled")
+    assert not platform.compose(flags=flags).enabled("vc_writes_enabled")
+    root = Path(__file__).resolve().parents[2]
+    env = {item["name"]: item.get("value") for item in yaml.safe_load((root / "app.yaml").read_text())["env"]}
+    assert all(env[name.upper()] == "false" for name in WRITE_SWITCHES)
