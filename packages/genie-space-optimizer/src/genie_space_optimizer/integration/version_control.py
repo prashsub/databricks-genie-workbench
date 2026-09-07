@@ -74,6 +74,12 @@ class ChampionAdapter(Protocol):
               expected_base: str, executor: Any) -> Any: ...
 
 
+@dataclass(frozen=True)
+class RecoveryHandle:
+    operation_id: str
+    job_kind: str = "recovery"
+
+
 class ChampionRun:
     def __init__(self, run_id: str, adapter: ChampionAdapter):
         self.run_id = run_id
@@ -84,6 +90,8 @@ class ChampionRun:
         self.post_version = None
         self.pre_version = None
         self.evidence_references = ()
+        self.recovery_handle = None
+        self._apply_identity = None
 
     def record_iteration(self, champion_id: str, payload: dict, score: float):
         from copy import deepcopy
@@ -95,10 +103,21 @@ class ChampionRun:
     def apply(self, champion_id, binding, expected_base, executor):
         if self.abandoned:
             raise PermissionError("An abandoned run cannot apply a champion")
+        identity = (champion_id, binding, expected_base)
+        if self._apply_identity is not None:
+            if identity != self._apply_identity:
+                raise ValueError("Run already selected a different champion/base")
+            if self.receipt is None:
+                raise RuntimeError("Unknown apply outcome requires governed Job recovery")
+            return self.receipt
+        self._apply_identity = identity
         receipt = self.adapter.apply(self.run_id, champion_id, binding, expected_base, executor)
         self.receipt = receipt
         self.pre_version = receipt.preimage
         self.evidence_references = receipt.evidence_references
+        if receipt.unresolved or receipt.status in {"applied_partial", "applied_unverified", "quarantined"}:
+            self.recovery_handle = RecoveryHandle(receipt.operation_id)
+            return receipt
         if receipt.status == "noop" and not receipt.unresolved:
             self.post_version = None
             return receipt
