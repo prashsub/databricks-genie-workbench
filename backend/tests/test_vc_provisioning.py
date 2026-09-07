@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from unittest.mock import Mock
 
 import pytest
@@ -8,6 +9,28 @@ from backend.tests.integration.conftest import live_platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_bundle_guard_precedes_every_databricks_invocation_on_every_branch():
+    preflight = (ROOT / "scripts/preflight.sh").read_text()
+    deploy = (ROOT / "scripts/deploy.sh").read_text()
+    lines = deploy.splitlines()
+    invocations = [
+        number for number, line in enumerate(lines)
+        if not line.lstrip().startswith(("#", "echo ", "echo -"))
+        and re.search(r"(^|[^#\w])databricks ", line)
+    ]
+    guard = lines.index("_preflight_check_vc_bundle_content")
+    violations = []
+    if preflight.index("_error()") > preflight.index("_preflight_check_vc_bundle_content()"):
+        violations.append("guard helper must follow status helpers")
+    assert invocations, "Must enumerate every platform invocation"
+    for number in invocations:
+        if number <= guard:
+            violations.append(f"unguarded platform invocation at line {number + 1}: {lines[number]}")
+    if guard >= lines.index('if [ "$DESTROY_MODE" = "true" ]; then'):
+        violations.append("guard must run unconditionally before the destroy/deploy branch")
+    assert not violations, "\n".join(violations)
 
 
 def test_deployment_contains_no_governed_genie_content_resource(tmp_path):

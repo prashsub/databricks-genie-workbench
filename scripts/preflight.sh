@@ -10,15 +10,6 @@
 
 MIN_DB_CLI_VERSION="0.297.2"
 
-_preflight_check_vc_bundle_content() {
-    local root="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-    python3 "$root/scripts/version_control/bundle_guard.py" \
-        "$root/databricks.yml" "$root/packages/genie-space-optimizer/databricks.yml" || {
-        _error "VC bundle content guard failed; refusing deployment."
-        exit 1
-    }
-}
-
 # ── Shared color + status helpers ───────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,6 +24,15 @@ _ok()     { echo -e "${GREEN}✓${NC} $*"; }
 _warn()   { echo -e "${YELLOW}⚠${NC} $*"; }
 _error()  { echo -e "${RED}✗${NC} $*" >&2; }
 _header() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}\n"; }
+
+_preflight_check_vc_bundle_content() {
+    local root="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    python3 "$root/scripts/version_control/bundle_guard.py" \
+        "$root/databricks.yml" "$root/packages/genie-space-optimizer/databricks.yml" || {
+        _error "VC bundle content guard failed; refusing deployment."
+        exit 1
+    }
+}
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 
