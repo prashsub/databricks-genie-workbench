@@ -1,8 +1,9 @@
+// @vitest-environment jsdom
 import { expect, it, vi } from 'vitest'
-import { reconcileAction, OperationStatusView } from './reconcile'
+import { reconcileAction, OperationStatusView, ReconcilePanel } from './reconcile'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { VersionControlApi } from '@/lib/version-control-api'
-import { approvalFixture, approvalInputsFixture, fingerprints } from './fixtures'
+import { approvalFixture, approvalInputsFixture, fingerprints, bindingFixture } from './fixtures'
 
 it('adopt_requests_approval_and_reapply_does_not_reuse_invalid_approval', async () => {
   const transport = vi.fn(async () => new Response(JSON.stringify(approvalFixture)))
@@ -26,3 +27,25 @@ it('quarantine_and_partial_outcome_never_offer_blind_retry', () => {
     expect(html).toContain('No mutation replay')
   }
 })
+
+
+it('reconcile_result_renders_operation_evidence_not_a_bare_message', async () => {
+  const operation = { operation_id: 'partial-1', status: 'applied_partial', job_run_id: null, checkpoints: ['Description stopped'], audit: ['External state preserved'], receipt_references: [] }
+  const transport = vi.fn(async () => new Response(JSON.stringify(operation)))
+  const api = new VersionControlApi(transport)
+  const state = { bindingId: 'demo-binding', loading: false, captured: true, busy: false, stale: false, status: bindingFixture, history: { items: [], next_cursor: null }, error: '' }
+  const host = document.createElement('div')
+  const root = createRoot(host)
+  try {
+    await act(async () => root.render(<ReconcilePanel api={api} state={state} inputs={approvalInputsFixture} approval={null} onApproval={vi.fn()} onComplete={vi.fn()} onCompare={vi.fn()} />))
+    await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent?.includes('Acknowledge'))!.click())
+    expect(host.textContent).toContain('applied_partial')
+    expect(host.textContent).toContain('Description stopped')
+    expect(host.textContent).toContain('External state preserved')
+    expect(transport.mock.calls[1][0]).toBe('/api/version-control/operations/partial-1')
+  } finally { await act(async () => root.unmount()) }
+})
+
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })

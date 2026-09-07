@@ -13,14 +13,14 @@ import { ApprovalsPanel } from './approvals'
 import { approvalInputsFixture } from './fixtures'
 import { PromotionPanel } from './promotion'
 
-export function VersionControlView({ state }: { state: VersionControlState }) {
+export function VersionControlView({ state, api }: { state: VersionControlState; api?: VersionControlApi }) {
   return <section aria-label="Version Control and Promotion" aria-live="polite" className="space-y-4">
     <h2>Version Control and Promotion</h2>
     {state.loading && <p role="status">Capturing external history…</p>}
     {state.stale && <p role="alert">Stale history — mutating actions disabled. {state.error}</p>}
     {state.busy && <p role="status">Capture busy — wait for verification. No mutation retry.</p>}
     {!state.loading && !state.history.items.length && <p>No captured versions available.</p>}
-    {state.status && <OverviewBadge status={state.status} />}
+    {state.status && <OverviewBadge api={api} status={state.status} />}
     <ul>{state.history.items.map(version => <li key={version.version_id}>{version.version_id} · {version.origin}</li>)}</ul>
     {canMutate(state, 'adopt') && <p>Reconciliation choices are available for the captured base.</p>}
   </section>
@@ -43,7 +43,7 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
     finally { setComparing(false) }
   }
   return <div className="space-y-6">
-    <VersionControlView state={state} />
+    <VersionControlView api={api} state={state} />
     <button disabled={state.loading} onClick={() => void state.refresh('history')}>Refresh captured history</button>
     <History page={state.history} loading={state.loading} onNext={() => void state.nextPage()} onSelect={setSelected} onCompare={(left, right) => void compare(left, right)} />
     {selected && <p>Selected historical version: {selected.version_id}</p>}

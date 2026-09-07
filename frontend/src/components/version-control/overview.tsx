@@ -29,7 +29,7 @@ export function VersionControlOverview({ api, onSelect }: { api: VersionControlA
     {!loading && !error && page.items.length === 0 && <p>No enrolled bindings.</p>}
     <ul>{page.items.map(status => <li key={status.binding_id}>
       <button onClick={() => onSelect(status.binding_id)}>{status.binding_id}</button>
-      <OverviewBadge status={status} />
+      <OverviewBadge api={api} status={status} />
     </li>)}</ul>
     <button disabled={loading || !cursor} onClick={() => setCursor(undefined)}>First page</button>
     <button disabled={loading || !page.next_cursor} onClick={() => setCursor(page.next_cursor ?? undefined)}>Next page</button>

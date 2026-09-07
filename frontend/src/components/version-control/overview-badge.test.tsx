@@ -29,3 +29,25 @@ it('overview_does_not_fetch_live_genie_per_row', async () => {
   expect(transport.mock.calls[1][0]).toBe('/api/version-control/overview?limit=25&cursor=page%2F2')
   expect(transport.mock.calls.every(([url]) => String(url).includes('/overview?'))).toBe(true)
 })
+
+it('badge_distinguishes_partial_unresolved_quarantined_conflicted_and_stale_clean', () => {
+  const render = (changes = {}) => renderToStaticMarkup(<OverviewBadge status={{ ...bindingFixture, reasons: [], ...changes }} />)
+  const markups = [
+    render({ drift: 'diverged', unresolved_operation_id: 'op-1' }),
+    render({ drift: 'diverged', unresolved_operation_id: null }),
+    render({ quarantined: true, drift: 'conflicted' }),
+    render({ drift: 'clean', stale: true, heads: { approved: 'p', deployed: 'p', observed: 'x' } }),
+    render({ drift: 'unknown' }),
+    render({ drift: 'unreachable' }),
+  ]
+  expect(new Set(markups).size).toBe(markups.length)
+  expect(markups[0]).toContain('op-1')
+  expect(markups[2]).toContain('Quarantined')
+  expect(markups[2]).toContain('Conflicted')
+  expect(markups[3]).not.toContain('In sync')
+  expect(render({ reasons: ['dual_authority_detected'] })).toContain('dual_authority_detected')
+  for (const [drift, label] of [['external_ahead', 'External ahead'], ['desired_ahead', 'Desired ahead'], ['diverged', 'Diverged']]) expect(render({ drift })).toContain(label)
+  expect(render({ drift: 'clean', heads: { observed: 'x', approved: null, deployed: null } })).toContain('Unknown')
+  expect(render({ drift: 'clean', heads: { observed: 'x', approved: 'p', deployed: 'p' } })).toContain('In sync')
+  expect(render({ drift: 'clean', heads: { observed: 'p', approved: 'p', deployed: 'q' } })).toContain('Policy mismatch')
+})

@@ -17,6 +17,21 @@ export function OperationStatusView({ operation, onVerify }: { operation: Operat
   </section>
 }
 
+export function OperationDrillThrough({ api, operationId }: { api?: VersionControlApi; operationId: string }) {
+  const [operation, setOperation] = useState<Operation | null>(null)
+  const [error, setError] = useState('')
+  const verify = async () => {
+    if (!api) return
+    try { setOperation(await api.operation(operationId)); setError('') }
+    catch (error) { setError(String(error)) }
+  }
+  return <div>
+    <button disabled={!api} onClick={() => void verify()}>Inspect unresolved operation {operationId}</button>
+    {operation && <OperationStatusView operation={operation} onVerify={() => void verify()} />}
+    {error && <p role="alert">Operation evidence unavailable: {error}. No mutation replay.</p>}
+  </div>
+}
+
 export async function reconcileAction(api: VersionControlApi, bindingId: string, action: 'adopt' | 'reapply' | 'acknowledge', reviewed: ReviewedCommand, inputs: ApprovalInputs, approval: ApprovalRecord | null, key: string) {
   if (action === 'adopt') return api.requestApproval(inputs, key)
   if (action === 'reapply' && (!approval?.valid || approval.approval_id !== reviewed.approval_id || approval.inputs.target_binding !== bindingId || Date.parse(approval.inputs.expires_at) <= Date.now() || JSON.stringify(approval.inputs.expected_base_fingerprints) !== JSON.stringify(reviewed.expected_base))) {
@@ -31,6 +46,7 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
 }) {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [operation, setOperation] = useState<Operation | null>(null)
   const [error, setError] = useState('')
   const [intent] = useState(createMutationIntent)
   const action = async (action: 'adopt' | 'reapply' | 'acknowledge') => {
@@ -40,7 +56,7 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
       const reviewed = { binding_revision: state.status.binding_revision, expected_base: inputs.expected_base_fingerprints, approval_id: approval?.approval_id ?? '' }
       const result = await reconcileAction(api, state.bindingId, action, reviewed, inputs, approval, intent.key({ bindingId: state.bindingId, action, reviewed, inputs }))
       if ('approval_id' in result) { onApproval(result.approval_id); setMessage(`Approval requested: ${result.approval_id}. Not yet approved.`) }
-      else { setMessage(`Operation ${result.operation_id}: ${result.status}. Acknowledgement does not align heads.`); onComplete() }
+      else { setOperation(result); setMessage(`Operation ${result.operation_id}: ${result.status}. Acknowledgement does not align heads.`); onComplete() }
     } catch (error) { setError(String(error)) }
     finally { setBusy(false) }
   }
@@ -51,6 +67,7 @@ export function ReconcilePanel({ api, state, inputs, approval, onApproval, onCom
     {(['adopt', 'reapply', 'acknowledge'] as const).map(kind => <button key={kind} disabled={busy || Boolean(error) || !canMutate(state, kind) || (kind === 'reapply' && !approval?.valid)} onClick={() => void action(kind)}>{kind === 'adopt' ? 'Request adoption approval' : kind === 'reapply' ? 'Reapply approved state' : 'Acknowledge scoped divergence'}</button>)}
     {busy && <p role="status">Reconciliation pending…</p>}
     {message && <p role="status">{message}</p>}
+    {operation && <OperationStatusView operation={operation} onVerify={() => { void api.operation(operation.operation_id).then(setOperation).catch(error => setError(String(error))) }} />}
     {error && <p role="alert">{error} No automatic mutation retry.</p>}
   </section>
 }
