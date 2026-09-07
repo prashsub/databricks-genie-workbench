@@ -3,11 +3,14 @@ import type { VersionControlState } from '@/hooks/use-version-control'
 import type { VersionControlApi } from '@/lib/version-control-api'
 import { OverviewBadge } from './overview-badge'
 import { useState } from 'react'
-import type { SemanticDiff, VersionSummary } from '@/types/version-control'
+import type { ApprovalRecord, SemanticDiff, VersionSummary } from '@/types/version-control'
 import { History } from './history'
 import { SemanticDiffView } from './diff'
 import { demoApi } from './demo-api'
 import { RestorePanel } from './restore'
+import { ReconcilePanel } from './reconcile'
+import { ApprovalsPanel } from './approvals'
+import { approvalInputsFixture } from './fixtures'
 
 export function VersionControlView({ state }: { state: VersionControlState }) {
   return <section aria-label="Version Control and Promotion" className="space-y-4">
@@ -18,7 +21,7 @@ export function VersionControlView({ state }: { state: VersionControlState }) {
     {!state.loading && !state.history.items.length && <p>No captured versions available.</p>}
     {state.status && <OverviewBadge status={state.status} />}
     <ul>{state.history.items.map(version => <li key={version.version_id}>{version.version_id} · {version.origin}</li>)}</ul>
-    {canMutate(state, 'adopt') && <fieldset><legend>Reconcile captured changes</legend><button>Request adoption approval</button></fieldset>}
+    {canMutate(state, 'adopt') && <p>Reconciliation choices are available for the captured base.</p>}
   </section>
 }
 export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: string; api?: VersionControlApi }) {
@@ -27,6 +30,10 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
   const [diff, setDiff] = useState<SemanticDiff | null>(null)
   const [comparing, setComparing] = useState(false)
   const [error, setError] = useState('')
+  const [approvalId, setApprovalId] = useState('')
+  const [approval, setApproval] = useState<ApprovalRecord | null>(null)
+  const base = state.history.items.find(version => version.version_id === state.status?.heads.observed)
+  const inputs = { ...approvalInputsFixture, target_binding: bindingId, source_version_id: base?.version_id ?? '', expected_base_fingerprints: base?.fingerprints ?? approvalInputsFixture.expected_base_fingerprints }
   const compare = async (left: string, right: string) => {
     setComparing(true)
     setError('')
@@ -46,5 +53,7 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
     {comparing && <p role="status">Loading comparison…</p>}
     {error && <p role="alert">{error}</p>}
     {diff && <SemanticDiffView diff={diff} />}
+    {base && <ReconcilePanel api={api} state={state} inputs={inputs} approval={approval} onApproval={setApprovalId} onComplete={() => void state.refresh()} onCompare={() => { if (state.status?.heads.approved && state.status.heads.observed) void compare(state.status.heads.approved, state.status.heads.observed) }} />}
+    <ApprovalsPanel api={api} approvalId={approvalId} inputs={inputs} disabled={!canMutate(state, 'adopt')} onApproval={setApprovalId} onRecord={setApproval} />
   </div>
 }
