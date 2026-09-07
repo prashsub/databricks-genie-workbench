@@ -207,3 +207,30 @@ def test_target_delta_adapter_and_owned_ddl_are_append_only_and_default_off():
         store.append(fact().event_key, to_wire(fact(binding=replace(binding_fixture(), workspace_id='source'))))
     with pytest.raises(ValueError):
         DeltaFactStore(sql, 'catalog; DROP TABLE x', 'control', '123')
+
+
+@pytest.mark.parametrize('mode', ['dev', 'break-glass'])
+def test_consumption_flush_supports_bound_dev_and_break_glass_grants(mode):
+    from datetime import timedelta
+    from backend.services.version_control.contracts import ActorContext, BreakGlassRequest
+    from backend.tests.test_vc_approvals import setup_approval, submit
+
+    context = setup_approval(environment='dev' if mode == 'dev' else 'prod')
+    submit(context)
+    if mode == 'dev':
+        grant = context.service.authorize(context.request, context.executor)
+    else:
+        actor = ActorContext('emergency-human', '123', 'human')
+        context.identity.memberships[(actor.subject_id, '123')] = frozenset({'break-glass'})
+        override = BreakGlassRequest(context.request.identity, context.request.binding, 'incident',
+                                     NOW + timedelta(minutes=15), context.bound.preflight_evidence_digest, True)
+        grant = context.service.break_glass(override, actor)
+    observation = ObservationRef(uid(3), grant.binding.binding_id, 1, context.request.expected_base, DIGEST)
+    claim = AdmissionClaim(grant.binding.binding_id, 1, uid(5), 1, 2,
+                           grant.request, observation, grant.approval_id, grant.approval_digest)
+    reference = context.facts.publish_consumption(claim)
+    restarted, _ = durable(context.store)
+    assert restarted.publish_consumption(claim) == reference
+    assert restarted.verify_flush(claim)
+    with pytest.raises(PermissionError):
+        restarted.publish_consumption(replace(claim, attempt_id=uid(55)))

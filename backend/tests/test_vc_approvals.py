@@ -398,3 +398,25 @@ def test_break_glass_requires_group_reason_expiry_and_cannot_skip_evidence(fault
             context.service.authorize(context.request, context.executor)
         assert any(row.payload['drift_override'] and row.payload['status'] == 'quarantined'
                    for row in context.store.state.rows)
+
+
+def test_authorization_publishes_durable_grant_before_return_and_invalidations_block():
+    from backend.tests.vc_fakes.stores import CrashBoundary, InjectedCrash
+
+    context = setup_approval()
+    approval = approve(context)
+    context.store.failures.inject(CrashBoundary.BEFORE_COMMIT)
+    with pytest.raises(InjectedCrash):
+        context.service.authorize(context.request, context.executor)
+    grant = context.service.authorize(context.request, context.executor)
+    record = context.facts.get_request(uid(2)).approval
+    assert record.status == FactStatus.APPROVED
+    assert grant == context.service.authorize(context.request, context.executor)
+    with pytest.raises(PermissionError, match='sealed'):
+        context.service.vote(approval.approval_id, 'approve', ActorContext('late-voter', '123', 'human'))
+    context.facts.append(fact(binding=context.request.binding, request=context.request.identity,
+                             fact_kind=FactKind.APPROVAL_INVALIDATED, transition_sequence=100,
+                             status=FactStatus.INVALIDATED, approval_id=approval.approval_id,
+                             evidence=replace(record, status=FactStatus.INVALIDATED)))
+    with pytest.raises(PermissionError, match='invalidated'):
+        context.service.authorize(context.request, context.executor)

@@ -5,7 +5,7 @@ from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
-    ApprovalRecord, ApprovalRequest, ApprovalVote, AuthorizationGrant, FactKind, FactStatus,
+    ActorContext, ApprovalRecord, ApprovalRequest, ApprovalVote, AuthorizationGrant, FactKind, FactStatus,
     IdentityProvider, OperationFact, OperationFacts, Registry, RequestIdentity,
     StageEvidence, canonical_json_hash, to_wire,
 )
@@ -107,7 +107,8 @@ class ApprovalService:
         request = self.facts.get_request(inputs.operation_id).request
         provisional = OperationFact(
             event_id=inputs.operation_id, fact_kind=kind, operation_id=inputs.operation_id,
-            transition_sequence=len(record.votes), event_key='', binding=inputs.target_binding,
+            transition_sequence=len(record.votes) + (1 if kind == FactKind.APPROVAL_GRANTED else 0),
+            event_key='', binding=inputs.target_binding,
             request=request.identity, operation_type=inputs.operation_type,
             requester_id=inputs.requester_id, actor=actor, status=record.status,
             evidence=record, recorded_at=self.now(), approval_id=record.request.approval_id,
@@ -137,6 +138,8 @@ class ApprovalService:
         record = self.get(approval_id)
         inputs = record.request.inputs
         self._fresh(inputs, record.request.requested_at)
+        if record.status != FactStatus.REQUESTED:
+            raise PermissionError('Approval votes are sealed')
         if actor.actor_kind != 'human' or actor.subject_id == inputs.requester_id:
             raise PermissionError('Only non-requester humans may approve')
         if 'approvers' not in self.identity.groups(actor.subject_id, actor.workspace_id):
@@ -158,6 +161,8 @@ class ApprovalService:
     def authorize(self, request, executor):
         self._enabled()
         record = self.get(request.approval_id)
+        if record.status not in (FactStatus.REQUESTED, FactStatus.APPROVED):
+            raise PermissionError('Approval invalidated or unavailable')
         inputs = record.request.inputs
         self._fresh(inputs, record.request.requested_at)
         stored = self.facts.get_request(inputs.operation_id)
@@ -173,6 +178,7 @@ class ApprovalService:
         if inputs.target_binding.environment == 'dev' and inputs.operation_type == 'edit':
             if not self.identity.can_edit(inputs.requester_id, inputs.target_binding):
                 raise PermissionError('Requester edit right required')
+            self._publish_grant(record, executor)
             return AuthorizationGrant(inputs.target_binding, request.identity,
                                       f'rights:{inputs.operation_id}:{input_digest(inputs)}',
                                       inputs.expected_base_fingerprints, inputs.rendered_target_digest,
@@ -189,9 +195,18 @@ class ApprovalService:
             raise PermissionError('Approver policy membership revoked')
         if not any('target-approvers' in target.groups(subject, executor.workspace_id) for subject in approvers):
             raise PermissionError('Target-side approver membership required')
+        self._publish_grant(record, executor)
         return AuthorizationGrant(inputs.target_binding, request.identity, record.request.approval_id,
                                   inputs.expected_base_fingerprints, inputs.rendered_target_digest,
                                   inputs.expires_at, record.request.approval_id, record.approval_digest)
+
+    def _publish_grant(self, record, executor):
+        if record.status == FactStatus.APPROVED:
+            return
+        approved = replace(record, status=FactStatus.APPROVED,
+                           approval_digest=approval_digest(record.request.inputs, record.votes))
+        self._record(approved, ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
+                     FactKind.APPROVAL_GRANTED)
 
     def suspended(self, binding):
         history = self.facts.lookup_request(binding, 'vc:break-glass-suspension')

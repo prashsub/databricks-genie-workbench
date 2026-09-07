@@ -156,11 +156,27 @@ class DurableOperationFacts:
                 or claim.preimage.binding_id != claim.binding_id
                 or claim.preimage.binding_revision != claim.binding_revision):
             raise ValueError('Admission claim binding or request mismatch')
-        if record is None or record.request.approval_id != claim.approval_id or record.approval_digest != claim.approval_digest:
+        if record is None:
             raise PermissionError('Durable approval evidence does not match consumption')
-        use = self.approval_use(request.binding, claim.approval_id)
-        if use.ambiguous or use.consumptions:
-            raise PermissionError('Approval already consumed')
+        evidence = record
+        if claim.approval_id is None:
+            if (claim.approval_digest is not None or request.binding.environment != 'dev'
+                    or request.operation_type != 'edit' or record.status != FactStatus.APPROVED):
+                raise PermissionError('Durable dev grant evidence required')
+        else:
+            normal = (record.request.approval_id == claim.approval_id
+                      and record.approval_digest == claim.approval_digest and record.status == FactStatus.APPROVED)
+            if not normal:
+                overrides = [row for row in self.lookup_request(request.binding, 'vc:break-glass-suspension').facts
+                             if row.fact_kind == FactKind.BREAK_GLASS and row.approval_id == claim.approval_id
+                             and row.approval_digest == claim.approval_digest
+                             and row.evidence.identity == claim.request and row.evidence.binding == request.binding]
+                if len(overrides) != 1:
+                    raise PermissionError('Durable approval evidence does not match consumption')
+                evidence = overrides[0].evidence
+            use = self.approval_use(request.binding, claim.approval_id)
+            if use.ambiguous or use.consumptions:
+                raise PermissionError('Approval already consumed')
         pre_version_id = getattr(claim.preimage, 'version_id', None)
         if isinstance(request, MutationRequest) and getattr(claim.preimage, 'state_digest', None) != request.expected_base:
             raise ValueError('Admission preimage differs from reviewed base')
@@ -170,7 +186,7 @@ class DurableOperationFacts:
             binding=request.binding, request=request.identity, operation_type=request.operation_type,
             requester_id=record.request.inputs.requester_id,
             actor=ActorContext('coordination', request.binding.workspace_id, 'system'),
-            status=FactStatus.CONSUMED, evidence=record, recorded_at=datetime.now(timezone.utc),
+            status=FactStatus.CONSUMED, evidence=evidence, recorded_at=datetime.now(timezone.utc),
             attempt_id=claim.attempt_id, generation=claim.generation, pre_version_id=pre_version_id,
             approval_id=claim.approval_id, approval_digest=claim.approval_digest,
         )
