@@ -412,8 +412,9 @@ def test_integration_gate_command_collects_every_integration_test():
             declared_count += case_count
     assert len(collected) == declared_count, (
         f"Expected all {declared_count} declared integration cases collected, saw {len(collected)}:\n{result.stdout}")
-    assert len(collected) >= 5, (
-        f"Expected at least 5 baseline integration tests collected, saw {len(collected)}:\n{result.stdout}")
+    # Cumulative baseline: M08's 5 + M06's 5; raise as future modules add integration tests.
+    assert len(collected) >= 10, (
+        f"Expected at least 10 baseline integration tests collected, saw {len(collected)}:\n{result.stdout}")
 
     # Pin the layout: no integration-marked test may drift back out of the gated
     # directory. Match the decorator only where it is actually applied (a line whose
