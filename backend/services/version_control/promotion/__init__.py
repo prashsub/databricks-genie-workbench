@@ -46,6 +46,11 @@ class PromotionService:
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
         if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
             raise ValueError('Ambiguous or reused promotion idempotency key')
+        receipt = receipts.existing(history)
+        if receipt is not None:
+            if receipt.target_binding != request.binding or request.binding.workspace_id != self.workspace_id:
+                raise PermissionError('Receipt repair must remain target-local')
+            return receipts.export(self, receipt)
         attempted = any(fact.fact_kind == vc.FactKind.OPERATION and fact.status != vc.FactStatus.REQUESTED
                         for fact in history.facts)
         if attempted:
@@ -81,7 +86,8 @@ class PromotionService:
             raise ValueError('Target preflight evidence changed')
         self.approvals.authorize(request, executor)
         result = self.gate.execute(request, executor)
-        return receipts.record(self, operation, release, manifest, rendered, policy, result, executor)
+        receipt = receipts.record(self, operation, release, manifest, rendered, policy, result, executor)
+        return receipts.export(self, receipt)
 
     def _executor(self, executor):
         selection = self.target_selection

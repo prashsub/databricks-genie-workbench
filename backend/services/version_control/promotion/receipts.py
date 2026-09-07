@@ -7,7 +7,25 @@ from uuid import NAMESPACE_URL, uuid5
 from backend.services.version_control import contracts as vc
 from backend.services.version_control.governance.facts import fact_key
 from .mapping import RenderedPayload
-from .packages import digest
+from .packages import digest, encode, immutable_put
+
+
+def existing(history):
+    found = [fact.evidence for fact in history.facts if fact.fact_kind == vc.FactKind.RECEIPT]
+    if history.ambiguous or any(not isinstance(item, vc.DeploymentReceipt) for item in found):
+        raise ValueError('Ambiguous receipt history')
+    if found and any(item != found[0] for item in found):
+        raise ValueError('Conflicting durable receipts')
+    return found[0] if found else None
+
+
+def export(service, receipt):
+    prefix = f'{service.receipt_volume}/sha256/{digest(receipt)}'
+    evidence = {'validation_evidence_digest': receipt.validation_evidence_digest,
+                'benchmark_evidence_digest': receipt.benchmark_evidence_digest}
+    immutable_put(service.receipt_store, prefix + '/tests.json', encode(evidence))
+    immutable_put(service.receipt_store, prefix + '/receipt.json', encode(receipt))
+    return receipt
 
 
 def record(service, operation, release, manifest, rendered, policy, result, executor):

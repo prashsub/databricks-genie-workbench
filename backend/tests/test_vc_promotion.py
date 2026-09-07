@@ -12,7 +12,7 @@ from backend.services.version_control import contracts as vc
 from backend.services.version_control.promotion.mapping import MappingTransformer
 from backend.services.version_control.promotion.packages import digest, encode
 from backend.services.version_control.governance.approvals import request_digest, approval_digest
-from backend.tests.test_vc_packages import package_rig, uid
+from backend.tests.test_vc_packages import MemoryFiles, package_rig, uid
 
 
 @pytest.fixture
@@ -56,6 +56,8 @@ def promotion_rig(package_rig):
     rig.service.target_host = rig.executor.host
     rig.service.target_selection = vc.ExplicitExecutorSelection('target', rig.executor.host, 'target-sp',
                                                                rig.executor.execution_ref, 'target-profile')
+    rig.service.receipt_store = MemoryFiles()
+    rig.service.receipt_volume = '/Volumes/control/vc/vc_target_receipts'
     return rig
 
 
@@ -225,3 +227,27 @@ def test_receipt_binds_intended_rendered_observed_and_pre_post_versions(promotio
     assert rig.facts.append.call_args.args[0].evidence == receipt
     assert rig.facts.append.call_args.args[0].fact_kind == vc.FactKind.RECEIPT
     assert rig.tests.run.call_count == 3
+
+
+def test_receipt_export_failure_retries_export_not_patch(promotion_rig):
+    rig = promotion_rig
+    approve(rig)
+    store = rig.service.receipt_store
+    original_put = store.put_if_absent
+    store.put_if_absent = Mock(side_effect=OSError('Reverse share unavailable'))
+    with pytest.raises(OSError):
+        rig.service.execute(uid(4), rig.executor)
+    durable = [fact.evidence for fact in rig.rows if fact.fact_kind == vc.FactKind.RECEIPT]
+    assert len(durable) == 1
+    tests_count = rig.tests.run.call_count
+    store.put_if_absent = original_put
+    rig.store.read = Mock(side_effect=OSError('Source offline'))
+    receipt = rig.service.execute(uid(4), rig.executor)
+    assert receipt == durable[0]
+    rig.gate.execute.assert_called_once()
+    rig.gate.verify_only.assert_not_called()
+    assert rig.tests.run.call_count == tests_count
+    path = rig.service.receipt_volume + '/sha256/' + digest(receipt) + '/receipt.json'
+    assert store.read(path) == encode(receipt)
+    assert rig.service.execute(uid(4), rig.executor) == receipt
+    assert len([fact for fact in rig.rows if fact.fact_kind == vc.FactKind.RECEIPT]) == 1
