@@ -92,6 +92,79 @@ def test_vc_config_fingerprint_ignores_all_internal_underscore_keys() -> None:
     assert "_preflight_notes" in to_wire(polluted.serialized_space)
 
 
+def _metric_view_fixture(name: str) -> tuple[dict, dict]:
+    """Apply fixture source shapes to the same otherwise unchanged space."""
+    path = Path(__file__).parent / "fixtures/vc_canonicalization" / f"{name}.json"
+    fixture = json.loads(path.read_text())
+    return {**_space(), **fixture["submitted"]}, {**_space(), **fixture["observed"]}
+
+
+def test_metric_view_flattening_does_not_depend_on_mv_name_prefix() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    submitted, observed = _metric_view_fixture("metric_view_without_prefix")
+    assert (
+        adapter.observe(submitted).fingerprints.config
+        == adapter.observe(observed).fingerprints.config
+    )
+
+
+def test_metric_view_flattening_honours_declared_table_type() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    submitted, observed = _metric_view_fixture("metric_view_declared_type")
+    expected = adapter.observe(submitted)
+    assert expected.fingerprints.config == adapter.observe(observed).fingerprints.config
+    for marker in ("table_type", "type", "object_type"):
+        marked = deepcopy(observed)
+        entry = marked["data_sources"]["tables"][0]
+        entry[marker] = entry.pop("table_type")
+        assert adapter.observe(marked).fingerprints.config == expected.fingerprints.config
+        # A duplicate identifier with different fields is still one source.
+        entry["description"] = "Revenue"
+        marked["data_sources"]["metric_views"] = submitted["data_sources"]["metric_views"]
+        described = deepcopy(submitted)
+        described["data_sources"]["metric_views"][0]["description"] = "Revenue"
+        assert (
+            adapter.observe(marked).fingerprints.config
+            == adapter.observe(described).fingerprints.config
+        )
+        assert to_wire(adapter.observe(marked).serialized_space) == marked
+
+
+def test_absent_and_empty_metric_views_are_equal() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    empty, absent = _metric_view_fixture("metric_views_absent_empty")
+    assert (
+        adapter.observe(absent).fingerprints.config
+        == adapter.observe(empty).fingerprints.config
+    )
+    for sources in ({}, {"tables": []}, {"metric_views": []}):
+        snapshot = adapter.observe({**_space(), "data_sources": sources})
+        assert to_wire(snapshot.canonical_state["config"]["data_sources"]) == {
+            "sources": []
+        }
+    no_sources = adapter.observe({"instructions": {}})
+    assert to_wire(no_sources.canonical_state["config"]["data_sources"]) == {
+        "sources": []
+    }
+
+
+def test_metric_views_without_tables_key_matches_flattened_readback() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    submitted, observed = _metric_view_fixture("metric_views_without_tables")
+    assert (
+        adapter.observe(submitted).fingerprints.config
+        == adapter.observe(observed).fingerprints.config
+    )
+
+
 def test_normalized_metric_views_quotes_fragments_and_wrappers_match() -> None:
     from backend.services.config_fingerprint import Canonicalizer
 

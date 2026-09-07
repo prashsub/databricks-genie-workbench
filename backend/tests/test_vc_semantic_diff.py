@@ -51,11 +51,11 @@ def test_semantic_diff_categorizes_by_id_and_flags_sql_review() -> None:
     assert {item.category for item in items} == set(DiffCategory)
     assert items == sorted(items, key=lambda item: (item.category.value, item.path, item.change.value))
     by_path = {item.path: item for item in items}
-    assert by_path["/config/data_sources/tables/cat.sch.new"].change is DiffChange.ADDED
+    assert by_path["/config/data_sources/sources/cat.sch.new"].change is DiffChange.ADDED
     assert by_path["/config/instructions/example_question_sqls/sql1"].change is DiffChange.REMOVED
     assert by_path["/config/instructions/text_instructions/text~11/content"].before == "Old"
     assert by_path["/config/instructions/text_instructions/text~11/content"].after == "New"
-    assert by_path["/config/data_sources/tables/cat.sch.sales/column_configs/amount/description"].category is DiffCategory.COLUMNS
+    assert by_path["/config/data_sources/sources/cat.sch.sales/column_configs/amount/description"].category is DiffCategory.COLUMNS
     for item in items:
         assert item.review_required is (item.category in {
             DiffCategory.SQL, DiffCategory.JOINS, DiffCategory.FILTERS, DiffCategory.BENCHMARKS,

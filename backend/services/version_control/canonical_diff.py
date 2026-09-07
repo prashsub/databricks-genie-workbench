@@ -15,6 +15,7 @@ from backend.services.version_control.contracts import (
 _MISSING = object()
 _CATEGORIES = {
     "data_sources": DiffCategory.SOURCES,
+    "sources": DiffCategory.SOURCES,
     "tables": DiffCategory.SOURCES,
     "metric_views": DiffCategory.SOURCES,
     "column_configs": DiffCategory.COLUMNS,

@@ -57,6 +57,7 @@ _SERIALIZED_SPACE_KEYS = ("data_sources", "instructions", "config", "benchmarks"
 _FRAGMENT_ARRAY_KEYS = frozenset({"content", "sql"})
 
 _VC_COLLECTION_KEYS = {
+    "sources": "identifier",
     "tables": "identifier",
     "metric_views": "identifier",
     "column_configs": "column_name",
@@ -198,24 +199,29 @@ def _canonical_benchmark(serialized: dict) -> dict:
 
 def _canonical_config(serialized: dict) -> dict:
     config = _strip_internal_keys(deepcopy(_with_default_version(serialized)))
-    sources = config.get("data_sources")
-    if isinstance(sources, dict) and isinstance(sources.get("tables"), list):
-        tables = []
-        metric_views = list(sources.get("metric_views", []))
-        for entry in sources["tables"]:
-            identifier = entry.get("identifier", "") if isinstance(entry, dict) else ""
-            declared = isinstance(entry, dict) and any(
-                "METRIC_VIEW" in str(entry.get(key, "")).upper()
-                for key in ("table_type", "type", "object_type")
+    sources = config.setdefault("data_sources", {})
+    entries = [
+        entry
+        for key in ("sources", "tables", "metric_views")
+        for entry in sources.pop(key, [])
+    ]
+    by_identifier: dict[str, dict] = {}
+    unaddressed = []
+    for entry in entries:
+        entry = {
+            key: value
+            for key, value in entry.items()
+            if not (
+                key in ("table_type", "type", "object_type")
+                and "METRIC_VIEW" in str(value).upper()
             )
-            if declared or identifier.replace("`", "").split(".")[-1].lower().startswith("mv_"):
-                if entry not in metric_views:
-                    metric_views.append(entry)
-            else:
-                tables.append(entry)
-        if metric_views:
-            sources["tables"] = tables
-            sources["metric_views"] = metric_views
+        }
+        identifier = entry.get("identifier")
+        if isinstance(identifier, str):
+            by_identifier.setdefault(identifier, {}).update(entry)
+        else:
+            unaddressed.append(entry)
+    sources["sources"] = [*by_identifier.values(), *unaddressed]
     return canonicalize(config, _collection_keys=_VC_COLLECTION_KEYS)
 
 
