@@ -110,9 +110,14 @@ class ApprovalService:
     def _record(self, record, actor, kind):
         inputs = record.request.inputs
         request = self.facts.get_request(inputs.operation_id).request
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        if history.ambiguous:
+            raise ValueError('Ambiguous approval evidence')
+        sequence = 1 + max((row.transition_sequence for row in history.facts
+                            if isinstance(row.evidence, ApprovalRecord)), default=-1)
         provisional = OperationFact(
             event_id=inputs.operation_id, fact_kind=kind, operation_id=inputs.operation_id,
-            transition_sequence=len(record.votes) + (1 if kind == FactKind.APPROVAL_GRANTED else 0),
+            transition_sequence=sequence,
             event_key='', binding=inputs.target_binding,
             request=request.identity, operation_type=inputs.operation_type,
             requester_id=inputs.requester_id, actor=actor, status=record.status,

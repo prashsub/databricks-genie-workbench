@@ -20,11 +20,14 @@ from backend.services.version_control.contracts import (
 
 
 def fact_key(fact: OperationFact) -> str:
-    return canonical_json_hash('vc-fact-key/1', {
+    payload = {
         'binding': to_wire(fact.binding), 'operation_id': fact.operation_id,
         'kind': fact.fact_kind.value, 'sequence': fact.transition_sequence,
         'attempt_id': fact.attempt_id, 'generation': fact.generation,
-    })
+    }
+    if fact.fact_kind == FactKind.APPROVAL_VOTE:
+        payload['voter'] = fact.actor.subject_id
+    return canonical_json_hash('vc-fact-key/1', payload)
 
 
 def validate_evidence(fact):
@@ -143,13 +146,36 @@ class DurableOperationFacts:
             raise LookupError('Durable request evidence unavailable')
         if any(request != requests[0] for request in requests):
             raise ValueError('Ambiguous durable request')
-        records = [row for row in self._rows() if row.operation_id == operation_id
-                   and isinstance(row.evidence, ApprovalRecord)]
+        history = self.lookup_request(requests[0].binding, requests[0].identity.idempotency_key)
+        if history.ambiguous or not history.facts:
+            raise ValueError('Ambiguous or missing approval evidence')
+        records = [row for row in history.facts if row.operation_id == operation_id
+                   and isinstance(row.evidence, ApprovalRecord) and row.fact_kind != FactKind.APPROVAL_VOTE]
         records.sort(key=lambda row: row.transition_sequence)
         if records and any(row.transition_sequence == records[-1].transition_sequence
                            and row.evidence != records[-1].evidence for row in records):
             raise ValueError('Ambiguous approval evidence')
-        return ApprovedOperation(requests[0], records[-1].evidence if records else None)
+        record = records[-1].evidence if records else None
+        if record is not None and record.status == FactStatus.REQUESTED:
+            from .approvals import approval_digest
+
+            votes = {}
+            for row in history.facts:
+                if row.fact_kind != FactKind.APPROVAL_VOTE:
+                    continue
+                if row.evidence.request != record.request:
+                    raise ValueError('Ambiguous approval inputs')
+                own_votes = [vote for vote in row.evidence.votes if vote.approver_id == row.actor.subject_id]
+                if len(own_votes) != 1:
+                    raise ValueError('Ambiguous voter evidence')
+                vote = own_votes[0]
+                if vote.approver_id in votes and votes[vote.approver_id] != vote:
+                    raise ValueError('Ambiguous approval vote')
+                votes[vote.approver_id] = vote
+            if votes:
+                ordered = tuple(sorted(votes.values(), key=lambda vote: (vote.approved_at, vote.approver_id)))
+                record = replace(record, votes=ordered, approval_digest=approval_digest(record.request.inputs, ordered))
+        return ApprovedOperation(requests[0], record)
 
     def _claims(self, operation_id):
         return tuple((from_wire(AdmissionClaim, row['admission_claim']), row)

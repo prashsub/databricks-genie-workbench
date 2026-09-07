@@ -125,6 +125,55 @@ def submit(context):
     return context.service.request(context.bound, context.identity.actors['requester'])
 
 
+def test_distinct_approvers_produce_distinct_vote_event_keys():
+    from backend.services.version_control.governance.approvals import approval_digest
+    from backend.services.version_control.governance.facts import fact_key
+
+    context = setup_approval()
+    approval = submit(context)
+    snapshot = context.service.get(approval.approval_id)
+    vote_facts = []
+    for subject in ('human-1', 'human-2'):
+        votes = (ApprovalVote(subject, 'approve', NOW),)
+        record = replace(snapshot, votes=votes, approval_digest=approval_digest(context.bound, votes))
+        vote_facts.append(fact(
+            fact_kind=FactKind.APPROVAL_VOTE, transition_sequence=1,
+            binding=context.request.binding, request=context.request.identity,
+            actor=context.identity.actors[subject], evidence=record,
+            approval_id=approval.approval_id, approval_digest=record.approval_digest,
+        ))
+    assert fact_key(vote_facts[0]) != fact_key(vote_facts[1])
+
+
+@pytest.mark.parametrize('deferred_commit', [False, True])
+def test_concurrent_votes_from_snapshot_both_persist_and_approval_stays_readable(monkeypatch, deferred_commit):
+    from backend.services.version_control.governance.audit import AuditService
+
+    context = setup_approval()
+    approval = submit(context)
+    snapshot = context.service.get(approval.approval_id)
+    pending = []
+    with monkeypatch.context() as pinned:
+        pinned.setattr(context.service, 'get', lambda approval_id: snapshot)
+        if deferred_commit:
+            pinned.setattr(context.facts, 'append', pending.append)
+        for subject in ('human-1', 'human-2'):
+            context.service.vote(approval.approval_id, 'approve', context.identity.actors[subject])
+    for vote_fact in pending:
+        context.store.append(vote_fact.event_key, to_wire(vote_fact))
+    history = context.facts.lookup_request(context.request.binding, context.request.identity.idempotency_key)
+    assert not history.ambiguous
+    vote_rows = [row for row in history.facts if row.fact_kind == FactKind.APPROVAL_VOTE]
+    assert len(vote_rows) == 2
+    record = context.service.get(approval.approval_id)
+    assert [vote.approver_id for vote in record.votes] == ['human-1', 'human-2']
+    grant = context.service.authorize(context.request, context.executor)
+    assert grant.approval_id == approval.approval_id
+    assert context.service.authorize(context.request, context.executor) == grant
+    audit = AuditService(context.facts, context.identity, context.clock.now, None)
+    assert audit.get(approval.approval_id, context.identity.actors['requester'])['status'] == 'requested'
+
+
 def test_vote_identity_is_server_derived_not_request_body():
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
