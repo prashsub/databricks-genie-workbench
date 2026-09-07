@@ -53,5 +53,9 @@ class BindingInventory(Protocol):
 
 
 class Projections(Protocol):
+    def page(self, actor: vc.ActorContext, cursor: str | None, limit: int) -> vc.OverviewPage: ...
+
+    def get(self, binding: vc.BindingRef, actor: vc.ActorContext) -> vc.BindingStatus: ...
+
     def publish(self, binding: vc.BindingRef, status: vc.BindingStatus,
                 full_fetch_at: datetime | None, api_update_time: datetime | None) -> None: ...

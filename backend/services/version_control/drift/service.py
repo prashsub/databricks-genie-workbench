@@ -28,7 +28,9 @@ class DriftService:
                  facts: vc.OperationFacts | None = None, dispatch_enabled=False,
                  inventory: BindingInventory | None = None, projections: Projections | None = None,
                  scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30),
-                 bundles: BundleInventory | None = None, coordination: vc.Coordination | None = None):
+                 bundles: BundleInventory | None = None, coordination: vc.Coordination | None = None,
+                 registry: vc.Registry | None = None, authorize_history=None,
+                 stale_after=timedelta(minutes=30)):
         if not 1 <= batch_size <= 100 or full_fetch_interval <= timedelta(0):
             raise ValueError("Invalid scan bounds or full-fetch interval")
         self.canonicalizer = canonicalizer
@@ -50,6 +52,51 @@ class DriftService:
         self.full_fetch_interval = full_fetch_interval
         self.bundles = bundles
         self.coordination = coordination
+        self.registry = registry
+        self.authorize_history = authorize_history
+        self.stale_after = stale_after
+
+    def overview(self, actor: vc.ActorContext, cursor: str | None = None, limit: int = 100) -> vc.OverviewPage:
+        if not 1 <= limit <= 100:
+            raise ValueError("Overview limit must be between 1 and 100")
+        if self.projections is None or self.registry is None:
+            raise RuntimeError("Projection reader unavailable")
+        page = self.projections.page(actor, cursor, limit)
+        if len(page.items) > limit:
+            raise ValueError("Projection page exceeded requested bound")
+        items = []
+        for status in page.items:
+            binding = self.registry.resolve(status.binding_id)
+            self._history_scope(binding, actor)
+            items.append(self._projected_status(binding, status))
+        return vc.OverviewPage(tuple(items), page.next_cursor)
+
+    def status(self, binding: vc.BindingRef, actor: vc.ActorContext) -> vc.BindingStatus:
+        self._history_scope(binding, actor)
+        if self.projections is None:
+            raise RuntimeError("Projection reader unavailable")
+        return self._projected_status(binding, self.projections.get(binding, actor))
+
+    def _history_scope(self, binding, actor):
+        if (binding.workspace_id != actor.workspace_id or self.authorize_history is None
+                or self.authorize_history(actor, binding) is not True):
+            raise PermissionError("Binding history scope denied")
+
+    def _projected_status(self, binding, status):
+        if status.binding_id != binding.binding_id or status.binding_revision != binding.binding_revision:
+            raise PermissionError("Projection binding scope mismatch")
+        stale = (status.stale or status.projection_as_of > self.clock()
+                 or self.clock() - status.projection_as_of >= self.stale_after
+                 or status.observed_at is None or status.observed_at > self.clock()
+                 or self.clock() - status.observed_at >= self.stale_after)
+        blocked = stale or status.quarantined or status.unresolved_operation_id or status.drift in (
+            vc.DriftState.UNKNOWN, vc.DriftState.UNREACHABLE, vc.DriftState.APPLIED_UNVERIFIED, vc.DriftState.CONFLICTED)
+        actions = () if blocked else tuple(action for action in status.allowed_actions
+            if action == "compare" or (self.reconcile_enabled is True
+                and action in ("adopt", "acknowledge", "reapply")
+                and (action != "reapply" or self.dispatch_enabled is True)))
+        return replace(status, stale=stale, allowed_actions=actions,
+                       reasons=(*status.reasons, "Projection stale; refresh via observer") if stale else status.reasons)
 
     def scan(self, workspace_id: str, cursor: str | None) -> vc.ReconcileBatch:
         if self.scan_enabled is not True:
