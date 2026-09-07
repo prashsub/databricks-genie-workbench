@@ -9,3 +9,4 @@ All commands run from the m07 worktree. Each numbered task is committed separate
 | 2 | Collision/missing upload: DID NOT RAISE, 2 failed | Package tests: 4 passed |
 | 3 | Named structured mapping: NotImplementedError | Mapping: 1 passed |
 | 4 | SQL golden assertion: source identifier unchanged | Mapping: 2 passed |
+| 5 | 16 failures: unsupported SQL accepted, executable fields ignored, override ignored | Mapping: 18 passed |

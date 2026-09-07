@@ -40,3 +40,33 @@ def test_sql_identifier_mapping_preserves_literals_comments_and_instruction_pros
     assert result['instructions']['example_question_sqls'][0]['sql'] == [sql.replace('`dev`.`sales`.`orders`', '`prod`.`sales`.`orders`')]
     assert result['benchmarks']['questions'][0]['answer'][0]['content'] == ['SELECT * FROM prod.sales.orders']
     assert result['instructions']['text_instructions'] == artifact['serialized_space']['instructions']['text_instructions']
+
+
+@pytest.mark.parametrize('sql', [
+    "SELECT * FROM IDENTIFIER('dev.sales.orders')", 'EXECUTE IMMEDIATE sql_text',
+    'SELECT * FROM dev.sales.unmapped', 'SELECT * FROM orders',
+    'SELECT * FROM dev . sales . orders', 'SELECT * FROM `dev.sales.orders`',
+    'SELECT * FROM dev.sales.orders; DROP TABLE prod.sales.orders',
+    "SELECT 'unterminated FROM dev.sales.orders", 'SELECT * FROM dev.sales.orders /* unclosed',
+    'SELECT * FROM dev.sales.orders_suffix', 'SELECT * FROM sales.orders',
+])
+def test_unsupported_sql_or_unresolved_source_identifier_fails_closed(package_rig, sql):
+    artifact = {'serialized_space': {'instructions': {'example_question_sqls': [{'sql': [sql]}]}}}
+    with pytest.raises(ValueError):
+        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+
+
+@pytest.mark.parametrize('field', ['expression', 'sql_expression', 'query', 'function_name'])
+def test_unknown_executable_fields_require_review(package_rig, field):
+    artifact = {'serialized_space': {'instructions': {'sql_snippets': [{field: 'dev.sales.unmapped'}]}}}
+    with pytest.raises(ValueError):
+        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+
+
+def test_reviewed_exact_sql_override_is_bound_in_mapping(package_rig):
+    sql = "SELECT * FROM IDENTIFIER('dev.sales.orders')"
+    mapping = replace(package_rig.mapping, mappings={**dict(package_rig.mapping.mappings),
+        'sql:' + sql: 'SELECT * FROM prod.sales.orders'})
+    artifact = {'serialized_space': {'instructions': {'example_question_sqls': [{'sql': [sql]}]}}}
+    rendered = MappingTransformer().render(artifact, mapping, package_rig.target)
+    assert rendered.serialized_space['instructions']['example_question_sqls'][0]['sql'] == ['SELECT * FROM prod.sales.orders']
