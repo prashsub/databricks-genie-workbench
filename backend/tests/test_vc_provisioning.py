@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 from backend.services.version_control import platform
+from backend.tests.integration.conftest import live_platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,3 +75,30 @@ def test_ddl_migrations_are_owned_ordered_idempotent_and_not_content_deploys():
     with pytest.raises(ValueError, match="owner"):
         run(manifests, runner)
     runner.apply_owner_spec.assert_not_called()
+
+
+def test_fact_permissions_require_append_only_nonowner_and_no_modify():
+    verify = getattr(platform, "verify_fact_permissions", None)
+    assert callable(verify), "Effective fact-table grants must fail closed"
+    facts = {name: {"append_only": True, "owner": "provisioner",
+                    "principal": "runtime", "privileges": {"SELECT", "INSERT"}}
+             for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations")}
+    assert verify(facts) is True
+    for field, value in (("append_only", False), ("owner", "runtime"),
+                         ("privileges", {"SELECT", "MODIFY"}),
+                         ("privileges", {"SELECT", "INSERT", "MANAGE"}),
+                         ("privileges", {"SELECT", "INSERT", "UPDATE"})):
+        bad = {name: dict(row, **{field: value}) for name, row in facts.items()}
+        assert verify(bad) is False
+    assert verify({}) is False
+
+
+@pytest.mark.integration
+def test_runtime_principal_cannot_update_delete_or_alter_fact_tables(live_platform):
+    for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
+        table = live_platform.table(name)
+        assert table["properties"]["delta.appendOnly"] == "true"
+        assert table["owner"] != live_platform.principal("runtime")
+        live_platform.assert_sql_succeeds("runtime", f"{name}.insert")
+        for action in ("update", "delete", "alter", "drop", "replace"):
+            live_platform.assert_sql_denied("runtime", f"{name}.{action}")

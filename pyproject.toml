@@ -39,3 +39,5 @@ genie-space-optimizer = { workspace = true }
 testpaths = ["backend/tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+addopts = "-m 'not integration'"
+markers = ["integration: requires explicit real nonproduction Databricks platform"]

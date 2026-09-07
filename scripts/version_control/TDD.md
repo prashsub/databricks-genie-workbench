@@ -9,6 +9,16 @@ No live profile was selected and no platform mutations were attempted.
 | Task | Meaningful RED | GREEN / deployment status |
 | --- | --- | --- |
 | t04 | Existing draft test fails: missing `provision` callable | Corrected draft names to VC/1.0; validate complete owner set, digests, idempotence and owner verification before ordered execution/grants. Owner DDL/runner delivery remains a deployment blocker. |
+| t05 | Missing effective fact-permission verifier assertion | Offline append-only/nonowner/exact SELECT+INSERT checks pass. Real positive INSERT and denied UPDATE/DELETE/ALTER/DROP/REPLACE probes written and integration-marked: NOT EXECUTED, deployment blocker. |
+
+Integration tests live in the three owned `test_vc_*.py` files (not the plan's
+unowned `integration/test_vc_permissions.py`). They import the owned integration
+fixture. Default pytest deselects `integration`; opt in with `-m integration`.
+Explicit selection without `VC_INTEGRATION_CONFIG` fails, never fake-passes.
+Configuration requires disposable nonproduction acknowledgement, explicit role
+profiles/hosts/workspace/principal/warehouse IDs, namespace, and owner-authored
+SQL probes (including safe, isolated insert fixtures and denied DDL probes).
+No M08 SQL migration files are authored. No credentials go in the config/logs.
 
 | Task | Meaningful RED | GREEN / deployment status |
 | --- | --- | --- |
