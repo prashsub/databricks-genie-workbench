@@ -7,6 +7,7 @@ import type { SemanticDiff, VersionSummary } from '@/types/version-control'
 import { History } from './history'
 import { SemanticDiffView } from './diff'
 import { demoApi } from './demo-api'
+import { RestorePanel } from './restore'
 
 export function VersionControlView({ state }: { state: VersionControlState }) {
   return <section aria-label="Version Control and Promotion" className="space-y-4">
@@ -38,6 +39,10 @@ export function VersionControlTab({ bindingId, api = demoApi }: { bindingId: str
     <button disabled={state.loading} onClick={() => void state.refresh('history')}>Refresh captured history</button>
     <History page={state.history} loading={state.loading} onNext={() => void state.nextPage()} onSelect={setSelected} onCompare={(left, right) => void compare(left, right)} />
     {selected && <p>Selected historical version: {selected.version_id}</p>}
+    {selected && state.status && state.history.items.find(version => version.version_id === state.status?.heads.observed) && <RestorePanel
+      key={`${bindingId}-${selected.version_id}-${state.status.binding_revision}`} api={api} bindingId={bindingId}
+      command={{ version_id: selected.version_id, binding_revision: state.status.binding_revision, expected_base: state.history.items.find(version => version.version_id === state.status?.heads.observed)!.fingerprints }}
+      disabled={!canMutate(state, 'restore')} onComplete={() => void state.refresh()} />}
     {comparing && <p role="status">Loading comparison…</p>}
     {error && <p role="alert">{error}</p>}
     {diff && <SemanticDiffView diff={diff} />}
