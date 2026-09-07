@@ -194,6 +194,7 @@ class MutationGate:
             return True
         if fact.status not in {vc.FactStatus.CONFLICTED, vc.FactStatus.QUARANTINED}:
             return False
+        # Pre-send CAS losers inherit the winner's stage; attempt_id=None marks never-admitted, so both checks are required.
         return (fact.attempt_id is not None
                 and isinstance(fact.evidence, vc.StageEvidence)
                 and fact.evidence.stage != vc.PatchStage.CONFIG_PENDING)
