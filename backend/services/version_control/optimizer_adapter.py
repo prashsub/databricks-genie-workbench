@@ -58,11 +58,13 @@ class WriteFlags(Protocol):
 
 class OptimizerChampionAdapter:
     def __init__(self, *, sources: ChampionSources, gate: vc.MutationGate,
-                 requests: ChampionRequests, flags: WriteFlags | None = None):
+                 requests: ChampionRequests, flags: WriteFlags | None = None,
+                 facts: vc.OperationFacts | None = None):
         self.sources = sources
         self.gate = gate
         self.requests = requests
         self.flags = flags
+        self.facts = facts
 
     def apply(self, run_id, champion_id, binding, expected_base, executor):
         if self.flags is None or any(self.flags.enabled(name) is not True for name in (
@@ -92,4 +94,8 @@ class OptimizerChampionAdapter:
         persisted = self.requests.prepare(request, source.requester_id)
         if persisted != request:
             raise ValueError("Run already has a different champion/digest")
+        if self.facts is None:
+            raise PermissionError("Authoritative operation facts are required")
+        if self.facts.get_request(request.identity.operation_id).request != request:
+            raise PermissionError("Champion request is not durably published")
         return self.gate.execute(request, executor)

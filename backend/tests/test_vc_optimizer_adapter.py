@@ -28,9 +28,13 @@ def rig():
                                                    None, None, False, ())
     requests = Mock()
     requests.prepare.side_effect = lambda request, requester: request
+    facts = Mock(spec=vc.OperationFacts)
+    facts.get_request.side_effect = lambda operation_id: vc.ApprovedOperation(
+        requests.prepare.call_args.args[0], None)
     flags = Mock()
     flags.enabled.return_value = True
-    adapter = OptimizerChampionAdapter(sources=sources, gate=gate, requests=requests, flags=flags)
+    adapter = OptimizerChampionAdapter(sources=sources, gate=gate, requests=requests, flags=flags,
+                                       facts=facts)
     return adapter, source, executor, gate, requests, flags
 
 
@@ -86,7 +90,7 @@ def test_retry_or_second_champion_in_same_run_cannot_append_second_optimizer_ver
     gate.execute.side_effect = execute
     first = adapter.apply("run", "champion", source.binding, source.expected_base, executor)
     restarted = OptimizerChampionAdapter(sources=adapter.sources, gate=gate,
-                                         requests=requests, flags=adapter.flags)
+                                         requests=requests, flags=adapter.flags, facts=adapter.facts)
     assert restarted.apply("run", "champion", source.binding, source.expected_base,
                             replace(executor, execution_ref="job/new-attempt")) is first
     for changed in (replace(source, champion_id="other"),
@@ -97,3 +101,14 @@ def test_retry_or_second_champion_in_same_run_cannot_append_second_optimizer_ver
             adapter.apply("run", changed.champion_id, source.binding, source.expected_base, executor)
     assert len(durable_requests) == len(versions) == 1
     assert gate.execute.call_count == 2
+
+
+def test_telemetry_memory_fallback_never_authorizes_champion_apply(rig):
+    adapter, source, executor, gate, requests, _ = rig
+    adapter.facts = Mock(spec=vc.OperationFacts)
+    adapter.facts.get_request.side_effect = ConnectionError("authoritative store unavailable")
+    adapter.sources.telemetry_fallback = {"champion": source}
+    with pytest.raises(ConnectionError, match="authoritative store"):
+        adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+    gate.execute.assert_not_called()
+    requests.prepare.assert_called_once()
