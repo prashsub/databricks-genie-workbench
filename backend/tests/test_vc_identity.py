@@ -27,8 +27,6 @@ def test_wrong_run_as_fails_startup_without_self_healing():
     client.jobs.get.side_effect = TimeoutError("identity unavailable")
     with pytest.raises(TimeoutError):
         verify({"GSO_JOB_ID": "42"}, factory)
-    with pytest.raises(ValueError):
-        verify({"GSO_JOB_ID": "not-a-job"}, factory)
     factory.reset_mock()
     verify({}, factory)
     factory.assert_not_called()
@@ -38,6 +36,50 @@ def test_wrong_run_as_fails_startup_without_self_healing():
     startup = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "startup")
     assert isinstance(startup.body[0], ast.Expr)
     assert startup.body[0].value.func.id == "_verify_gso_job_run_as"
+
+
+def test_unconfigured_job_id_placeholder_does_not_block_startup():
+    verify = getattr(platform, "verify_configured_job_run_as", None)
+    assert callable(verify), "Startup must verify Job identity, never repair it"
+
+    # An unsubstituted deploy placeholder (or any non-digit / non-positive value)
+    # means the optimizer integration is NOT configured. Treat it exactly like the
+    # empty case: log + return, never raise, never touch the client factory. A hard
+    # boot failure here would take down history reads and every unrelated surface,
+    # violating FM-OUTAGE ("available history reads continue").
+    for value in ("__GSO_JOB_ID__", "", "none", "0", "-1"):
+        factory = Mock()
+        assert verify({"GSO_JOB_ID": value}, factory) is None, (
+            f"Unconfigured GSO_JOB_ID {value!r} must not block startup")
+        factory.assert_not_called()
+
+    # A CONFIGURED job (positive, all-digit id) whose run_as is wrong is still an
+    # authority violation and must still refuse — without any self-healing writes.
+    client = Mock()
+    client.config.client_id = "app-sp"
+    client.jobs.get.return_value = SimpleNamespace(settings=SimpleNamespace(
+        run_as=SimpleNamespace(service_principal_name="wrong-sp", user_name=None)))
+    factory = Mock(return_value=client)
+    with pytest.raises(PermissionError, match="run_as"):
+        verify({"GSO_JOB_ID": "42"}, factory)
+    client.jobs.update.assert_not_called()
+    client.jobs.reset.assert_not_called()
+
+    # A configured job whose identity cannot be read still fails closed (propagates).
+    client.jobs.get.side_effect = TimeoutError("identity unavailable")
+    with pytest.raises(TimeoutError):
+        verify({"GSO_JOB_ID": "42"}, factory)
+
+
+def test_deploy_script_exits_nonzero_on_unresolved_placeholders():
+    deploy = (Path(__file__).resolve().parents[2] / "scripts" / "deploy.sh").read_text()
+    lines = deploy.splitlines()
+    unresolved_index = next(i for i, line in enumerate(lines) if "UNRESOLVED" in line)
+    # Within the unresolved-placeholder handling block, the script must EXIT
+    # non-zero rather than only warn: a half-configured app.yaml must never be
+    # imported to the workspace.
+    block = "\n".join(lines[unresolved_index:unresolved_index + 12])
+    assert "exit 1" in block, "Unresolved placeholders must abort the deploy (exit 1), not only warn"
 
 
 def test_explicit_profile_host_workspace_mismatch_is_rejected():

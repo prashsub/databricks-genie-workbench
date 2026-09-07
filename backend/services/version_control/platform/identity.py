@@ -1,8 +1,11 @@
 """Server-side identity verification without authority repair or credential fallback."""
 
+import logging
 from urllib.parse import urlsplit
 
 from ..contracts import ActorContext, ExecutorContext
+
+logger = logging.getLogger(__name__)
 
 
 def canonical_host(host: str) -> str:
@@ -144,10 +147,20 @@ def verify_job_run_as(client, execution_ref: str, expected_principal_id: str) ->
 
 def verify_configured_job_run_as(environment, client_factory) -> None:
     execution_ref = environment.get("GSO_JOB_ID", "")
-    if not execution_ref:
+    # "Not configured" and "configured but wrong" are different states; only the
+    # second is an authority violation. An empty value, the unsubstituted deploy
+    # placeholder "__GSO_JOB_ID__", or any non-digit / non-positive value all mean
+    # the optimizer integration is NOT configured. Log and return — never raise —
+    # so a half-configured deploy degrades the optimizer instead of failing the
+    # whole app boot and taking history reads down with it (FM-OUTAGE). This is not
+    # startup authority repair: nothing is written; we simply do not verify what was
+    # never configured. Only a CONFIGURED (all-digit, positive) Job whose run_as is
+    # wrong or unreadable refuses.
+    if not execution_ref or not execution_ref.isdigit() or int(execution_ref) <= 0:
+        logger.warning(
+            "Optimizer integration not configured (GSO_JOB_ID=%r); skipping Job "
+            "run_as verification", execution_ref)
         return
-    if not execution_ref.isdigit() or int(execution_ref) <= 0:
-        raise ValueError("Invalid configured GSO Job ID")
     client = client_factory()
     principal = client.config.client_id or environment.get("DATABRICKS_CLIENT_ID", "")
     verify_job_run_as(client, execution_ref, principal)

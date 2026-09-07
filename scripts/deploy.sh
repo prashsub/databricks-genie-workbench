@@ -481,11 +481,17 @@ fi
 
 rm -f "${PATCHED_APP_YAML}.bak"
 
-# Validate all placeholders were resolved
+# Validate all placeholders were resolved. A half-configured app.yaml (e.g. an
+# unresolved __GSO_JOB_ID__) must NEVER be imported to the workspace — abort the
+# deploy non-zero instead of only warning. This is the root cause of the total
+# app-boot failure the identity guard defends in depth against.
 UNRESOLVED=$(grep -c '__[A-Z_]*__' "$PATCHED_APP_YAML" || true)
 if [ "$UNRESOLVED" -gt 0 ]; then
-    echo "  ⚠ app.yaml has $UNRESOLVED unresolved placeholder(s):"
+    echo "  ✗ app.yaml has $UNRESOLVED unresolved placeholder(s):"
     grep '__[A-Z_]*__' "$PATCHED_APP_YAML" | sed 's/^/      /'
+    echo "  ✗ Refusing to import a half-configured app.yaml; deploy aborted."
+    rm -f "$PATCHED_APP_YAML"
+    exit 1
 fi
 
 databricks workspace import "$WS_PATH/app.yaml" \
