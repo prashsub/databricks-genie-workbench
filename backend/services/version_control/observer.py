@@ -28,6 +28,13 @@ class Observer:
 
     def _capture(self, binding, reason, executor, status):
         try:
+            return self._capture_committed(binding, reason, executor, status)
+        except Exception:
+            return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
+                reasons=(*status.reasons, "Observation evidence unavailable")), None, True)
+
+    def _capture_committed(self, binding, reason, executor, status):
+        try:
             lease = self.coordination.observe_exclusively(binding, executor)
         except Exception:
             return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),

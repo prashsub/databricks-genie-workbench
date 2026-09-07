@@ -85,3 +85,16 @@ def test_unchanged_open_deduplicates_committed_observation(observer_rig):
     second = observer.capture_on_open(rig.binding, viewer)
     assert second.status.heads.observed == first.status.heads.observed
     rig.ledger.append_observation.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["append_observation", "verify_committed", "advance_heads"])
+def test_capture_persistence_failure_returns_stale_and_disables_actions(observer_rig, failure):
+    rig, observer, viewer, status, identity = observer_rig
+    owner = rig.coordination if failure == "advance_heads" else rig.ledger
+    getattr(owner, failure).side_effect = RuntimeError("persistence unavailable")
+    result = observer.capture_on_open(rig.binding, viewer)
+    assert result.status.stale
+    assert result.status.allowed_actions == ()
+    assert result.status.heads == status.heads
+    assert result.captured_version is None
+    assert result.status.drift != vc.DriftState.CLEAN
