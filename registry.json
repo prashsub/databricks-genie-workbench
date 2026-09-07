@@ -135,7 +135,8 @@
       "desc": "Cross-module actor_kind vocab drift + M04 retry short-circuit fix (integrator-sanctioned)",
       "worker": "codex",
       "conversation_id": "3773493063976171",
-      "status": "RUNNING codex/Astra conv 3773493063976171. BLOCKER1 actor_kind drift (M08 human/service fix) + BLOCKER2 M04 requested-only retry investigate/fix. Worktree worktrees/xmod-fix. TDD + incremental commits."
+      "status": "FIX COMPLETE + VERIFIED (commits 6462f58, 0188353; pushed vc/xmod-actor-retry-fix). BLOCKER1 actor_kind human/service fixed + cross-module RED test (M08 service executor passes M04 gate). BLOCKER2 CONFIRMED REAL + fixed (execution-outcome-filtered short-circuit; requested-only history now executes). Both mutation-verified by polly. 183 affected-suite pass, 1081 full offline pass zero regressions, owned-paths clean (4 files). IN CROSS-REVIEW claude_code conv 3773493063976190. Integrate after review clear (touches M04+M08 already-integrated shared code).",
+      "review_conversation_id": "3773493063976190"
     }
   ],
   "reviews": {
