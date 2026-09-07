@@ -140,3 +140,56 @@ def test_adopt_fails_closed_without_approval(failure):
     approvals.request.assert_not_called()
     if failure in ("disabled", "denied", "workspace", "revision"):
         observer.capture.assert_not_called()
+
+
+def test_reapply_requires_fresh_approval_for_new_base():
+    dispatcher = Mock(spec=vc.JobDispatcher)
+    dispatcher.submit_local.return_value = vc.OperationHandle(version_id(10), vc.OperationStatus.REQUESTED, "job/1")
+    facts = Mock(spec=vc.OperationFacts)
+    facts.approval_use.return_value = vc.ApprovalUse(binding_fixture(), version_id(19), (), (), False)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(
+        dispatcher=dispatcher, facts=facts, dispatch_enabled=True)
+    captured = observed_result()
+    observer.capture.return_value = replace(captured, status=replace(captured.status, drift=vc.DriftState.UNKNOWN))
+    request = reconcile_request("reapply", approval_id=version_id(19))
+    handle = service.reconcile(binding_fixture(), request, actor_fixture())
+    inputs = approvals.request.call_args.args[0]
+    assert inputs.source_version_id == version_id(1)
+    assert inputs.expected_base_fingerprints == snapshot("external").fingerprints
+    assert policy.inputs.call_args.args[1].approval_id is None
+    invalidation = facts.append.call_args.args[0]
+    assert invalidation.fact_kind == vc.FactKind.APPROVAL_INVALIDATED
+    assert invalidation.approval_id == version_id(19)
+    assert invalidation.pre_version_id == version_id(2)
+    assert invalidation.status == vc.FactStatus.INVALIDATED
+    dispatcher.submit_local.assert_called_once_with(version_id(10), "reconcile")
+    assert handle.job_run_id == "job/1"
+    approvals.authorize.assert_not_called()
+
+
+def test_reapply_dispatch_is_default_off_and_capture_failure_never_dispatches():
+    dispatcher = Mock(spec=vc.JobDispatcher)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(dispatcher=dispatcher)
+    with pytest.raises(PermissionError, match="dispatch"):
+        service.reconcile(binding_fixture(), reconcile_request("reapply"), actor_fixture())
+    observer.capture.assert_not_called()
+    approvals.request.assert_not_called()
+    dispatcher.submit_local.assert_not_called()
+    service.dispatch_enabled = True
+    observer.capture.side_effect = RuntimeError("capture failed")
+    with pytest.raises(RuntimeError):
+        service.reconcile(binding_fixture(), reconcile_request("reapply"), actor_fixture())
+    dispatcher.submit_local.assert_not_called()
+
+
+def test_reapply_invalidation_failure_stops_new_request_and_job():
+    dispatcher = Mock(spec=vc.JobDispatcher)
+    facts = Mock(spec=vc.OperationFacts)
+    facts.approval_use.return_value = vc.ApprovalUse(binding_fixture(), version_id(19), (), (), False)
+    facts.append.side_effect = RuntimeError("facts unavailable")
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(
+        dispatcher=dispatcher, dispatch_enabled=True, facts=facts)
+    with pytest.raises(RuntimeError):
+        service.reconcile(binding_fixture(), reconcile_request("reapply", approval_id=version_id(19)), actor_fixture())
+    approvals.request.assert_not_called()
+    dispatcher.submit_local.assert_not_called()
