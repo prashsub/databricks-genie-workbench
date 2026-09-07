@@ -1,8 +1,44 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
-import type { ApprovalInputs, ApprovalRecord, ReleaseCommand } from '@/types/version-control'
+import type { ApprovalInputs, ApprovalRecord, DeploymentReceipt, OperationHandle, ReleaseCommand } from '@/types/version-control'
 import { pollOperation } from './restore'
 import { ApprovalsPanel } from './approvals'
+export function ReceiptView({ receipt }: { receipt: DeploymentReceipt }) {
+  const verified = receipt.status === 'confirmed' && Boolean(receipt.post_version_id) && JSON.stringify(receipt.rendered_fingerprints) === JSON.stringify(receipt.observed_fingerprints)
+  return <section aria-label="Durable deployment receipt">
+    <h3>Durable deployment receipt {receipt.release_id}</h3>
+    <p role="status">{verified ? 'Deployment confirmed by receipt evidence' : 'Deployment not verified'} · {receipt.status}</p>
+    <dl>{(['intended_fingerprints', 'rendered_fingerprints', 'observed_fingerprints'] as const).map((field, index) => <div key={field}><dt>{['Intended', 'Rendered', 'Observed'][index]}</dt><dd><pre>{JSON.stringify(receipt[field], null, 2)}</pre></dd></div>)}</dl>
+    <p>Compensation operation: {receipt.compensation_operation_id ?? 'None recorded'}. A compensation request is not proof of compensation.</p>
+    <h4>Receipt evidence and lineage</h4><pre>{JSON.stringify(receipt, null, 2)}</pre>
+  </section>
+}
+export async function pollReceipt(api: VersionControlApi, releaseId: string, wait = () => new Promise<void>(resolve => setTimeout(resolve, 1000)), signal?: AbortSignal): Promise<DeploymentReceipt | OperationHandle> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    signal?.throwIfAborted()
+    const receipt = await api.receipt(releaseId)
+    if ('release_id' in receipt || attempt === 29) return receipt
+    await wait()
+  }
+  throw new Error('Receipt polling exhausted')
+}
+function ReceiptPanel({ api, releaseId }: { api: VersionControlApi; releaseId: string }) {
+  const [receipt, setReceipt] = useState<DeploymentReceipt | OperationHandle | null>(null)
+  const [error, setError] = useState('')
+  const [refresh, setRefresh] = useState(0)
+  useEffect(() => {
+    const controller = new AbortController()
+    setError('')
+    pollReceipt(api, releaseId, undefined, controller.signal).then(result => { if (!controller.signal.aborted) setReceipt(result) })
+      .catch(error => { if (!controller.signal.aborted) setError(String(error)) })
+    return () => controller.abort()
+  }, [api, releaseId, refresh])
+  return <section aria-label="Receipt status">
+    {receipt && 'release_id' in receipt ? <ReceiptView receipt={receipt} /> : <p role="status">Receipt pending — deployment is not yet verified.</p>}
+    {error && <p role="alert">Receipt unreachable: {error}. Do not repeat promotion.</p>}
+    <button onClick={() => setRefresh(value => value + 1)}>Refresh receipt evidence</button>
+  </section>
+}
 
 export function createPromotionFlow(api: VersionControlApi) {
   let selection: ReleaseCommand | null = null
@@ -74,6 +110,7 @@ export function PromotionPanel({ api, bindingId, sourceVersionId, inputs, disabl
     <button disabled={disabled || busy || !releaseId || !approval?.valid || Boolean(error)} onClick={() => void promote()}>Promote with target-local approval</button>
     {busy && <p role="status">Promotion workflow pending…</p>}
     {message && <p role="status">{message}</p>}
+    {releaseId && <ReceiptPanel api={api} releaseId={releaseId} />}
     {error && <p role="alert">{error} No automatic command replay.</p>}
   </section>
 }

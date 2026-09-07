@@ -1,5 +1,5 @@
 import { VersionControlApi } from '@/lib/version-control-api'
-import { approvalFixture, bindingFixture, versionFixture } from './fixtures'
+import { approvalFixture, bindingFixture, receiptFixture, versionFixture } from './fixtures'
 
 export const demoTransport: typeof fetch = async (input, init) => {
   const url = new URL(String(input), 'https://vc-demo.invalid')
@@ -15,6 +15,7 @@ export const demoTransport: typeof fetch = async (input, init) => {
   if (init?.method === 'POST' && url.pathname.endsWith('/reconcile')) return json({ operation_id: 'demo-reconcile', status: 'requested', job_run_id: 'demo-job' }, 202)
   if (init?.method === 'POST' && url.pathname.endsWith('/releases')) return json({ release_id: 'demo-release', operation_id: 'demo-package', status: 'requested', job_run_id: 'demo-job' }, 202)
   if (init?.method === 'POST' && /\/(validate|promote)$/.test(url.pathname)) return json({ operation_id: 'demo-promotion', status: 'requested', job_run_id: 'demo-job' }, 202)
+  if (url.pathname.endsWith('/receipt')) return json(receiptFixture)
   if (url.pathname.includes('/operations/')) return json({ operation_id: url.pathname.split('/').at(-1), status: 'confirmed', job_run_id: 'demo-job', checkpoints: ['Preimage persisted', 'Read-back verified'], audit: ['Demo executor verified this operation; this is not approval.'], receipt_references: [] })
   return json({ code: 'DEMO_NOT_IMPLEMENTED', message: 'This fixture route is not available.', stale: true, retryable: false }, 404)
 }

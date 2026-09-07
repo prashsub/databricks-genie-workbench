@@ -1,4 +1,4 @@
-import type { ApprovalInputs, ApprovalRecord, BindingStatus, Fingerprints, VersionSummary } from '@/types/version-control'
+import type { ApprovalInputs, ApprovalRecord, BindingStatus, DeploymentReceipt, Fingerprints, VersionSummary } from '@/types/version-control'
 
 export const fingerprints: Fingerprints = { config: 'config-3', benchmark: 'benchmark-1', metadata: 'metadata-2', canonicalizer_version: 'VC/1.0' }
 export const bindingFixture: BindingStatus = {
@@ -23,4 +23,14 @@ export const approvalInputsFixture: ApprovalInputs = {
 export const approvalFixture: ApprovalRecord = {
   approval_id: 'demo-approval', inputs: approvalInputsFixture, approval_digest: 'approval-digest-1', valid: false,
   invalidation_reasons: ['Base changed after capture'], allowed_actions: ['vote'], votes: [],
+}
+export const receiptFixture: DeploymentReceipt = {
+  schema_version: 'VC/1.0', release_id: 'demo-release', operation_id: 'demo-promotion', target_binding: 'demo-target',
+  attempt_id: 'attempt-1', generation: 1, coordination_backend: 'delta', approval_id: 'demo-approval', approval_digest: 'approval-digest-1',
+  source_version_id: 'external-3', package_digest: 'package-1', mapping_digest: 'mapping-1',
+  intended_fingerprints: fingerprints, rendered_fingerprints: { ...fingerprints, config: 'rendered-config' },
+  observed_fingerprints: { ...fingerprints, config: 'partial-config' }, pre_version_id: 'target-before', post_version_id: null,
+  transformer_version: 'transformer-1', canonicalizer_version: 'VC/1.0', executor_id: 'target-executor', job_run_id: 'target-job',
+  validation_evidence_digest: 'validation-evidence', benchmark_evidence_digest: 'benchmark-evidence', status: 'applied_partial',
+  compensation_operation_id: 'compensation-1', recorded_at: '2026-09-07T01:00:00Z',
 }
