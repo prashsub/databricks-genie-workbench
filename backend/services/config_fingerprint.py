@@ -70,7 +70,7 @@ class Canonicalizer:
         if isinstance(serialized, str):
             serialized = json.loads(serialized)
         metadata = {key: response[key] for key in ("description",) if key in response}
-        canonical = {"config": canonicalize(_with_default_version(serialized))}
+        canonical = {"config": _canonical_config(serialized)}
         fingerprints = Fingerprints(
             config=canonical_json_hash("vc-config/1", {"value": canonical["config"]}),
             benchmark=benchmark_fingerprint(serialized),
@@ -89,6 +89,30 @@ class Canonicalizer:
             fingerprints=fingerprints,
             state_digest=fingerprints.state_digest,
         )
+
+
+def _canonical_config(serialized: dict) -> dict:
+    config = deepcopy(_with_default_version(serialized))
+    config.pop("_data_profile", None)
+    sources = config.get("data_sources")
+    if isinstance(sources, dict) and isinstance(sources.get("tables"), list):
+        tables = []
+        metric_views = list(sources.get("metric_views", []))
+        for entry in sources["tables"]:
+            identifier = entry.get("identifier", "") if isinstance(entry, dict) else ""
+            declared = isinstance(entry, dict) and any(
+                "METRIC_VIEW" in str(entry.get(key, "")).upper()
+                for key in ("table_type", "type", "object_type")
+            )
+            if declared or identifier.replace("`", "").split(".")[-1].lower().startswith("mv_"):
+                if entry not in metric_views:
+                    metric_views.append(entry)
+            else:
+                tables.append(entry)
+        if metric_views:
+            sources["tables"] = tables
+            sources["metric_views"] = metric_views
+    return canonicalize(config)
 
 
 def unwrap_serialized_space(config: Any) -> dict | None:

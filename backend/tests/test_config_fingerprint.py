@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from pathlib import Path
 
 from backend.services.version_control.contracts import canonical_json_hash, to_wire
 
@@ -71,6 +72,26 @@ def test_observe_preserves_exact_restorable_state_and_envelope() -> None:
     )
     envelope["_parsed_space"]["version"] = 999
     assert to_wire(snapshot.response_envelope) == original
+
+
+def test_normalized_metric_views_quotes_fragments_and_wrappers_match() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    fixture = json.loads((Path(__file__).parent / "fixtures/vc_canonicalization/readback.json").read_text())
+    adapter = Canonicalizer()
+    submitted = fixture["submitted"]
+    observed = fixture["observed"]
+    legacy = {key: value for key, value in observed.items() if key != "version"}
+    wrappers = [
+        observed,
+        {"serialized_space": json.dumps(observed), "_parsed_space": _space()},
+        {"_parsed_space": {**legacy, "_data_profile": {"ignored": True}}},
+    ]
+    expected = adapter.observe(submitted)
+    for wrapper in wrappers:
+        actual = adapter.observe(wrapper)
+        assert actual.fingerprints == expected.fingerprints
+        assert actual.canonical_state == expected.canonical_state
 
 
 # ── unwrap_serialized_space ──────────────────────────────────────────────
