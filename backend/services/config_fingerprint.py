@@ -34,7 +34,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from typing import Any
+
+from backend.services.version_control.contracts import (
+    Fingerprints,
+    Snapshot,
+    canonical_json_hash,
+)
 
 # Recognized as a bare serialized_space object when any of these keys is present.
 _SERIALIZED_SPACE_KEYS = ("data_sources", "instructions", "config", "benchmarks")
@@ -56,6 +63,32 @@ _BOUNDARY_SINGLE_QUOTE_RE = re.compile(r"(?<![A-Za-z0-9])'|'(?![A-Za-z0-9])")
 
 class Canonicalizer:
     """VC/1.0 adapter extending the legacy fingerprint entry point."""
+
+    def observe(self, envelope: dict, version: str = "vc-c14n/1") -> Snapshot:
+        response = deepcopy(envelope)
+        serialized = response.get("serialized_space", response.get("_parsed_space", response))
+        if isinstance(serialized, str):
+            serialized = json.loads(serialized)
+        metadata = {key: response[key] for key in ("description",) if key in response}
+        canonical = {"config": canonicalize(_with_default_version(serialized))}
+        fingerprints = Fingerprints(
+            config=canonical_json_hash("vc-config/1", {"value": canonical["config"]}),
+            benchmark=benchmark_fingerprint(serialized),
+            metadata=canonical_json_hash("vc-metadata/1", {"value": {}}),
+            canonicalizer_version=version,
+        )
+        return Snapshot(
+            response_envelope=response,
+            serialized_space=serialized,
+            restorable_metadata=metadata,
+            response_envelope_digest=canonical_json_hash("vc-envelope/1", {"envelope": response}),
+            raw_state_digest=canonical_json_hash(
+                "vc-raw-state/1", {"serialized_space": serialized, "metadata": metadata}
+            ),
+            canonical_state=canonical,
+            fingerprints=fingerprints,
+            state_digest=fingerprints.state_digest,
+        )
 
 
 def unwrap_serialized_space(config: Any) -> dict | None:

@@ -7,6 +7,9 @@ current-version endpoint relies on. No Databricks connectivity required.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+
+from backend.services.version_control.contracts import canonical_json_hash, to_wire
 
 from backend.services.config_fingerprint import (
     benchmark_fingerprint,
@@ -39,6 +42,35 @@ def test_existing_fingerprint_api_remains_compatible() -> None:
     assert benchmark_fingerprint(_space()) == (
         "5c9253d29ca1fc9c4f7683bfe5dadd87e2dbce3e46af6ee80404bc7259b41e1e"
     )
+
+
+def test_observe_preserves_exact_restorable_state_and_envelope() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    payload = _space(with_version=False)
+    payload["_unknown_executable"] = {"secret": "retained", "steps": [2, 1]}
+    envelope = {
+        "serialized_space": json.dumps(payload, indent=2),
+        "_parsed_space": _space(instruction="mutated preflight"),
+        "description": "Exact 'description'\n",
+        "title": "Not governed in v1",
+        "space_id": "physical-id",
+    }
+    original = deepcopy(envelope)
+    snapshot = Canonicalizer().observe(envelope)
+    assert envelope == original
+    assert to_wire(snapshot.response_envelope) == original
+    assert to_wire(snapshot.serialized_space) == payload
+    assert to_wire(snapshot.restorable_metadata) == {"description": envelope["description"]}
+    assert snapshot.state_digest == snapshot.fingerprints.state_digest
+    assert snapshot.response_envelope_digest == canonical_json_hash(
+        "vc-envelope/1", {"envelope": original}
+    )
+    assert snapshot.raw_state_digest == canonical_json_hash(
+        "vc-raw-state/1", {"serialized_space": payload, "metadata": {"description": envelope["description"]}}
+    )
+    envelope["_parsed_space"]["version"] = 999
+    assert to_wire(snapshot.response_envelope) == original
 
 
 # ── unwrap_serialized_space ──────────────────────────────────────────────
