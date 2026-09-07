@@ -139,6 +139,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
+from backend.services.version_control.platform import compose
+
+app.state.version_control = compose()
+
 if _mlflow_configured:
     try:
         from mlflow.genai.agent_server import setup_mlflow_git_based_version_tracking

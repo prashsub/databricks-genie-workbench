@@ -14,6 +14,8 @@ Initial missing Python/pytest tooling errors are NOT counted as behavioral RED.
 
 ## Provisioning transition / UNVERIFIED DEPLOYMENT BLOCKERS
 
+| t03 | composition suite: missing root composition assertion | Lazy Protocol factories resolve once, duplicates/missing ports refuse, default-OFF/master gate pass |
+
 Root DAB owns the existing optimizer Job; the package bundle is standalone,
 not an additional Workbench deployment. Shell and notebook installers currently
 own the App. Do not import it into DAB state until live app-resource support,

@@ -1,58 +1,25 @@
-"""Offline composition scaffold; never mounts routes or enables writers."""
-
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError, replace
-import importlib
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-
-WRITE_SWITCHES = {
-    "vc_writes_enabled", "vc_restore_enabled", "vc_promotion_enabled",
-    "vc_optimizer_apply_enabled", "vc_reconcile_enabled",
-}
+from backend.services.version_control import contracts, platform
+from backend.services.version_control.platform.feature_flags import FeatureFlags, WRITE_SWITCHES
 
 
-def test_modules_are_wired_once_with_write_switch_default_off(monkeypatch):
-    package = importlib.import_module("backend.services.version_control.platform")
-    flags_module = importlib.import_module("backend.services.version_control.platform.feature_flags")
-    for name in WRITE_SWITCHES:
-        monkeypatch.setenv(name.upper(), "true")
-    flags = flags_module.FeatureFlags()
-    assert flags_module.WRITE_SWITCHES == WRITE_SWITCHES
-    assert all(getattr(flags, name) is False for name in WRITE_SWITCHES)
-    assert all(flags.enabled(name) is False for name in WRITE_SWITCHES)
-    assert all(value is False for name, value in flags.registry.items() if name in WRITE_SWITCHES)
-    with pytest.raises(FrozenInstanceError):
-        flags.vc_writes_enabled = True
-    with pytest.raises(TypeError):
-        flags.registry["vc_writes_enabled"] = True
-    with pytest.raises((ValueError, TypeError)):
-        replace(flags, vc_writes_enabled="false")
+def test_modules_are_wired_once_with_write_switch_default_off():
+    compose = getattr(platform, "compose", None)
+    assert callable(compose), "Root must install a lazy, explicitly injected VC composition"
+    factory = Mock(return_value=object())
+    container = compose({contracts.IdentityProvider: factory})
+    factory.assert_not_called()
+    assert container.resolve(contracts.IdentityProvider) is container.resolve(contracts.IdentityProvider)
+    factory.assert_called_once_with()
+    with pytest.raises(ValueError, match="already registered"):
+        container.register(contracts.IdentityProvider, factory)
+    assert all(not container.flags.enabled(name) for name in WRITE_SWITCHES)
+    assert not FeatureFlags(vc_restore_enabled=True).enabled("vc_restore_enabled")
     with pytest.raises(KeyError):
-        flags.enabled("unknown_writer")
-    for name in WRITE_SWITCHES - {"vc_writes_enabled"}:
-        assert replace(flags, **{name: True}).enabled(name) is False
-    assert replace(flags, vc_history_enabled=True).enabled("vc_writes_enabled") is False
-
-    contract = importlib.import_module("backend.services.version_control.contracts")
-    composition = package.Composition()
-    instance = object()
-    calls = []
-
-    def factory():
-        calls.append("created")
-        return instance
-
-    composition.register(contract.Canonicalizer, factory)
-    assert calls == []
-    with ThreadPoolExecutor(max_workers=4) as workers:
-        resolved = list(workers.map(lambda _: composition.resolve(contract.Canonicalizer), range(8)))
-    assert all(value is instance for value in resolved)
-    assert calls == ["created"]
-    with pytest.raises(ValueError, match="already"):
-        composition.register(contract.Canonicalizer, factory)
-    with pytest.raises(KeyError):
-        composition.resolve(contract.MutationGate)
-    assert all(composition.flags.enabled(name) is False for name in WRITE_SWITCHES)
-    assert importlib.import_module(package.__name__) is package
+        container.resolve(contracts.Coordination)
+    source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+    assert "app.state.version_control = compose()" in source

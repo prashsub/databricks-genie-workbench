@@ -34,3 +34,10 @@ class Composition:
             if port not in self._instances:
                 self._instances[port] = self._factories[port]()
             return cast(Service, self._instances[port])
+
+
+def compose(factories=None, *, flags: FeatureFlags | None = None) -> Composition:
+    container = Composition(flags)
+    for port, factory in (factories or {}).items():
+        container.register(port, factory)
+    return container
