@@ -37,7 +37,7 @@ def setup_service(**options):
 
 
 def test_capture_advances_observed_but_drift_remains_until_policy_resolution():
-    service, observer = setup_service()
+    service, observer = setup_service(ledger=ledger_fixture())
     captured = service.prepare_choice(binding_fixture())
     observer.capture.assert_called_once_with(binding_fixture(), "reconcile", executor_fixture())
     assert captured.status.heads == vc.Heads(version_id(2), version_id(1), version_id(1))
@@ -69,15 +69,20 @@ def reconcile_request(action="adopt", **changes):
     return replace(request, **changes)
 
 
-def reconcile_setup(**options):
-    from backend.services.version_control.drift.ports import CoordinationReadiness, ReconcilePolicy
-
+def ledger_fixture():
     ledger = Mock(spec=vc.VersionLedger)
     def get_version(binding, reference):
         state = snapshot("external" if reference == version_id(2) else "policy")
         context = vc.CaptureContext(binding, reference, NOW, "reconcile", actor_fixture(), vc.Origin.EXTERNAL)
         return vc.Version(reference, state, context)
     ledger.get_version.side_effect = get_version
+    return ledger
+
+
+def reconcile_setup(**options):
+    from backend.services.version_control.drift.ports import CoordinationReadiness, ReconcilePolicy
+
+    ledger = ledger_fixture()
     policy = Mock(spec=ReconcilePolicy)
     def inputs(binding, request, source, base, actor):
         return vc.ApprovalInputs("VC/1.0", request.identity.operation_id, request.action,
@@ -286,7 +291,8 @@ def scan_setup(entries, **options):
     projections = Mock(spec=Projections)
     bundles = Mock(spec=BundleInventory)
     bundles.for_binding.return_value = BundleSnapshot((), True)
-    dependencies = dict(inventory=inventory, projections=projections, scan_enabled=True,
+    ledger = ledger_fixture()
+    dependencies = dict(ledger=ledger, inventory=inventory, projections=projections, scan_enabled=True,
                         batch_size=2, full_fetch_interval=timedelta(minutes=30), clock=lambda: NOW, bundles=bundles)
     dependencies.update(options)
     service, observer = setup_service(**dependencies)
@@ -506,3 +512,27 @@ def test_scan_cannot_publish_observer_clean_badge_for_differing_policy_heads():
     status = scanner.scan("123", None).items[0]
     assert status.drift == vc.DriftState.EXTERNAL_AHEAD
     assert status.heads.approved == version_id(1)
+    ledger.get_version.assert_any_call(scan_entry().binding, version_id(2))
+    ledger.get_version.assert_any_call(scan_entry().binding, version_id(1))
+
+
+@pytest.mark.parametrize("last_full_fetch_at", [NOW, NOW - timedelta(hours=1)])
+def test_scan_without_ledger_cannot_publish_observer_clean_badge(last_full_fetch_at):
+    entry = scan_entry(last_full_fetch_at=last_full_fetch_at)
+    entry = replace(entry, status=replace(entry.status, drift=vc.DriftState.CLEAN))
+    scanner, observer, inventory, projections = scan_setup([entry], ledger=None)
+    captured = observed_result(entry.binding)
+    observer.capture.return_value = replace(captured, status=replace(
+        captured.status, drift=vc.DriftState.CLEAN))
+    status = scanner.scan("123", None).items[0]
+    assert status.drift == vc.DriftState.UNKNOWN
+    assert status.allowed_actions == ()
+    assert status.stale
+    assert "ledger" in " ".join(status.reasons).lower()
+    assert projections.publish.call_args.args[1] == status
+    assert projections.publish.call_args.args[2] == last_full_fetch_at
+    observer.capture.assert_not_called()
+    unverified = scanner._observed_status(entry.binding, observer.capture.return_value.status)
+    assert unverified.drift == vc.DriftState.UNKNOWN
+    assert unverified.allowed_actions == ()
+    assert "ledger" in " ".join(unverified.reasons).lower()

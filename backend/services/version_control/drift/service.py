@@ -138,6 +138,9 @@ class DriftService:
                         or status.binding_id != entry.binding.binding_id
                         or status.binding_revision != entry.binding.binding_revision):
                     raise PermissionError("Inventory binding scope mismatch")
+                if self.ledger is None:
+                    status = self._observed_status(entry.binding, status)
+                    raise RuntimeError("Ledger unavailable; cannot verify observed head")
                 matches = self.inventory.matches(entry.binding)
                 if len(matches) != 1 or matches[0] != entry.binding:
                     reason = "Ambiguous binding inventory; audited manual identity resolution required"
@@ -350,8 +353,11 @@ class DriftService:
         return captured
 
     def _observed_status(self, binding, status):
-        if (self.ledger is None or status.drift in (vc.DriftState.UNREACHABLE, vc.DriftState.CONFLICTED,
-                                                   vc.DriftState.APPLIED_UNVERIFIED)):
+        if self.ledger is None:
+            return replace(status, drift=vc.DriftState.UNKNOWN, stale=True, allowed_actions=(),
+                           reasons=(*status.reasons, "Ledger unavailable; cannot verify observed head"))
+        if status.drift in (vc.DriftState.UNREACHABLE, vc.DriftState.CONFLICTED,
+                            vc.DriftState.APPLIED_UNVERIFIED):
             return status
 
         class BoundVersions:
