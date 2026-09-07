@@ -219,3 +219,46 @@ def test_successful_patch_then_failed_readback_is_applied_unverified(rig, read_n
     rig.coordination.finish.assert_not_called()
     rig.coordination.quarantine.assert_called_once()
     assert rig.facts.append.call_args.args[0].status == vc.FactStatus.APPLIED_UNVERIFIED
+
+
+@pytest.mark.parametrize("boundary", ["config_before", "config_after", "description_before", "description_after"])
+def test_worker_crash_at_every_send_boundary_keeps_attempt_unresolved(rig, boundary):
+    transport_method = rig.transport.patch_config_once if boundary.startswith("config") else rig.transport.patch_description_once
+    original = rig.config if boundary.startswith("config") else rig.description
+    stage = "config_in_flight" if boundary.startswith("config") else "description_in_flight"
+    def crash(*args):
+        assert stage in rig.trace, "Durable send intent must precede even a crashing send"
+        if boundary.endswith("after"):
+            original(*args)
+        raise SystemExit("worker died")
+    transport_method.side_effect = crash
+    with pytest.raises(SystemExit):
+        rig.gate.execute(rig.request, rig.executor)
+    rig.coordination.finish.assert_not_called()
+    assert stage in rig.trace
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+    assert rig.gate.verify_only(rig.identity.operation_id, rig.executor).unresolved
+    assert transport_method.call_count == 1
+
+
+def test_failed_final_fact_publish_never_releases_attempt(rig):
+    def append(fact):
+        if fact.status == vc.FactStatus.CONFIRMED:
+            raise RuntimeError("lost fact response")
+        return vc.FactRef(fact.event_id, fact.event_key, "a" * 64)
+    rig.facts.append.side_effect = append
+    result = rig.gate.execute(rig.request, rig.executor)
+    assert result.unresolved
+    rig.coordination.finish.assert_not_called()
+    rig.coordination.quarantine.assert_called_once()
+
+
+def test_resumed_request_never_enters_a_new_send_sequence(rig):
+    rig.gate.execute(rig.request, rig.executor)
+    rig.state.update(vc.to_wire(rig.before.response_envelope))
+    rig.facts.lookup_request.return_value = vc.RequestHistory(
+        tuple(call.args[0] for call in rig.facts.append.call_args_list), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+    rig.gate.execute(rig.request, rig.executor)
+    rig.transport.patch_config_once.assert_called_once()
+    rig.transport.patch_description_once.assert_called_once()

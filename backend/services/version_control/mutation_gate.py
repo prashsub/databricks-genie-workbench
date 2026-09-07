@@ -19,6 +19,11 @@ class MutationGate:
         self.registry = registry
 
     def execute(self, request, executor):
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
+            raise RuntimeError("Ambiguous or reused request identity")
+        if history.facts:
+            return self.verify_only(request.identity.operation_id, executor)
         reservation = self.coordination.reserve(request.binding, request.identity, executor)
         snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
         preimage = self._capture(request, executor, reservation.fence, snapshot, "preimage")
@@ -34,6 +39,7 @@ class MutationGate:
             **({"description": request.description} if request.description is not None else {})})
         if self.canonicalizer.compare(snapshot, desired) == vc.Comparison.EQUAL:
             return self._finish(request, executor, claim, vc.OperationStatus.NOOP, preimage)
+        self._checkpoint(claim, vc.PatchStage.CONFIG_IN_FLIGHT, None)
         self.coordination.assert_owner(claim)
         try:
             self.transport.patch_config_once(request.binding, vc.to_wire(request.serialized_space), claim)
@@ -51,6 +57,8 @@ class MutationGate:
                 or checkpoint.fingerprints.canonicalizer_version != desired.fingerprints.canonicalizer_version):
             return self._partial(request, claim, middle, "Config or approved metadata checkpoint changed")
         if request.description is not None and snapshot.fingerprints.metadata != desired.fingerprints.metadata:
+            self._checkpoint(claim, vc.PatchStage.DESCRIPTION_PENDING, middle)
+            self._checkpoint(claim, vc.PatchStage.DESCRIPTION_IN_FLIGHT, None)
             self.coordination.assert_owner(claim)
             try:
                 self.transport.patch_description_once(request.binding, request.description, claim)
@@ -66,7 +74,10 @@ class MutationGate:
                 return self._partial(request, claim, postimage, "Final state differs from desired")
         else:
             postimage = middle
-        return self._finish(request, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
+        try:
+            return self._finish(request, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
+        except Exception:
+            return self._unverified(request, executor, claim, "Final publication unavailable")
 
     def _partial(self, request, claim, observation, reason):
         self.coordination.quarantine(claim, reason)
@@ -87,7 +98,8 @@ class MutationGate:
 
     def _checkpoint(self, claim, stage, observation):
         self.coordination.checkpoint(claim, stage, vc.StageEvidence(
-            "VC/1.0", stage, datetime.now(timezone.utc), observation.state_digest, observation))
+            "VC/1.0", stage, datetime.now(timezone.utc),
+            observation.state_digest if observation else claim.request.request_digest, observation))
 
     def _finish(self, request, executor, claim, status, postimage=None):
         self._record(request, executor, claim, status, postimage)
