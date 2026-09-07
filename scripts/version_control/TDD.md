@@ -33,6 +33,29 @@ transport is disabled unless Databricks-to-Databricks sharing and the actual
 Volume or reviewed read-only representation have been verified. Never supply
 source-held target write credentials to make a probe pass.
 
+## Final offline validation (2026-09-07)
+
+- Exact requested three-file pytest command: **20 passed, 5 deselected**.
+- Adding VC contracts, deploy-lib and OBO regression suites: **70 passed, 5 deselected**.
+- Five integration tests collected successfully with `-m integration --collect-only`;
+  none executed, none reported as passing.
+- Local Databricks CLI v1.7.0 JSON-schema checks accept the root and VC resource
+  YAML. This is NOT live `bundle validate --strict` or provisioning evidence.
+- `uv lock --check --offline`, Python AST parsing, `bash -n` for deploy/preflight,
+  and `git diff --check` pass. No dependency manifest versions were changed.
+- All 24 changed paths are within the user's explicit ownership allowlist; no
+  `.sql` authored. The preexisting t04 draft was included in the t04 cycle.
+- Initial expanded regression run lacked the SDK (6 import failures, not
+  behavioral RED). Installing the already-pinned SDK in the isolated ignored
+  M08 venv made all expanded regressions executable. No platform was contacted.
+
+Remaining work is explicit: owner migration/grant runner and durable manifest
+loader delivery (t04), owner service/handler and writer-route composition plus
+DAB App cutover (t11/t15), real attempt inventory/Jobs/supervisor reader binding
+and verified request-lifetime evidence (t12), and successful live security,
+identity, concurrency, provisioning and topology gates. Until these are
+integrated and proven, `build_vc_runtime` refuses and all switches stay OFF.
+
 The `vc-sandbox` target is opt-in and requires explicit executor, enrollment and
 provisioner principals. Its installed `vc-platform` entrypoint refuses by default:
 `backend.jobs.build_vc_runtime` has no owner implementations available at this
