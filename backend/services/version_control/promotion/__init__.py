@@ -8,6 +8,7 @@ from backend.services.version_control import contracts as vc
 from backend.services.version_control.platform.identity import canonical_host
 from .packages import build, digest, encode, immutable_put, mapping_digest, policy_digests, portable
 from . import receipts
+from .transport import separate_volumes
 
 
 class PromotionService:
@@ -41,6 +42,7 @@ class PromotionService:
         if self.flags.enabled('vc_promotion_enabled') is not True:
             raise PermissionError('Promotion writes disabled')
         executor = self._executor(executor)
+        separate_volumes(self.outbound_volume, self.approval_volume, self.receipt_volume)
         operation = self.facts.get_request(operation_id)
         request = operation.request
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
@@ -149,6 +151,8 @@ class PromotionService:
                                      recorded_at=datetime.now(timezone.utc))
 
     def _inputs(self, operation_id):
+        self.transport.verify()
+        separate_volumes(self.outbound_volume, self.approval_volume, self.receipt_volume)
         release = self.releases.get(operation_id)
         manifest = vc.from_wire(vc.PackageManifest, json.loads(self.store.read(release.package.manifest_uri)))
         if (vc.canonical_json_hash('vc-package/1', vc.to_wire(manifest), digest_field='package_digest')
@@ -181,6 +185,15 @@ class PromotionService:
     def package(self, version_id, mapping, policy):
         if self.flags.enabled('vc_promotion_enabled') is not True:
             raise PermissionError('Promotion writes disabled')
+        selection = self.source_selection
+        if selection.profile is not None and (not selection.profile.strip() or selection.profile.upper() == 'DEFAULT'):
+            raise PermissionError('Explicit source profile or verified OBO required')
+        executor = self.source_identity.executor(selection)
+        if (executor.workspace_id != self.source_binding.workspace_id or executor.workspace_id != selection.workspace_id
+                or canonical_host(executor.host) != canonical_host(selection.host)
+                or executor.principal_id != selection.principal_id):
+            raise PermissionError('Source identity does not match selected immutable source')
+        separate_volumes(self.outbound_volume)
         version = self.ledger.get_version(self.source_binding, version_id)
         if version.version_id != version_id or version.context.binding != self.source_binding:
             raise ValueError('Immutable source binding/version mismatch')

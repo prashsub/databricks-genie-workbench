@@ -58,6 +58,9 @@ def promotion_rig(package_rig):
                                                                rig.executor.execution_ref, 'target-profile')
     rig.service.receipt_store = MemoryFiles()
     rig.service.receipt_volume = '/Volumes/control/vc/vc_target_receipts'
+    rig.service.approval_volume = '/Volumes/control/vc/vc_approval_evidence'
+    rig.service.transport = Mock()
+    rig.service.transport.verify.return_value = 'shared_uc'
     return rig
 
 
@@ -297,3 +300,37 @@ def test_failed_smoke_compensation_needs_preauthorization_and_matching_post_stag
     else:
         rig.service.restore.compensate.assert_not_called()
         assert receipt.status != vc.OperationStatus.COMPENSATED
+
+
+@pytest.mark.parametrize('case', ['same_metastore', 'cross_supported', 'cross_unsupported', 'remote_credentials', 'wrong_target'])
+def test_cross_metastore_transport_unsupported_is_explicitly_disabled(case):
+    from backend.services.version_control.promotion.transport import NativeTransport
+    proof = dict(source_workspace='source', target_workspace='target', source_metastore='meta-1',
+        target_metastore='meta-1', remote_write_credentials=False, packages_readable=True,
+        receipts_readable=True, source_target_write_denied=True, shared_uc_grants_verified=True)
+    if case.startswith('cross'):
+        proof.update(target_metastore='meta-2', delta_sharing_verified=True,
+                     artifact_representation='volumes', volume_sharing_verified=case == 'cross_supported')
+    if case == 'remote_credentials':
+        proof['remote_write_credentials'] = True
+    if case == 'wrong_target':
+        proof['target_workspace'] = 'other'
+    transport = NativeTransport(lambda: proof, 'source', 'target')
+    if case in {'same_metastore', 'cross_supported'}:
+        assert transport.verify() in {'shared_uc', 'volumes'}
+    else:
+        with pytest.raises(PermissionError):
+            transport.verify()
+
+
+@pytest.mark.parametrize('case', ['transport', 'volume_prefixes'])
+def test_execution_rechecks_transport_and_separate_securables(promotion_rig, case):
+    rig = promotion_rig
+    approve(rig)
+    if case == 'transport':
+        rig.service.transport.verify.side_effect = PermissionError('Capability revoked')
+    else:
+        rig.service.receipt_volume = rig.service.approval_volume + '/receipts'
+    with pytest.raises((PermissionError, ValueError)):
+        rig.service.execute(uid(4), rig.executor)
+    rig.gate.execute.assert_not_called()

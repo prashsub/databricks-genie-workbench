@@ -53,6 +53,11 @@ def package_rig():
     service = PromotionService(ledger=ledger, source_binding=source, store=store,
         outbound_volume='/Volumes/control/vc/vc_outbound_packages', canonicalizer=canonicalizer,
         flags=FeatureFlags(vc_writes_enabled=True, vc_promotion_enabled=True))
+    service.source_selection = vc.ExplicitExecutorSelection('source', 'https://source.example.com', 'source-sp',
+                                                           'job/source', 'source-profile')
+    service.source_identity = Mock(spec=vc.IdentityProvider)
+    service.source_identity.executor.return_value = vc.ExecutorContext('source', 'https://source.example.com',
+        'source-sp', 'service_principal', object(), 'job/source')
     return SimpleNamespace(service=service, source=source, target=target, version=version,
         ledger=ledger, mapping=mapping, policy=policy, store=store)
 
@@ -96,3 +101,12 @@ def test_existing_digest_path_is_never_overwritten_and_incomplete_package_not_pu
         assert not rig.store.published
         if failure == 'collision':
             assert rig.store.files[artifact_path] == b'substituted'
+
+
+def test_package_rejects_implicit_source_profile(package_rig):
+    from dataclasses import replace
+    rig = package_rig
+    rig.service.source_selection = replace(rig.service.source_selection, profile='DEFAULT')
+    with pytest.raises(PermissionError):
+        rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
+    assert not rig.store.files
