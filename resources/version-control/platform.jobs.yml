@@ -1,0 +1,115 @@
+targets:
+  vc-sandbox:
+    mode: production
+    artifacts:
+      vc_platform:
+        type: whl
+        path: ../..
+        build: uv build --wheel --out-dir .build
+    resources:
+      jobs:
+        vc-restore: &vc_job
+          name: ${var.app_name}-vc-restore
+          max_concurrent_runs: 1
+          queue:
+            enabled: true
+          run_as:
+            service_principal_name: ${var.vc_executor_principal}
+          parameters:
+            - name: operation_id
+              default: ""
+          tasks:
+            - &vc_task
+              task_key: execute
+              environment_key: default
+              max_retries: 0
+              retry_on_timeout: false
+              timeout_seconds: 3600
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, restore, --operation-id, "{{job.parameters.operation_id}}"]
+          environments:
+            - environment_key: default
+              spec:
+                environment_version: "4"
+                dependencies:
+                  - ../../.build/genie_workbench-0.1.0-py3-none-any.whl
+                  - ../../.build/genie_space_optimizer-0.0.0-py3-none-any.whl
+        vc-reconcile:
+          <<: *vc_job
+          name: ${var.app_name}-vc-reconcile
+          tasks:
+            - <<: *vc_task
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, reconcile, --operation-id, "{{job.parameters.operation_id}}"]
+        vc-promotion:
+          <<: *vc_job
+          name: ${var.app_name}-vc-promotion
+          tasks:
+            - <<: *vc_task
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, promotion, --operation-id, "{{job.parameters.operation_id}}"]
+        vc-polling:
+          <<: *vc_job
+          name: ${var.app_name}-vc-polling
+          tasks:
+            - <<: *vc_task
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, polling, --operation-id, "{{job.parameters.operation_id}}"]
+        vc-optimizer_apply:
+          <<: *vc_job
+          name: ${var.app_name}-vc-optimizer-apply
+          tasks:
+            - <<: *vc_task
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, optimizer_apply, --operation-id, "{{job.parameters.operation_id}}"]
+        vc-enrollment:
+          <<: *vc_job
+          name: ${var.app_name}-vc-enrollment
+          run_as:
+            service_principal_name: ${var.vc_enrollment_principal}
+          tasks:
+            - <<: *vc_task
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, enrollment, --operation-id, "{{job.parameters.operation_id}}"]
+        vc-recovery:
+          <<: *vc_job
+          name: ${var.app_name}-vc-recovery
+          tasks:
+            - <<: *vc_task
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, recovery, --operation-id, "{{job.parameters.operation_id}}"]
+        vc-verification:
+          <<: *vc_job
+          name: ${var.app_name}-vc-verification
+          tasks:
+            - <<: *vc_task
+              max_retries: 2
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, verification, --operation-id, "{{job.parameters.operation_id}}"]
+        vc-provision:
+          <<: *vc_job
+          name: ${var.app_name}-vc-provision
+          run_as:
+            service_principal_name: ${var.vc_provisioner_principal}
+          tasks:
+            - <<: *vc_task
+              python_wheel_task:
+                package_name: genie_workbench
+                entry_point: vc-platform
+                parameters: [--kind, provision, --operation-id, "{{job.parameters.operation_id}}"]

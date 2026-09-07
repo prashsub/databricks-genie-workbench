@@ -15,6 +15,17 @@ No live profile was selected and no platform mutations were attempted.
 | t08 | Missing verify-only startup adapter assertion | Wrong/missing run_as or unavailable identity aborts startup before initialization; removed startup Job mutation and swallowed verification failures. |
 | t09 | Missing explicit identity provider assertion | Explicit injected OAuth M2M or request-bound OBO clients; reject default/unbound profile and mismatched HTTPS host/workspace/live principal. SQL/Volume handles require the same verified context; no ambient client construction. |
 | t10 | Missing trusted snapshot reader assertion | Server-resolved actor/groups/edit permissions; M06 snapshot authorization precedes target-local reader. Denials/outages/cross-workspace reads never invoke trusted reader or grant viewer edit rights; expired OBO never falls back to SP. Live full-reader binding remains unverified. |
+| t11 | Missing local dispatcher/runtime assertions | Nine target-only DAB Job entrypoints, operation-ID-only dispatch with deterministic submission token; mutation retries=0, verification retries=2, unresolved/terminal attempts verify only. Deployer sets GSO run_as; startup never repairs it. Live strict DAB validation and owner-handler/DDL composition remain BLOCKED, not passing. |
+
+The `vc-sandbox` target is opt-in and requires explicit executor, enrollment and
+provisioner principals. Its installed `vc-platform` entrypoint refuses by default:
+`backend.jobs.build_vc_runtime` has no owner implementations available at this
+HEAD. M02/M03/M04/M05/M06/M07/M10 handlers, migration manifest loader and reviewed
+runner must be composed there before any live provisioning/run can pass. This
+is deliberately not replaced with fake production handlers. DAB App import and
+source configuration still require a live cutover; existing app deployment is
+preserved. The existing app target now requires `gso_run_as_principal` (passed
+by deploy.sh); notebook deployment sets the same identity before Job upsert.
 
 Integration tests live in the three owned `test_vc_*.py` files (not the plan's
 unowned `integration/test_vc_permissions.py`). They import the owned integration

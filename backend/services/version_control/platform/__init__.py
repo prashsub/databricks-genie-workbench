@@ -5,6 +5,7 @@ from .provisioning import provision
 from .permissions import verify_coordination_permissions, verify_fact_permissions
 from .capabilities import storage_write_ready
 from .identity import PlatformIdentityProvider, TrustedSnapshotReader, verify_configured_job_run_as, verify_job_run_as
+from .jobs import GovernedJobRuntime, LocalJobDispatcher
 
 from collections.abc import Callable
 from threading import RLock

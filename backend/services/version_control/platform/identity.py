@@ -93,6 +93,9 @@ class PlatformIdentityProvider:
     def sql_client(self, executor):
         return self._client(executor).statement_execution
 
+    def verified_client(self, executor):
+        return self._client(executor)
+
     def volume_client(self, executor):
         return self._client(executor).files
 
