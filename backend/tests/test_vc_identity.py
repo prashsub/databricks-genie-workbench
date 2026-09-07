@@ -71,3 +71,58 @@ def test_explicit_profile_host_workspace_mismatch_is_rejected():
     with pytest.raises(PermissionError):
         provider.executor(selection)
     factory.assert_not_called()
+
+
+def test_production_viewer_capture_uses_trusted_reader_without_elevation():
+    capture_type = getattr(platform, "TrustedSnapshotReader", None)
+    assert callable(capture_type), "Viewer policy and full-config reader must remain separate"
+    from backend.services.version_control.contracts import ActorContext, AuthenticatedRequest
+    actor = ActorContext("viewer", "target", "user")
+    resolve_actor = Mock(return_value=actor)
+    groups = Mock(return_value=frozenset({"history-readers"}))
+    edit = Mock(return_value=False)
+    provider = platform.PlatformIdentityProvider(request_resolver=resolve_actor,
+                                                 group_resolver=groups, edit_resolver=edit)
+    request = AuthenticatedRequest("server-session", "target")
+    binding = SimpleNamespace(workspace_id="target", space_id="space")
+    assert provider.actor(request) == actor
+    assert provider.groups("viewer", "target") == frozenset({"history-readers"})
+    assert provider.can_edit("viewer", binding) is False
+    authorizer = Mock(return_value=False)
+    full_reader = Mock(return_value={"serialized_space": "{}"})
+    capture = capture_type(provider, authorizer, {"target": full_reader})
+    with pytest.raises(PermissionError):
+        capture.read(request, binding)
+    full_reader.assert_not_called()
+    authorizer.return_value = True
+    assert capture.read(request, binding) == {"serialized_space": "{}"}
+    authorizer.assert_called_with(actor, binding)
+    full_reader.assert_called_once_with(binding)
+    assert provider.can_edit("viewer", binding) is False
+    full_reader.reset_mock()
+    with pytest.raises(PermissionError):
+        capture.read(request, SimpleNamespace(workspace_id="source", space_id="space"))
+    full_reader.assert_not_called()
+    authorizer.side_effect = TimeoutError("policy unavailable")
+    with pytest.raises(TimeoutError):
+        capture.read(request, binding)
+    full_reader.assert_not_called()
+    with pytest.raises(PermissionError):
+        platform.PlatformIdentityProvider().actor(request)
+
+
+def test_obo_executor_is_request_bound_and_never_falls_back():
+    client = Mock()
+    client.config.host = "https://target.example"
+    client.config.auth_type = "pat"
+    client.get_workspace_id.return_value = "target"
+    client.current_user.me.return_value = SimpleNamespace(application_id=None, id="viewer")
+    provider = platform.PlatformIdentityProvider(obo_executors={"session": lambda: client})
+    selection = ExplicitExecutorSelection("target", "https://target.example", "viewer", "session", None)
+    assert provider.executor(selection).actor_kind == "user"
+    from dataclasses import replace
+    with pytest.raises(PermissionError):
+        provider.executor(replace(selection, execution_ref="other-session"))
+    client.current_user.me.side_effect = PermissionError("expired user token")
+    with pytest.raises(PermissionError):
+        provider.executor(selection)

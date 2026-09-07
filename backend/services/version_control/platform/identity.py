@@ -2,7 +2,7 @@
 
 from urllib.parse import urlsplit
 
-from ..contracts import ExecutorContext
+from ..contracts import ActorContext, ExecutorContext
 
 
 def canonical_host(host: str) -> str:
@@ -23,6 +23,31 @@ class PlatformIdentityProvider:
         self._edit_resolver = edit_resolver
         self._job_client = job_client
         self._contexts = {}
+
+    def actor(self, request):
+        if self._request_resolver is None or not request.authentication_reference:
+            raise PermissionError("Server-authenticated request required")
+        actor = self._request_resolver(request.authentication_reference)
+        if (not isinstance(actor, ActorContext) or not actor.subject_id
+                or actor.workspace_id != request.workspace_id):
+            raise PermissionError("Authenticated actor workspace mismatch")
+        return actor
+
+    def groups(self, subject_id, workspace_id):
+        if self._group_resolver is None or not subject_id or not workspace_id:
+            raise PermissionError("Verified group resolution unavailable")
+        groups = self._group_resolver(subject_id, workspace_id)
+        if not isinstance(groups, (set, frozenset)) or any(not isinstance(group, str) for group in groups):
+            raise PermissionError("Unverified group membership")
+        return frozenset(groups)
+
+    def can_edit(self, subject_id, binding):
+        if self._edit_resolver is None or not subject_id:
+            return False
+        try:
+            return self._edit_resolver(subject_id, binding) is True
+        except Exception:
+            return False
 
     def executor(self, selection) -> ExecutorContext:
         expected_host = canonical_host(selection.host)
@@ -75,6 +100,24 @@ class PlatformIdentityProvider:
         if self._job_client is None:
             raise PermissionError("No explicit target-local Job identity reader")
         verify_job_run_as(self._job_client, execution_ref, expected_principal_id)
+
+
+class TrustedSnapshotReader:
+    def __init__(self, identity, authorize_snapshot, readers):
+        self._identity = identity
+        self._authorize_snapshot = authorize_snapshot
+        self._readers = dict(readers)
+
+    def read(self, request, binding):
+        actor = self._identity.actor(request)
+        if actor.workspace_id != binding.workspace_id:
+            raise PermissionError("Snapshot reader must be target-local")
+        if self._authorize_snapshot(actor, binding) is not True:
+            raise PermissionError("Requester lacks snapshot-view authorization")
+        reader = self._readers.get(binding.workspace_id)
+        if reader is None:
+            raise PermissionError("No explicitly bound target-local full-config reader")
+        return reader(binding)
 
 
 def verify_job_run_as(client, execution_ref: str, expected_principal_id: str) -> None:

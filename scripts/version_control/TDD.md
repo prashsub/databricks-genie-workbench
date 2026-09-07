@@ -14,6 +14,7 @@ No live profile was selected and no platform mutations were attempted.
 | t07 | Missing storage capability gate assertion | Every missing/false/nonboolean capability and probe outage disables writes; no MODIFY fallback or cached success. |
 | t08 | Missing verify-only startup adapter assertion | Wrong/missing run_as or unavailable identity aborts startup before initialization; removed startup Job mutation and swallowed verification failures. |
 | t09 | Missing explicit identity provider assertion | Explicit injected OAuth M2M or request-bound OBO clients; reject default/unbound profile and mismatched HTTPS host/workspace/live principal. SQL/Volume handles require the same verified context; no ambient client construction. |
+| t10 | Missing trusted snapshot reader assertion | Server-resolved actor/groups/edit permissions; M06 snapshot authorization precedes target-local reader. Denials/outages/cross-workspace reads never invoke trusted reader or grant viewer edit rights; expired OBO never falls back to SP. Live full-reader binding remains unverified. |
 
 Integration tests live in the three owned `test_vc_*.py` files (not the plan's
 unowned `integration/test_vc_permissions.py`). They import the owned integration
