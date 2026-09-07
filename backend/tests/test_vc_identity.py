@@ -126,3 +126,42 @@ def test_obo_executor_is_request_bound_and_never_falls_back():
     client.current_user.me.side_effect = PermissionError("expired user token")
     with pytest.raises(PermissionError):
         provider.executor(selection)
+
+
+def test_worker_termination_evidence_is_positive_and_attempt_specific():
+    provider_type = getattr(platform, "PlatformTerminationEvidenceProvider", None)
+    assert callable(provider_type), "A lease expiry is not termination evidence"
+    from datetime import datetime, timedelta, timezone
+    attempt_id = "00000000-0000-4000-8000-000000000012"
+    now = datetime.now(timezone.utc)
+    inventory = dict(attempt_id=attempt_id, execution_ref="job:1", complete=True,
+                     executions=("job:1", "job:2", "job:3"), source="databricks_jobs")
+    attempts = Mock(return_value=inventory)
+    states = {ref: dict(execution_ref=ref, attempt_id=attempt_id, state="TERMINATED",
+                        terminal_at=now - timedelta(seconds=1), evidence_digest="a" * 64)
+              for ref in inventory["executions"]}
+    jobs = Mock(side_effect=states.__getitem__)
+    worker = Mock(return_value=None)
+    provider = provider_type(attempts, jobs, worker)
+    proof = provider.for_attempt("job:1", attempt_id)
+    assert proof.attempt_id == attempt_id
+    assert {item.execution_ref for item in proof.executions} == set(states)
+    states["job:3"]["state"] = "RUNNING"
+    assert provider.for_attempt("job:1", attempt_id) is None
+    states["job:3"]["state"] = "TERMINATED"
+    inventory["complete"] = False
+    assert provider.for_attempt("job:1", attempt_id) is None
+    inventory["complete"] = True
+    inventory["attempt_id"] = "00000000-0000-4000-8000-000000000013"
+    assert provider.for_attempt("job:1", attempt_id) is None
+    attempts.side_effect = TimeoutError("Jobs unavailable")
+    assert provider.for_attempt("job:1", attempt_id) is None
+    assert provider.for_attempt("worker:1", attempt_id) is None
+    worker.return_value = dict(attempt_id=attempt_id, execution_ref="worker:1",
+                               heartbeat_expired=True, source="platform_worker_supervisor")
+    assert provider.for_attempt("worker:1", attempt_id) is None
+    worker.return_value.update(positive_termination=True, terminated_at=now,
+                               evidence_digest="b" * 64)
+    assert provider.for_attempt("worker:1", attempt_id).app_worker_proof_digest == "b" * 64
+    worker.return_value["terminated_at"] = now + timedelta(hours=1)
+    assert provider.for_attempt("worker:1", attempt_id) is None

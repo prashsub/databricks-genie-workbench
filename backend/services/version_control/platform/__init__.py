@@ -6,6 +6,7 @@ from .permissions import verify_coordination_permissions, verify_fact_permission
 from .capabilities import storage_write_ready
 from .identity import PlatformIdentityProvider, TrustedSnapshotReader, verify_configured_job_run_as, verify_job_run_as
 from .jobs import GovernedJobRuntime, LocalJobDispatcher
+from .termination import PlatformTerminationEvidenceProvider
 
 from collections.abc import Callable
 from threading import RLock
