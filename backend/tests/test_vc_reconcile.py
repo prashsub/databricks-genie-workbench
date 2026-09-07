@@ -193,3 +193,44 @@ def test_reapply_invalidation_failure_stops_new_request_and_job():
         service.reconcile(binding_fixture(), reconcile_request("reapply", approval_id=version_id(19)), actor_fixture())
     approvals.request.assert_not_called()
     dispatcher.submit_local.assert_not_called()
+
+
+def test_acknowledge_records_scoped_divergence_without_fabricating_clean_heads():
+    facts = Mock(spec=vc.OperationFacts)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(facts=facts)
+    policy.authorize_acknowledgement.return_value = True
+    request = reconcile_request("acknowledge", policy_inputs={"reason": "Accepted temporary divergence"})
+    handle = service.reconcile(binding_fixture(), request, actor_fixture())
+    fact = facts.append.call_args.args[0]
+    assert fact.fact_kind == vc.FactKind.ACKNOWLEDGEMENT
+    assert fact.status == vc.FactStatus.ACKNOWLEDGED
+    assert fact.binding == binding_fixture()
+    assert fact.pre_version_id == version_id(2)
+    assert fact.evidence.source_version_id == version_id(1)
+    assert fact.actor == actor_fixture()
+    assert handle.status == vc.OperationStatus.CONFIRMED
+    status = service.with_acknowledgement(observed_result().status, fact)
+    assert status.heads == observed_result().status.heads
+    assert status.drift == vc.DriftState.EXTERNAL_AHEAD
+    assert "Acknowledged divergence" in status.reasons[-1]
+    assert "acknowledge" not in status.allowed_actions
+    approvals.request.assert_not_called()
+    for changed in (replace(status, heads=replace(status.heads, observed=version_id(3))),
+                    replace(status, heads=replace(status.heads, deployed=version_id(3))),
+                    replace(status, binding_revision=2)):
+        assert service.with_acknowledgement(changed, fact) == changed
+    service.clock = lambda: NOW + timedelta(hours=2)
+    assert service.with_acknowledgement(observed_result().status, fact) == observed_result().status
+
+
+@pytest.mark.parametrize("failure", ["policy_denial", "missing_reason", "facts_unavailable"])
+def test_acknowledgement_requires_policy_reason_and_durable_fact(failure):
+    facts = Mock(spec=vc.OperationFacts)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(facts=facts)
+    policy.authorize_acknowledgement.return_value = failure != "policy_denial"
+    request = reconcile_request("acknowledge", policy_inputs={} if failure == "missing_reason" else {"reason": "accepted"})
+    if failure == "facts_unavailable":
+        facts.append.side_effect = RuntimeError("unavailable")
+    with pytest.raises((PermissionError, ValueError, RuntimeError)):
+        service.reconcile(binding_fixture(), request, actor_fixture())
+    approvals.request.assert_not_called()

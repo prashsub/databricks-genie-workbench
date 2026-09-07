@@ -48,7 +48,7 @@ class DriftService:
             raise PermissionError("Reconciliation requires target edit permission")
         if action.binding_revision != binding.binding_revision:
             raise ValueError("Binding revision changed")
-        if action.action not in ("adopt", "reapply"):
+        if action.action not in ("adopt", "reapply", "acknowledge"):
             raise ValueError("Unsupported reconciliation action")
         if action.action == "reapply" and (self.dispatch_enabled is not True or self.dispatcher is None):
             raise PermissionError("VC reconciliation Job dispatch disabled")
@@ -60,7 +60,7 @@ class DriftService:
                 or base.snapshot.state_digest != action.expected_base):
             raise ValueError("Captured base changed; review the preserved observation")
         source = base
-        if action.action == "reapply":
+        if action.action in ("reapply", "acknowledge"):
             source = self.ledger.get_version(binding, captured.status.heads.approved)
             if source.context.binding != binding or source.version_id != captured.status.heads.approved:
                 raise PermissionError("Policy target is not target-local")
@@ -75,6 +75,19 @@ class DriftService:
                 or inputs.canonicalizer_version != source.snapshot.fingerprints.canonicalizer_version
                 or inputs.expires_at <= self.clock()):
             raise PermissionError("Policy inputs do not bind the captured target and source")
+        if action.action == "acknowledge":
+            reason = action.policy_inputs.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("Acknowledgement requires an explicit reason")
+            inputs = replace(inputs, recovery_policy={**inputs.recovery_policy,
+                             "acknowledged_heads": vc.to_wire(captured.status.heads), "reason": reason})
+            if self.policy.authorize_acknowledgement(inputs, actor) is not True:
+                raise PermissionError("Acknowledgement denied by policy")
+            if self.facts is None:
+                raise RuntimeError("Acknowledgement facts unavailable")
+            self.facts.append(self._fact(binding, action, actor, inputs, base,
+                                         vc.FactKind.ACKNOWLEDGEMENT, vc.FactStatus.ACKNOWLEDGED))
+            return vc.OperationHandle(action.identity.operation_id, vc.OperationStatus.CONFIRMED, None)
         if action.action == "reapply" and action.approval_id:
             if self.facts is None:
                 raise RuntimeError("Approval invalidation evidence unavailable")
@@ -87,6 +100,17 @@ class DriftService:
         if action.action == "reapply":
             return self.dispatcher.submit_local(action.identity.operation_id, "reconcile")
         return vc.OperationHandle(action.identity.operation_id, vc.OperationStatus.REQUESTED, None)
+
+    def with_acknowledgement(self, status: vc.BindingStatus, fact: vc.OperationFact) -> vc.BindingStatus:
+        evidence = fact.evidence
+        if (fact.fact_kind != vc.FactKind.ACKNOWLEDGEMENT or fact.status != vc.FactStatus.ACKNOWLEDGED
+                or fact.binding.binding_id != status.binding_id
+                or fact.binding.binding_revision != status.binding_revision
+                or not isinstance(evidence, vc.ApprovalInputs) or evidence.expires_at <= self.clock()
+                or evidence.recovery_policy.get("acknowledged_heads") != vc.to_wire(status.heads)):
+            return status
+        return replace(status, reasons=(*status.reasons, "Acknowledged divergence; policy heads remain unchanged"),
+                       allowed_actions=tuple(action for action in status.allowed_actions if action != "acknowledge"))
 
     def _fact(self, binding, action, actor, inputs, base, kind, status):
         key = f"{action.identity.operation_id}:{kind.value}"
