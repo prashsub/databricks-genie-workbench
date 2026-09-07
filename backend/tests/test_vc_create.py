@@ -46,3 +46,41 @@ def test_create_lost_response_keeps_provisional_binding_without_replay(create_ri
     assert again.unresolved
     rig.transport.create_once.assert_called_once()
     rig.coordination.finish.assert_not_called()
+
+
+@pytest.mark.parametrize("bind_failure", [False, True])
+def test_create_persists_physical_binding_before_follow_on_edit(create_rig, bind_failure):
+    rig, request, registry = create_rig
+    rig.transport.create_once.return_value = vc.CreateResponse("new-space", {"space_id": "new-space"})
+    physical = replace(request.binding, space_id="new-space")
+    def bind(*args):
+        rig.trace.append("bind")
+        if bind_failure:
+            raise RuntimeError("binding unavailable")
+        registry.resolve.return_value = physical
+        rig.state.update({"serialized_space": {"instructions": "new"}, "description": "new"})
+        return physical
+    registry.bind_created.side_effect = bind
+    result = rig.gate.create(request, rig.executor)
+    assert result is not None, "Create needs durable identity before authoritative GET"
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+    if bind_failure:
+        assert result.unresolved
+        rig.transport.get.assert_not_called()
+        rig.coordination.finish.assert_not_called()
+    else:
+        assert result.status == vc.OperationStatus.CONFIRMED
+        assert rig.trace.index("bind") < rig.trace.index("get")
+        version = rig.versions[result.postimage.version_id]
+        assert version.context.binding == physical
+        assert version.context.parent_version_id is None
+        assert version.context.attempt_id == rig.fence.attempt_id
+
+
+def test_create_missing_physical_id_never_uses_display_name(create_rig):
+    rig, request, registry = create_rig
+    rig.transport.create_once.return_value = vc.CreateResponse("", {"title": "Sales"})
+    result = rig.gate.create(request, rig.executor)
+    assert result.unresolved
+    registry.bind_created.assert_not_called()

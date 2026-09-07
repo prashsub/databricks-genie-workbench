@@ -1,6 +1,7 @@
 """Fail-closed orchestration over VC/1.0 ports."""
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from uuid import uuid4
 
 from backend.services.version_control import contracts as vc
@@ -109,7 +110,25 @@ class MutationGate:
         self._checkpoint(claim, vc.PatchStage.CONFIG_IN_FLIGHT, None)
         self.coordination.assert_owner(claim)
         try:
-            self.transport.create_once(request.payload, claim)
+            response = self.transport.create_once(request.payload, claim)
+            if not response.space_id:
+                raise RuntimeError("Create response has no physical identity")
+            evidence = vc.IdentityEvidence("VC/1.0", request.binding.workspace_id, response.space_id,
+                vc.canonical_json_hash("vc-create-response/1", response.response_envelope),
+                datetime.now(timezone.utc), actor)
+            physical = self.registry.bind_created(intent, response.space_id, evidence)
+            if (physical != replace(request.binding, space_id=response.space_id)
+                    or self.registry.resolve(physical.binding_id) != physical):
+                raise RuntimeError("Physical binding was not durably resolved")
+            mutation = replace(mutation, binding=physical)
+            snapshot = self.canonicalizer.observe(self.transport.get(physical, executor))
+            postimage = self._capture(mutation, executor, claim, snapshot, "postimage")
+            self._checkpoint(claim, vc.PatchStage.CONFIG_OBSERVED, postimage)
+            desired = self.canonicalizer.observe({"serialized_space": vc.to_wire(request.payload.serialized_space),
+                **({"description": request.payload.description} if request.payload.description is not None else {})})
+            if self.canonicalizer.compare(snapshot, desired) != vc.Comparison.EQUAL:
+                return self._partial(mutation, claim, postimage, "Created state differs from approved payload")
+            return self._finish(mutation, executor, claim, vc.OperationStatus.CONFIRMED, postimage)
         except Exception:
             return self._unverified(mutation, executor, claim, "Possible create orphan; audited identity resolution required")
 
