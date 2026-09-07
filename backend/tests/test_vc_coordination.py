@@ -144,3 +144,28 @@ def test_same_sp_stale_attempt_cannot_renew_or_patch(h, change):
         h.service.renew(renewed)
     with pytest.raises(CoordinationError):
         h.service.assert_owner(renewed)
+
+
+@pytest.mark.parametrize('kind', ['observation', 'create_intent'])
+def test_reservation_is_not_admission_and_requires_committed_preimage(h, kind):
+    if kind == 'create_intent':
+        h.binding = replace(h.binding, space_id=None)
+        h.resolve_binding.return_value = h.binding
+        h.grant = replace(h.grant, binding=h.binding)
+        h.preimage = c.CreateIntentRef(uid(), h.request.operation_id, h.binding.binding_id,
+                                       1, h.request.request_digest)
+    enroll(h)
+    reservation = reserve(h)
+    assert not isinstance(reservation, c.AdmissionClaim)
+    with pytest.raises(CoordinationError):
+        h.service.assert_owner(reservation.fence)
+    verifier = h.ledger.verify_committed if kind == 'observation' else h.verify_create_intent
+    verifier.return_value = False
+    with pytest.raises(CoordinationError):
+        h.service.admit(reservation, h.preimage, h.grant)
+    assert h.store.read(h.binding.binding_id).state == c.CoordinationState.RESERVED
+    verifier.return_value = True
+    claim = h.service.admit(reservation, h.preimage, h.grant)
+    assert isinstance(claim, c.AdmissionClaim)
+    assert claim.preimage == h.preimage
+    h.service.assert_owner(claim)

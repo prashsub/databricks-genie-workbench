@@ -155,3 +155,43 @@ class CoordinationService:
         row = self._owned(claim)
         if not isinstance(claim, c.AdmissionClaim) or row.state != c.CoordinationState.ADMITTED:
             raise OwnershipError('Reservation/observation is not write admission')
+
+    def admit(self, reservation: c.Reservation,
+              preimage: c.ObservationRef | c.CreateIntentRef,
+              authorization: c.AuthorizationGrant) -> c.AdmissionClaim:
+        row = self._owned(reservation.fence)
+        if row.state != c.CoordinationState.RESERVED:
+            raise OwnershipError('Only a reservation can be admitted; no replay')
+        if (preimage.binding_id, preimage.binding_revision) != (
+                row.binding.binding_id, row.binding.binding_revision):
+            raise OwnershipError('Preimage belongs to another binding/revision')
+        if isinstance(preimage, c.ObservationRef):
+            if not self._io(self.ledger.verify_committed, preimage):
+                raise CoordinationError('Preimage not committed')
+            if preimage.state_digest != authorization.expected_base_fingerprints.state_digest:
+                self._fact(row, reservation.request, c.FactStatus.CONFLICTED)
+                raise CoordinationError('Committed preimage differs from reviewed base')
+            evidence = dict(pre_version_id=preimage.version_id,
+                            preimage_digest=preimage.state_digest, create_intent_event_id=None)
+        elif isinstance(preimage, c.CreateIntentRef):
+            if (row.binding.space_id is not None
+                    or preimage.operation_id != reservation.request.operation_id
+                    or preimage.request_digest != reservation.request.request_digest
+                    or not self._io(self.verify_create_intent, preimage)):
+                raise CoordinationError('Committed provisional create intent required')
+            evidence = dict(pre_version_id=None, preimage_digest=None,
+                            create_intent_event_id=preimage.event_id)
+        else:
+            raise CoordinationError('Unsupported committed evidence')
+        row = self._cas(row, lambda r: r.state == c.CoordinationState.RESERVED,
+            state=c.CoordinationState.ADMITTED,
+            active_operation_id=reservation.request.operation_id,
+            idempotency_key=reservation.request.idempotency_key,
+            request_digest=reservation.request.request_digest,
+            approval_id=authorization.approval_id, approval_digest=authorization.approval_digest,
+            expected_base_fingerprint=authorization.expected_base_fingerprints.state_digest,
+            admitted_at=self.clock.now(), mutation_stage=c.PatchStage.CONFIG_PENDING,
+            **evidence)
+        return c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
+            row.attempt_id, row.generation, row.row_version, reservation.request,
+            preimage, row.approval_id, row.approval_digest)
