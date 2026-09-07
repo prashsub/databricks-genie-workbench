@@ -82,3 +82,46 @@ def test_missing_or_duplicate_ownership_row_blocks_admission(h):
     h.store.seed(CoordinationRow(h.binding, h.clock.now()))
     with pytest.raises(CoordinationError):
         reserve(h)
+
+
+def test_two_concurrent_reservations_have_exactly_one_winner(h):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    enroll(h)
+    barrier = Barrier(2)
+    original = h.store.compare_and_swap
+    trace = []
+
+    def race(*args, **kwargs):
+        barrier.wait(timeout=5)
+        trace.append(kwargs)
+        return original(*args, **kwargs)
+
+    h.store.compare_and_swap = race
+
+    def run():
+        try:
+            return reserve(h)
+        except CoordinationError:
+            return None
+
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda _: run(), range(2)))
+    winners = [r for r in results if r is not None]
+    assert len(winners) == 1
+    row = h.store.read(h.binding.binding_id)
+    assert row.attempt_id == winners[0].fence.attempt_id
+    assert row.holder == h.executor.principal_id
+    assert row.generation == winners[0].fence.generation == 1
+    assert row.unresolved and row.state == c.CoordinationState.RESERVED
+    assert len(trace) == 2
+    h.facts.append.assert_called_once()
+    assert h.facts.append.call_args.args[0].status == c.FactStatus.CONFLICTED
+
+    # Successful statement return is NOT proof: a non-committing adapter lies.
+    other = replace(h.binding, binding_id=uid())
+    h.resolve_binding.return_value = other
+    h.store.seed(CoordinationRow(other, h.clock.now()))
+    h.store.compare_and_swap = Mock(return_value=True)
+    with pytest.raises(CoordinationError):
+        h.service.reserve(other, h.request, h.executor)
