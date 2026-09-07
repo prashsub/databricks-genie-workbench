@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import pytest
 
 from backend.services.version_control import platform
-from backend.tests.integration.conftest import live_platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -237,17 +236,6 @@ def test_fact_permissions_require_append_only_nonowner_and_no_modify():
     assert verify({}) is False
 
 
-@pytest.mark.integration
-def test_runtime_principal_cannot_update_delete_or_alter_fact_tables(live_platform):
-    for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
-        table = live_platform.table(name)
-        assert table["properties"]["delta.appendOnly"] == "true"
-        assert table["owner"] != live_platform.principal("runtime")
-        live_platform.assert_sql_succeeds("runtime", f"{name}.insert")
-        for action in ("update", "delete", "alter", "drop", "replace"):
-            live_platform.assert_sql_denied("runtime", f"{name}.{action}")
-
-
 def test_coordination_grants_require_separate_serialized_enrollment():
     verify = getattr(platform, "verify_coordination_permissions", None)
     assert callable(verify), "Enrollment must be separate from UPDATE-only executors"
@@ -264,22 +252,6 @@ def test_coordination_grants_require_separate_serialized_enrollment():
                        ("isolation", "WriteSerializable")):
         assert verify(dict(proof, **{key: value})) is False
     assert verify({}) is False
-
-
-@pytest.mark.integration
-def test_executor_cannot_insert_coordination_and_enrollment_is_serialized(live_platform):
-    live_platform.assert_sql_denied("executor", "genie_ops_coordination.insert")
-    live_platform.assert_sql_succeeds("executor", "genie_ops_coordination.update")
-    live_platform.assert_sql_succeeds("enrollment", "genie_ops_coordination.enroll")
-    table = live_platform.table("genie_ops_coordination")
-    assert table["properties"]["delta.isolationLevel"] == "Serializable"
-    assert len({table["owner"], live_platform.principal("executor"),
-                live_platform.principal("enrollment")}) == 3
-    job = live_platform.api("provisioner", "get",
-                            f"/api/2.2/jobs/get?job_id={live_platform.config['enrollment_job_id']}")
-    assert job["settings"]["max_concurrent_runs"] == 1
-    assert job["settings"]["queue"]["enabled"] is True
-    assert job["settings"]["run_as"]["service_principal_name"] == live_platform.principal("enrollment")
 
 
 def test_missing_fine_grained_dml_or_serializable_disables_writes():
@@ -351,21 +323,6 @@ def test_artifact_grants_require_distinct_volume_securables_and_writers():
     assert verify(volumes, writers, {"target"}, {"source", "provisioner"}) is False
 
 
-@pytest.mark.integration
-def test_package_approval_receipt_securables_have_separate_writers(live_platform):
-    expected = {"vc_snapshots": "observer", "vc_approval_evidence": "approval",
-                "vc_outbound_packages": "source", "vc_target_receipts": "executor"}
-    for volume, writer in expected.items():
-        live_platform.assert_sql_succeeds(writer, f"{volume}.write")
-        for other in set(expected.values()) - {writer}:
-            live_platform.assert_sql_denied(other, f"{volume}.write")
-    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
-    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
-    for action in ("insert", "update", "delete", "alter"):
-        live_platform.assert_sql_denied("source", f"genie_space_operations.{action}")
-    live_platform.assert_sql_denied("source", "genie_space_operations.read")
-
-
 def test_repeatable_provision_requires_explicit_nonproduction_selection():
     run = getattr(platform, "repeatable_sandbox_provision", None)
     assert callable(run), "Real provisioning must require explicit sandbox selection"
@@ -395,11 +352,6 @@ def test_repeatable_provision_requires_explicit_nonproduction_selection():
         run(ROOT, selection, runner)
 
 
-@pytest.mark.integration
-def test_dab_validate_and_sandbox_provision_are_repeatable(live_platform):
-    platform.repeatable_sandbox_provision(ROOT, live_platform.config["bundle"], live_platform)
-
-
 def test_unverified_cross_metastore_artifact_transport_disables_topology():
     verify = getattr(platform, "topology_read_ready", None)
     assert callable(verify), "Unsupported Delta Sharing topology must remain disabled"
@@ -420,14 +372,49 @@ def test_unverified_cross_metastore_artifact_transport_disables_topology():
     assert verify(proof) is False
 
 
-@pytest.mark.integration
-def test_source_target_artifact_topology_is_verified_without_remote_write_credentials(live_platform):
-    source = live_platform.api("source", "get", "/api/2.1/unity-catalog/metastore_summary")
-    target = live_platform.api("executor", "get", "/api/2.1/unity-catalog/metastore_summary")
-    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
-    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
-    live_platform.assert_sql_denied("source", "vc_target_receipts.write")
-    live_platform.assert_sql_denied("source", "genie_space_operations.insert")
-    assert source["metastore_id"] == live_platform.config["topology"]["source_metastore"]
-    assert target["metastore_id"] == live_platform.config["topology"]["target_metastore"]
-    assert platform.topology_read_ready(live_platform.config["topology"])
+def test_integration_gate_command_collects_every_integration_test():
+    # The sanctioned release-gate command from testing-strategy.md must actually
+    # traverse the honest deployment blockers. If the integration tests live in
+    # unit-test files, this command collects zero and exits 5 (EXIT_NOTESTSCOLLECTED),
+    # which reads as "not failing" -- the exact silent-skip failure mode M08 exists
+    # to make impossible.
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "backend/tests/integration",
+         "-m", "integration", "--collect-only", "-q"],
+        cwd=str(ROOT), capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(ROOT)))
+    assert result.returncode != 5, (
+        f"Integration gate collected no tests (exit 5):\n{result.stdout}\n{result.stderr}")
+    assert result.returncode == 0, (
+        f"Integration collection errored:\n{result.stdout}\n{result.stderr}")
+    collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
+    assert len(collected) == 5, (
+        f"Expected exactly 5 integration tests collected, saw {len(collected)}:\n{result.stdout}")
+
+    # Pin the layout: no integration-marked test may drift back out of the gated
+    # directory. Match the decorator only where it is actually applied (a line whose
+    # first token is the marker), so this test's own string references to the marker
+    # name in assertion messages do not trip the scan.
+    marker_decorator = re.compile(r"^\s*@pytest\.mark\.integration\b", re.MULTILINE)
+    tests_dir = ROOT / "backend" / "tests"
+    for path in tests_dir.glob("*.py"):
+        assert not marker_decorator.search(path.read_text()), (
+            f"{path} carries an integration test outside backend/tests/integration/")
+
+    assert (tests_dir / "integration" / "__init__.py").exists(), (
+        "backend/tests/integration/__init__.py required for consistent package layout")
+
+    # No module outside the integration directory may import live_platform from the
+    # integration conftest (the cross-directory fixture import is brittle). Match an
+    # actual import statement so this test's own string reference does not self-trip.
+    conftest_import = re.compile(
+        r"^\s*from\s+backend\.tests\.integration\.conftest\s+import\b", re.MULTILINE)
+    for path in tests_dir.glob("*.py"):
+        assert not conftest_import.search(path.read_text()), (
+            f"{path} performs a cross-directory live_platform fixture import")
+
+    # Regression-pin honest-blocker semantics: the fixture FAILS (never skips) when
+    # VC_INTEGRATION_CONFIG is unset.
+    conftest = (tests_dir / "integration" / "conftest.py").read_text()
+    assert "pytest.fail" in conftest, "live_platform must fail (not skip) when unconfigured"
+    assert "pytest.skip" not in conftest, "live_platform must not silently skip deployment blockers"
