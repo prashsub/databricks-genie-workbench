@@ -300,7 +300,10 @@ def _canonical_config(serialized: dict) -> dict:
             by_identifier.setdefault(identifier, {}).update(entry)
         else:
             unaddressed.append(entry)
-    sources["sources"] = [*by_identifier.values(), *unaddressed]
+    sources["sources"] = [
+        *(by_identifier[key] for key in sorted(by_identifier)),
+        *unaddressed,
+    ]
     return canonicalize(config, _collection_keys=_VC_COLLECTION_KEYS)
 
 
