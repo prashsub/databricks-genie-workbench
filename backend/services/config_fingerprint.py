@@ -39,6 +39,7 @@ from typing import Any
 
 from backend.services.version_control.contracts import (
     Comparison,
+    DiffItem,
     Fingerprints,
     Snapshot,
     canonical_json_hash,
@@ -120,6 +121,14 @@ class Canonicalizer:
             return Comparison.UNKNOWN
         left, right = pair
         return Comparison.EQUAL if left.fingerprints == right.fingerprints else Comparison.DIFFERENT
+
+    def semantic_diff(self, left: Snapshot, right: Snapshot) -> list[DiffItem]:
+        from backend.services.version_control.canonical_diff import semantic_diff
+
+        pair = self._comparable_pair(left, right)
+        if pair is None:
+            raise ValueError("Cannot diff incompatible canonicalizer versions without dual compute")
+        return semantic_diff(*pair)
 
     def _comparable_pair(self, left: Snapshot, right: Snapshot) -> tuple[Snapshot, Snapshot] | None:
         left_version = left.fingerprints.canonicalizer_version
