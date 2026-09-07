@@ -1,9 +1,13 @@
 import { expect, it, vi } from 'vitest'
 import { createVersionControlStore, canMutate } from '@/hooks/use-version-control'
 import { VersionControlApi } from '@/lib/version-control-api'
-import { bindingFixture, versionFixture } from './fixtures'
+import { approvalInputsFixture, bindingFixture, versionFixture } from './fixtures'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { VersionControlView } from './version-control-tab'
+import { RestorePanel } from './restore'
+import { PromotionPanel } from './promotion'
+import { VersionControlWorkbench } from '@/pages/VersionControlWorkbench'
+import { createDemoTransport } from './demo-api'
 
 it('open_waits_for_capture_before_showing_reconcile_choices', async () => {
   let completeCapture!: (response: Response) => void
@@ -25,6 +29,56 @@ it('open_waits_for_capture_before_showing_reconcile_choices', async () => {
   completeCapture(new Response(JSON.stringify({ status: bindingFixture, captured_version: versionFixture, busy: false })))
   await returning
   expect(JSON.parse(String(transport.mock.calls.filter(([url]) => String(url).endsWith('/observe')).length))).toBe(2)
+})
+
+it('version_control_actions_are_keyboard_accessible_and_errors_announced', () => {
+  const state = { bindingId: 'demo-binding', loading: false, captured: false, busy: false, stale: true, status: bindingFixture, history: { items: [versionFixture], next_cursor: null }, error: 'Evidence unavailable' }
+  const html = renderToStaticMarkup(<VersionControlView state={state} />)
+  expect(html).toContain('aria-live="polite"')
+  expect(html).toContain('role="alert"')
+  expect(html).toContain('Evidence unavailable')
+  const api = new VersionControlApi(vi.fn())
+  const controls = renderToStaticMarkup(<><RestorePanel api={api} bindingId="demo-binding" command={{ version_id: 'version-1', expected_base: versionFixture.fingerprints, binding_revision: 3 }} disabled onComplete={vi.fn()} /><PromotionPanel api={api} bindingId="demo-binding" sourceVersionId="version-1" inputs={approvalInputsFixture} disabled /></>)
+  expect(controls).toContain('<label>Restore approval reference<input')
+  expect(controls).toContain('type="checkbox"')
+  expect(controls).toContain('<label>Target binding<input')
+  expect(controls).toContain('<button disabled=""')
+  expect(controls).not.toMatch(/tabindex="-1"|<div[^>]*role="button"/)
+})
+
+it('workbench_exposes_an_explicit_api_faked_entry_point', () => {
+  const html = renderToStaticMarkup(<VersionControlWorkbench />)
+  expect(html).toContain('VC/1.0 API-faked foundation')
+  expect(html).toContain('No real endpoints')
+  expect(html).toContain('Version Control overview')
+})
+
+it('fake_api_supports_approval_restore_promotion_and_receipt_without_network', async () => {
+  const network = vi.fn(() => { throw new Error('Real network forbidden') })
+  vi.stubGlobal('fetch', network)
+  try {
+    const api = new VersionControlApi(createDemoTransport())
+    const page = await api.overview()
+    expect(page.next_cursor).not.toBeNull()
+    const observation = await api.observe('demo-binding', 'open', 'observe-1')
+    expect(observation.status.heads).toEqual(bindingFixture.heads)
+    const inputs = { ...approvalInputsFixture, expires_at: new Date(Date.now() + 3600000).toISOString() }
+    const request = await api.requestApproval(inputs, 'request-1')
+    const approval = await api.vote(request.approval_id, 'approve', 'vote-1')
+    expect(approval.valid).toBe(true)
+    const restore = await api.restore('demo-binding', { version_id: 'approved-2', expected_base: versionFixture.fingerprints, binding_revision: 3, approval_id: approval.approval_id }, 'restore-1')
+    expect((await api.operation(restore.operation_id)).status).toBe('confirmed')
+    const release = await api.release({ source_binding: 'demo-binding', source_version_id: 'external-3', target_binding: 'demo-target', mapping_digest: 'mapping-1', policy: 'production' }, 'release-1')
+    expect(await api.receipt(release.release_id)).toHaveProperty('status', 'requested')
+    const preflight = await api.validate(release.release_id, 'validate-1')
+    expect((await api.operation(preflight.operation_id)).status).toBe('confirmed')
+    const promotionApproval = await api.requestApproval({ ...inputs, operation_type: 'promotion', target_binding: 'demo-target', mapping_digest: 'mapping-1' }, 'promotion-request')
+    await api.vote(promotionApproval.approval_id, 'approve', 'promotion-vote')
+    await api.promote(release.release_id, { approval_id: promotionApproval.approval_id }, 'promote-1')
+    expect(await api.receipt(release.release_id)).toHaveProperty('post_version_id')
+    await expect(api.restore('demo-quarantined', { version_id: 'approved-2', expected_base: versionFixture.fingerprints, binding_revision: 3, approval_id: approval.approval_id }, 'blocked')).rejects.toMatchObject({ status: 423 })
+    expect(network).not.toHaveBeenCalled()
+  } finally { vi.unstubAllGlobals() }
 })
 
 it('capture_failure_shows_stale_history_and_disables_mutating_actions', async () => {

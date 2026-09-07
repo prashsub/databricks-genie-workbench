@@ -14,7 +14,7 @@ import { approvalInputsFixture } from './fixtures'
 import { PromotionPanel } from './promotion'
 
 export function VersionControlView({ state }: { state: VersionControlState }) {
-  return <section aria-label="Version Control and Promotion" className="space-y-4">
+  return <section aria-label="Version Control and Promotion" aria-live="polite" className="space-y-4">
     <h2>Version Control and Promotion</h2>
     {state.loading && <p role="status">Capturing external history…</p>}
     {state.stale && <p role="alert">Stale history — mutating actions disabled. {state.error}</p>}
