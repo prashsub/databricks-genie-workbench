@@ -70,3 +70,91 @@ def test_native_promotion_job_accepts_operation_id_only(promotion_rig):
     service.execute.assert_called_once_with(uid(4), rig.executor)
     with pytest.raises(ValueError):
         vc_promote.run('not-an-operation-id', service=service, executor=rig.executor)
+
+
+def test_release_routes_authenticate_require_keys_and_return_pending(promotion_rig):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.routers.vc_releases import build_router
+    rig = promotion_rig
+    commands = Mock()
+    commands.promote.return_value = vc.OperationHandle(uid(4), vc.OperationStatus.REQUESTED, None)
+    commands.receipt.return_value = None
+    app = FastAPI()
+    app.include_router(build_router(commands=commands, identity=rig.identity))
+    authentication_enabled = False
+    @app.middleware('http')
+    async def authenticate(request, call_next):
+        if authentication_enabled:
+            request.state.vc_auth = vc.AuthenticatedRequest('server-verified', 'target')
+        return await call_next(request)
+    with TestClient(app) as client:
+        response = client.get(f'/api/version-control/releases/{uid(4)}/receipt')
+        assert response.status_code == 401
+    authentication_enabled = True
+    rig.identity.actor.return_value = vc.ActorContext('human', 'target', 'human')
+    with TestClient(app) as client:
+        path = f'/api/version-control/releases/{uid(4)}/promote'
+        assert client.post(path, json={'approval_id': uid(4)}).status_code == 422
+        response = client.post(path, json={'approval_id': uid(4)}, headers={'Idempotency-Key': 'promote-once'})
+        assert response.status_code == 202
+        commands.promote.assert_called_once_with(uid(4), uid(4), 'promote-once', rig.identity.actor.return_value)
+        assert client.get(f'/api/version-control/releases/{uid(4)}/receipt').status_code == 202
+        commands.promote.side_effect = PermissionError('Target scope denied')
+        assert client.post(path, json={'approval_id': uid(4)}, headers={'Idempotency-Key': 'key'}).status_code == 403
+        assert client.post(path, json={'approval_id': uid(4), 'token': 'not-accepted'},
+                           headers={'Idempotency-Key': 'key'}).status_code == 422
+
+
+def test_promotion_ddl_owns_only_two_distinct_volumes():
+    from pathlib import Path
+    path = Path(__file__).parents[1] / 'version_control_ddl/08-promotion-volumes.sql'
+    assert path.exists(), 'M07 separate Volume provisioning manifest is missing'
+    ddl = path.read_text()
+    assert ddl.count('CREATE VOLUME IF NOT EXISTS') == 2
+    assert '${catalog}.${control_schema}.vc_outbound_packages' in ddl
+    assert '${catalog}.${control_schema}.vc_target_receipts' in ddl
+    assert 'CREATE TABLE' not in ddl and 'vc_approval_evidence' not in ddl
+
+
+def test_release_registration_is_not_an_executable_command(promotion_rig):
+    from backend.services.version_control.promotion.releases import ReleaseCommands
+    rig = promotion_rig
+    written = []
+    commands = ReleaseCommands(promotion=rig.service,
+        request_writer=lambda request, fact: written.append((request, fact)), authorize_history=lambda actor, binding: True)
+    actor = vc.ActorContext('target-human', 'target', 'human')
+    handle = commands.create(rig.version.version_id, rig.mapping, rig.policy, rig.base.state_digest,
+                             'source-profile', 'target-profile', 'release-key', actor)
+    request, fact = written[0]
+    assert fact.fact_kind == vc.FactKind.RELEASE
+    assert request.binding == rig.target and request.operation_type == 'promotion'
+    assert handle.operation_id == request.identity.operation_id == fact.release_id
+    assert request.approval_id == request.identity.operation_id
+    assert fact.evidence.source_version_id == rig.version.version_id
+    rig.gate.execute.assert_not_called()
+    rig.registry.enroll.assert_not_called()
+    with pytest.raises(PermissionError):
+        commands.create(rig.version.version_id, rig.mapping, rig.policy, rig.base.state_digest,
+                        'source-profile', 'DEFAULT', 'other', actor)
+
+
+def test_release_validation_and_promotion_require_target_approval(promotion_rig):
+    from backend.services.version_control.promotion.releases import ReleaseCommands
+    rig = promotion_rig
+    approve(rig)
+    commands = ReleaseCommands(promotion=rig.service, request_writer=Mock(), authorize_history=lambda actor, binding: True)
+    actor = vc.ActorContext('target-human', 'target', 'human')
+    handle = commands.validate(uid(4), 'promote-once', actor)
+    assert handle.operation_id == uid(4)
+    fact = rig.facts.append.call_args.args[0]
+    assert isinstance(fact.evidence, vc.StageEvidence)
+    assert fact.fact_kind == vc.FactKind.OPERATION and fact.status == vc.FactStatus.REQUESTED
+    result = commands.promote(uid(4), uid(4), 'promote-once', actor)
+    assert result.status == vc.OperationStatus.REQUESTED
+    rig.approvals.authorize.assert_called_once_with(rig.request, rig.executor)
+    assert commands.receipt(uid(4), actor) is None
+    rig.gate.execute.assert_not_called()
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+    with pytest.raises(PermissionError):
+        commands.promote(uid(4), uid(4), 'promote-once', actor)
