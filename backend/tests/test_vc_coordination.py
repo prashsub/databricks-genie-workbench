@@ -396,3 +396,44 @@ def test_checkpoint_normal_sequence_and_flush_failure_retains_claim(h):
     with pytest.raises(CoordinationError):
         complete(h, claim)
     assert h.store.read(h.binding.binding_id).unresolved
+
+
+def test_observer_cannot_regress_or_approve_heads(h):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+    enroll(h)
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    with pytest.raises(CoordinationError):
+        reserve(h)
+    with pytest.raises(CoordinationError):
+        h.service.assert_owner(lease.fence)
+    version_id = uid()
+    for update in (c.HeadUpdate(version_id, version_id, None, 'caller-claim'),
+                   c.HeadUpdate(version_id, None, version_id, 'caller-claim')):
+        with pytest.raises(CoordinationError):
+            h.service.advance_heads(lease.fence, update)
+    snapshot = FakeCanonicalizer().observe({'serialized_space': {}, 'description': ''})
+    context = c.CaptureContext(h.binding, 'observer-1', h.clock.now(), 'open',
+        c.ActorContext('observer', h.binding.workspace_id, 'service'), c.Origin.EXTERNAL,
+        attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
+    h.ledger.get_version.return_value = c.Version(version_id, snapshot, context)
+    heads = h.service.advance_heads(lease.fence, c.HeadUpdate(version_id, None, None, None))
+    assert heads == c.Heads(version_id, None, None)
+    assert not h.store.read(h.binding.binding_id).unresolved
+    newer = h.service.observe_exclusively(h.binding, h.executor)
+    assert newer.observed_sequence > lease.observed_sequence
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(lease.fence, c.HeadUpdate(uid(), None, None, None))
+    # Even the current holder cannot attach an old observation from another lease.
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(newer.fence, c.HeadUpdate(version_id, None, None, None))
+    final_id = uid()
+    h.ledger.get_version.return_value = c.Version(final_id, snapshot,
+        replace(context, observation_key='observer-2', parent_version_id=version_id,
+                attempt_id=newer.fence.attempt_id, generation=newer.fence.generation))
+    h.service.advance_heads(newer.fence, c.HeadUpdate(final_id, None, None, None))
+    claim = admit(h)
+    with pytest.raises(CoordinationError):
+        h.service.advance_heads(claim, c.HeadUpdate(None, final_id, final_id, 'unvalidated'))
+    h.authorize_heads.return_value = True
+    heads = h.service.advance_heads(claim, c.HeadUpdate(None, final_id, final_id, 'verified-deployment-policy'))
+    assert heads == c.Heads(final_id, final_id, final_id)

@@ -434,3 +434,43 @@ class CoordinationService:
         self._cas(row, lambda r: r.mutation_stage == row.mutation_stage,
                   mutation_stage=stage, checkpoint=checkpoint,
                   approval_consumption_published=True)
+
+    def observe_exclusively(self, binding: c.BindingRef,
+                            executor: c.ExecutorContext) -> c.ObservationLease:
+        row = self._expire(self._row(binding))
+        if (row.unresolved or row.state != c.CoordinationState.IDLE
+                or executor.workspace_id != binding.workspace_id or not executor.execution_ref):
+            raise OwnershipError('Binding busy or executor not target-local; return stale/checkpoint')
+        row = self._cas(row, lambda r: not r.unresolved and r.state == c.CoordinationState.IDLE,
+            state=c.CoordinationState.OBSERVING, unresolved=True,
+            generation=row.generation + 1, attempt_id=str(uuid4()), holder=executor.principal_id,
+            executor_kind=executor.actor_kind, executor_ref=executor.execution_ref,
+            lease_expires_at=self.clock.now() + timedelta(seconds=60),
+            observed_sequence=row.observed_sequence + 1)
+        return c.ObservationLease(self._fence(row), row.observed_sequence, row.lease_expires_at)
+
+    def advance_heads(self, fence: c.FenceToken, update: c.HeadUpdate) -> c.Heads:
+        row = self._owned(fence)
+        observing = row.state == c.CoordinationState.OBSERVING
+        if update.approved is not None or update.deployed is not None:
+            if (observing or not update.authorization_reference
+                    or not self._io(self.authorize_heads, row.binding, fence, update)):
+                raise CoordinationError('Approved/deployed heads require verified policy/deployment evidence')
+        if update.observed is not None:
+            version = self._io(self.ledger.get_version, row.binding, update.observed)
+            context = version.context
+            ref = c.ObservationRef(version.version_id, row.binding.binding_id,
+                row.binding.binding_revision, version.snapshot.state_digest,
+                version.snapshot.response_envelope_digest)
+            if (version.version_id != update.observed or context.binding != row.binding
+                    or context.attempt_id != row.attempt_id or context.generation != row.generation
+                    or context.parent_version_id != row.heads.observed
+                    or not self._io(self.ledger.verify_committed, ref)):
+                raise CoordinationError('Observation is stale, uncommitted or regresses the serialized head')
+        heads = c.Heads(update.observed or row.heads.observed,
+                        update.approved or row.heads.approved,
+                        update.deployed or row.heads.deployed)
+        row = self._cas(row, lambda r: r.attempt_id == fence.attempt_id, heads=heads)
+        if observing:
+            self._release(row)  # advance_heads is observation lease finalization.
+        return heads
