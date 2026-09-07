@@ -129,6 +129,7 @@ class CoordinationService:
         except OwnershipError:
             self._fact(row, operation, c.FactStatus.CONFLICTED)
             raise
+        self._history(row, operation)
         return c.Reservation(self._fence(row), operation, executor, row.lease_expires_at)
 
     def _owned(self, fence, *, allow_quarantine=False):
@@ -218,3 +219,46 @@ class CoordinationService:
         return c.AdmissionClaim(row.binding.binding_id, row.binding.binding_revision,
             row.attempt_id, row.generation, row.row_version, reservation.request,
             preimage, row.approval_id, row.approval_digest)
+
+    def _history(self, row, request):
+        history = self._io(self.facts.lookup_request, row.binding, request.idempotency_key)
+        if history.ambiguous:
+            raise CoordinationError('Ambiguous durable request history')
+        if any(f.request.request_digest != request.request_digest for f in history.facts):
+            self._fact(row, request, c.FactStatus.CONFLICTED)
+            raise CoordinationError('Idempotency key already bound to a different request digest')
+        return history
+
+    def _release(self, row):
+        # Never erase heads or the monotonically increasing fence/observer sequence.
+        return self._cas(row, lambda r: r.attempt_id == row.attempt_id,
+            state=c.CoordinationState.IDLE, unresolved=False,
+            holder=None, attempt_id=None, executor_kind=None, executor_ref=None,
+            lease_expires_at=None, active_operation_id=None, idempotency_key=None,
+            request_digest=None, approval_id=None, approval_digest=None,
+            approval_consumption_published=False, pre_version_id=None, preimage_digest=None,
+            create_intent_event_id=None, expected_base_fingerprint=None, admitted_at=None,
+            mutation_stage=None, checkpoint=None, quarantine_reason=None, termination_evidence=None)
+
+    def finish(self, claim: c.AdmissionClaim, result: c.OperationResult) -> None:
+        self.assert_owner(claim)
+        row = self._owned(claim)
+        if (result.operation_id != row.active_operation_id or result.preimage != claim.preimage
+                or result.unresolved or result.status not in {
+                    c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP,
+                    c.OperationStatus.CONFLICTED, c.OperationStatus.FAILED}):
+            raise CoordinationError('Not a resolved terminal result')
+        if result.postimage is not None:
+            if ((result.postimage.binding_id, result.postimage.binding_revision) !=
+                    (row.binding.binding_id, row.binding.binding_revision)
+                    or not self._io(self.ledger.verify_committed, result.postimage)):
+                raise CoordinationError('Terminal observation not committed to this binding')
+        elif result.status in {c.OperationStatus.CONFIRMED, c.OperationStatus.NOOP}:
+            raise CoordinationError('Successful completion requires committed postimage')
+        ref = self._fact(row, claim.request, c.FactStatus(result.status.value),
+                         kind=c.FactKind.RECEIPT,
+                         post_version_id=result.postimage.version_id if result.postimage else None)
+        history = self._history(row, claim.request)
+        if not any(f.event_id == ref.event_id for f in history.facts):
+            raise AuthorityUnavailable('Terminal receipt publication not verified')
+        self._release(row)

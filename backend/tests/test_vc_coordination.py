@@ -199,3 +199,41 @@ def test_admission_atomically_binds_key_digest_approval_and_preimage(h):
     assert row.attempt_id == claim.attempt_id
     with pytest.raises(CoordinationError):
         h.service.assert_owner(replace(claim, request=replace(h.request, request_digest='a' * 64)))
+
+
+def durable_facts(h):
+    def append(fact):
+        h.durable.append(fact.event_key, c.to_wire(fact))
+        return c.FactRef(fact.event_id, fact.event_key, 'd' * 64)
+
+    def lookup(binding, key):
+        rows = [c.from_wire(c.OperationFact, r.payload) for r in h.durable.state.rows]
+        return c.RequestHistory(tuple(f for f in rows if f.binding == binding
+                                      and f.request.idempotency_key == key), False)
+
+    h.facts.append.side_effect = append
+    h.facts.lookup_request.side_effect = lookup
+
+
+def complete(h, claim):
+    result = c.OperationResult(claim.request.operation_id, c.OperationStatus.CONFIRMED,
+                               claim.preimage, h.preimage, False, ('verified',))
+    h.service.finish(claim, result)
+    return result
+
+
+def test_same_key_different_digest_rejected_after_row_reuse(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    complete(h, claim)
+    assert not h.store.read(h.binding.binding_id).unresolved
+    # Reconstruct the service: all remembered authority must be in the stores.
+    h.service = CoordinationService(**{k: getattr(h, k) for k in (
+        'store', 'facts', 'ledger', 'clock', 'resolve_binding', 'verify_enrollment',
+        'insert_enrolled', 'validate_authorization', 'verify_create_intent',
+        'termination', 'authorize_human_recovery', 'authorize_heads')})
+    h.request = replace(h.request, operation_id=uid(), request_digest='a' * 64)
+    with pytest.raises(CoordinationError, match='digest'):
+        reserve(h)
+    assert h.store.read(h.binding.binding_id).state != c.CoordinationState.ADMITTED
