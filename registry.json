@@ -126,9 +126,10 @@
     {
       "id": "M10",
       "desc": "Optimizer champion integration",
-      "status": "RE-RUNNING codex/Astra conv 3773493063976023 (prior resume dispatch ReadTimeout'd -> session idle w/ EMPTY history, never ran; re-sent input). Task 1 committed 0ea5541; continuing 2-13. worktree worktrees/m10 @ 6c5ae3a. REAL revert.py = packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py.",
+      "status": "RE-RUNNING codex/Astra conv 3773493063976023 (prior resume dispatch ReadTimeout'd -> session idle w/ EMPTY history, never ran; re-sent input). Task 1 committed 0ea5541; continuing 2-13. worktree worktrees/m10 @ 6c5ae3a. REAL revert.py = packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py. IN CROSS-REVIEW claude_code conv 3773493063976241 (re-dispatched after runner-offline).",
       "conversation_id": "3773493063976023",
-      "worktree": "worktrees/m10"
+      "worktree": "worktrees/m10",
+      "review_conversation_id": "3773493063976241"
     },
     {
       "id": "XMOD-ACTOR-RETRY",
