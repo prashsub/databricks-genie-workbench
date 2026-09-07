@@ -42,6 +42,15 @@ class PromotionService:
         executor = self._executor(executor)
         operation = self.facts.get_request(operation_id)
         request = operation.request
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
+            raise ValueError('Ambiguous or reused promotion idempotency key')
+        attempted = any(fact.fact_kind == vc.FactKind.OPERATION and fact.status != vc.FactStatus.REQUESTED
+                        for fact in history.facts)
+        if attempted:
+            if request.binding.workspace_id != self.workspace_id:
+                raise PermissionError('Retry must remain target-local')
+            return self.gate.verify_only(operation_id, executor)
         release, manifest, mapping, policy, artifact, rendered = self._inputs(operation_id)
         if operation.approval is None:
             raise PermissionError('Target approval required')
