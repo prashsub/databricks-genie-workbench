@@ -152,3 +152,29 @@ def test_vote_identity_is_server_derived_not_request_body():
         context.service.vote(approval.approval_id, 'reject', context.identity.actors['human-1'])
     with pytest.raises(PermissionError, match='requester'):
         context.service.request(replace(context.bound, requester_id='spoof'), context.identity.actors['requester'])
+
+
+@pytest.mark.parametrize('invalid', ['missing', 'duplicate', 'requester', 'service', 'unauthorized', 'deployer', 'reject'])
+def test_production_requires_two_distinct_nonrequester_humans(invalid):
+    context = setup_approval()
+    approval = submit(context)
+    first = context.identity.actors['human-1']
+    context.service.vote(approval.approval_id, 'approve', first)
+    if invalid in ('requester', 'service', 'unauthorized'):
+        actor = context.identity.actors['requester'] if invalid == 'requester' else ActorContext('bot', '123', 'service') if invalid == 'service' else ActorContext('outsider', '123', 'human')
+        with pytest.raises(PermissionError):
+            context.service.vote(approval.approval_id, 'approve', actor)
+    if invalid == 'duplicate':
+        context.service.vote(approval.approval_id, 'approve', first)
+    if invalid in ('reject', 'deployer'):
+        context.service.vote(approval.approval_id, 'reject' if invalid == 'reject' else 'approve', context.identity.actors['human-2'])
+    executor = replace(context.executor, principal_id='human-2') if invalid == 'deployer' else context.executor
+    with pytest.raises(PermissionError):
+        context.service.authorize(context.request, executor)
+    if invalid not in ('reject', 'deployer'):
+        context.service.vote(approval.approval_id, 'approve', context.identity.actors['human-2'])
+        grant = context.service.authorize(context.request, context.executor)
+        assert grant.approval_id == approval.approval_id
+        assert grant.binding == context.bound.target_binding
+        assert grant.request == context.request.identity
+        assert grant.expected_base_fingerprints == context.bound.expected_base_fingerprints

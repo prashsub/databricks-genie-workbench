@@ -4,7 +4,7 @@ from dataclasses import replace
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
-    ApprovalRecord, ApprovalRequest, ApprovalVote, FactKind, FactStatus,
+    ApprovalRecord, ApprovalRequest, ApprovalVote, AuthorizationGrant, FactKind, FactStatus,
     IdentityProvider, OperationFact, OperationFacts, Registry, canonical_json_hash, to_wire,
 )
 from .facts import fact_key
@@ -77,6 +77,11 @@ class ApprovalService:
     def vote(self, approval_id, decision, actor):
         self._enabled()
         record = self.get(approval_id)
+        inputs = record.request.inputs
+        if actor.actor_kind != 'human' or actor.subject_id == inputs.requester_id:
+            raise PermissionError('Only non-requester humans may approve')
+        if 'approvers' not in self.identity.groups(actor.subject_id, actor.workspace_id):
+            raise PermissionError('Approver policy membership required')
         if decision not in ('approve', 'reject'):
             raise ValueError('Unknown vote decision')
         if actor.workspace_id != record.request.inputs.target_binding.workspace_id:
@@ -90,3 +95,18 @@ class ApprovalService:
         updated = replace(record, votes=votes, approval_digest=approval_digest(record.request.inputs, votes))
         self._record(updated, actor, FactKind.APPROVAL_VOTE)
         return updated
+
+    def authorize(self, request, executor):
+        self._enabled()
+        record = self.get(request.approval_id)
+        inputs = record.request.inputs
+        approvers = {vote.approver_id for vote in record.votes if vote.decision == 'approve'}
+        if (len(approvers) < 2 or any(vote.decision != 'approve' for vote in record.votes)
+                or inputs.requester_id in approvers or executor.principal_id in approvers):
+            raise PermissionError('Two distinct non-requester non-deployer humans required')
+        if any('approvers' not in self.identity.groups(subject, inputs.target_binding.workspace_id)
+               for subject in approvers):
+            raise PermissionError('Approver policy membership revoked')
+        return AuthorizationGrant(inputs.target_binding, request.identity, record.request.approval_id,
+                                  inputs.expected_base_fingerprints, inputs.rendered_target_digest,
+                                  inputs.expires_at, record.request.approval_id, record.approval_digest)
