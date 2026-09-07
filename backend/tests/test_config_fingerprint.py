@@ -77,6 +77,21 @@ def test_observe_preserves_exact_restorable_state_and_envelope() -> None:
     assert to_wire(snapshot.response_envelope) == original
 
 
+def test_vc_config_fingerprint_ignores_all_internal_underscore_keys() -> None:
+    from backend.services.config_fingerprint import Canonicalizer
+
+    adapter = Canonicalizer()
+    clean = adapter.observe({"_parsed_space": _space()})
+    polluted = adapter.observe(
+        {"_parsed_space": {**_space(), "_preflight_notes": {"runs": 3}}}
+    )
+    assert polluted.fingerprints.config == clean.fingerprints.config
+    assert polluted.fingerprints.metadata == clean.fingerprints.metadata
+    assert polluted.fingerprints.benchmark == clean.fingerprints.benchmark
+    # t2: the exact restorable state must retain internal bookkeeping keys.
+    assert "_preflight_notes" in to_wire(polluted.serialized_space)
+
+
 def test_normalized_metric_views_quotes_fragments_and_wrappers_match() -> None:
     from backend.services.config_fingerprint import Canonicalizer
 

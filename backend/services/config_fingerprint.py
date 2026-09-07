@@ -197,8 +197,7 @@ def _canonical_benchmark(serialized: dict) -> dict:
 
 
 def _canonical_config(serialized: dict) -> dict:
-    config = deepcopy(_with_default_version(serialized))
-    config.pop("_data_profile", None)
+    config = _strip_internal_keys(deepcopy(_with_default_version(serialized)))
     sources = config.get("data_sources")
     if isinstance(sources, dict) and isinstance(sources.get("tables"), list):
         tables = []
