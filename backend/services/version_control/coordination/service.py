@@ -385,10 +385,21 @@ class CoordinationService:
         self._release(row)
 
     def _expire(self, row):
-        if (row.state not in {c.CoordinationState.IDLE, c.CoordinationState.QUARANTINED}
-                and (row.lease_expires_at is None or row.lease_expires_at <= self.clock.now())):
-            return self._quarantine_row(row, 'Lease expired; termination is unproven')
-        return row
+        if row.state in {c.CoordinationState.IDLE, c.CoordinationState.QUARANTINED}:
+            return row
+        if row.lease_expires_at is not None and row.lease_expires_at > self.clock.now():
+            return row
+        if row.state == c.CoordinationState.OBSERVING:
+            return self._reclaim_observer(row)
+        return self._quarantine_row(row, 'Lease expired; termination is unproven')
+
+    def _reclaim_observer(self, row):
+        # An observation lease never carried write authority; reclaim to IDLE.
+        # Fail closed if the row somehow carries mutation authority.
+        if (row.active_operation_id is not None or row.admitted_at is not None
+                or row.approval_id is not None or not self._presend(row)):
+            raise AuthorityUnavailable('Observation row carries mutation authority; refusing reclaim')
+        return self._release(row, generation=row.generation + 1)
 
     def _quarantine_row(self, row, reason):
         if not reason.strip():

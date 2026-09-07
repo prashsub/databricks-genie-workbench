@@ -30,6 +30,80 @@ def test_expired_lease_quarantines_without_takeover(h, entry):
         reserve(h)
 
 
+@pytest.mark.parametrize('entry', ['reserve', 'observe_exclusively', 'advance_heads'])
+def test_expired_observation_lease_is_reclaimed_and_never_quarantines_binding(h, entry):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+    enroll(h)
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    h.clock.advance(timedelta(seconds=61))
+    if entry == 'reserve':
+        h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
+        # reserve succeeded on the reclaimed binding; re-read after.
+    elif entry == 'observe_exclusively':
+        h.service.observe_exclusively(h.binding, h.executor)
+    else:  # advance_heads on the stale fence triggers _owned -> _expire
+        with pytest.raises(CoordinationError):
+            h.service.advance_heads(lease.fence, c.HeadUpdate(uid(), None, None, None))
+    row = h.store.read(h.binding.binding_id)
+    # The reclaim never quarantines; the entry point may have re-acquired the row.
+    assert row.quarantine_reason is None
+    assert row.state != c.CoordinationState.QUARANTINED
+    # 6. no QUARANTINED fact appended.
+    assert not any(call.args[0].status == c.FactStatus.QUARANTINED
+                   for call in h.facts.append.call_args_list)
+    # 5. the stale lease is dead.
+    with pytest.raises(CoordinationError):
+        h.service.assert_owner(lease.fence)
+
+
+def test_expired_observation_lease_full_reclaim_semantics(h):
+    enroll(h)
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    h.clock.advance(timedelta(seconds=61))
+    # Trigger reclaim via reserve, then inspect.
+    fresh = h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
+    row = h.store.read(h.binding.binding_id)
+    # observed_sequence preserved through the reclaim (was 1 from the lease).
+    assert row.observed_sequence == 1
+    assert row.heads == c.Heads(None, None, None)
+    # write admission survived; a reservation was granted.
+    assert isinstance(fresh, c.Reservation)
+    # a fresh observation lease bumps the sequence beyond the old one.
+    h.service.quarantine(fresh.fence, 'test teardown')
+    h.store.state.rows[:] = [replace(h.store.state.rows[0],
+        state=c.CoordinationState.IDLE, unresolved=False, holder=None, attempt_id=None,
+        active_operation_id=None, idempotency_key=None, request_digest=None,
+        lease_expires_at=None, mutation_stage=None, checkpoint=None)]
+    newer = h.service.observe_exclusively(h.binding, h.executor)
+    assert newer.observed_sequence > lease.observed_sequence
+
+
+def test_reclaim_refuses_observing_row_that_carries_mutation_authority(h):
+    enroll(h)
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    row = h.store.read(h.binding.binding_id)
+    # Corrupt the row: OBSERVING but carrying an approval (mutation authority).
+    h.store.state.rows[:] = [replace(row, approval_id=uid())]
+    h.clock.advance(timedelta(seconds=61))
+    with pytest.raises(CoordinationError):
+        h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
+    after = h.store.read(h.binding.binding_id)
+    assert after.state == c.CoordinationState.OBSERVING and after.approval_id is not None
+
+
+def test_expired_admitted_lease_still_quarantines(h):
+    durable_facts(h)
+    enroll(h)
+    claim = admit(h)
+    h.clock.advance(timedelta(seconds=61))
+    with pytest.raises(CoordinationError):
+        reserve(h)
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.QUARANTINED
+    assert any(call.args[0].status == c.FactStatus.QUARANTINED
+               for call in h.facts.append.call_args_list)
+
+
 def recovery_evidence(h, claim):
     terminal = h.clock.now()
     termination = c.TerminationEvidence(claim.attempt_id, h.executor.execution_ref,
