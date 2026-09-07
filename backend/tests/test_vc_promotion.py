@@ -101,6 +101,32 @@ def test_preflight_checks_executor_and_consumer_dependencies_and_permissions(pro
     rig.gate.execute.assert_not_called()
 
 
+@pytest.mark.parametrize('case', ['missing', 'revision', 'drift', 'busy', 'stale', 'quarantined', 'unknown'])
+def test_target_drift_or_missing_pre_enrollment_blocks_without_create(promotion_rig, case):
+    rig = promotion_rig
+    approve(rig)
+    observation = rig.observer.capture.return_value
+    if case == 'missing':
+        rig.registry.resolve.return_value = None
+    elif case == 'revision':
+        rig.registry.resolve.return_value = replace(rig.target, binding_revision=2)
+    elif case == 'drift':
+        observation.captured_version.fingerprints = rig.version.snapshot.fingerprints
+    elif case == 'busy':
+        observation.busy = True
+    elif case == 'stale':
+        observation.status.stale = True
+    elif case == 'quarantined':
+        observation.status.quarantined = True
+    else:
+        observation.status.drift = vc.DriftState.UNKNOWN
+    with pytest.raises(ValueError):
+        rig.service.preflight(rig.request.identity.operation_id, rig.executor)
+    rig.registry.enroll.assert_not_called()
+    rig.gate.create.assert_not_called()
+    rig.gate.execute.assert_not_called()
+
+
 @pytest.mark.parametrize('changed', [None, 'artifact', 'mapping', 'validation', 'manifest', 'render', 'policy', 'source'])
 def test_executor_recomputes_artifact_mapping_render_and_policy_digests(promotion_rig, changed):
     rig = promotion_rig

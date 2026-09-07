@@ -72,6 +72,8 @@ class PromotionService:
         if (request.binding.workspace_id != self.workspace_id or release.target_binding != request.binding
                 or canonical_host(release.target_host) != self.target_host):
             raise PermissionError('Wrong target release intent')
+        if self.registry.resolve(request.binding.binding_id) != request.binding or not request.binding.space_id:
+            raise ValueError('Target must already be enrolled at the reviewed binding revision')
         environment = rendered.environment
         if not all(environment.get(key) for key in ('warehouse_id', 'parent_path', 'consumers')):
             raise PermissionError('Explicit target warehouse, folder and consumers required')
@@ -91,7 +93,14 @@ class PromotionService:
             raise ValueError('Preflight tests failed')
         snapshot = self.canonicalizer.observe({'serialized_space': rendered.serialized_space,
                                                'description': rendered.description})
-        base = self.observer.capture(request.binding, 'promotion_preflight', executor).captured_version.fingerprints
+        observation = self.observer.capture(request.binding, 'promotion_preflight', executor)
+        if (observation.busy or observation.status.stale or observation.status.quarantined
+                or observation.status.drift in {vc.DriftState.UNKNOWN, vc.DriftState.UNREACHABLE,
+                                               vc.DriftState.APPLIED_UNVERIFIED, vc.DriftState.CONFLICTED}
+                or observation.captured_version is None
+                or observation.captured_version.fingerprints.state_digest != request.expected_base):
+            raise ValueError('Target drift or unresolved observation blocks promotion')
+        base = observation.captured_version.fingerprints
         evidence = dict(schema_version='VC/1.0', operation_id=operation_id, target_binding=request.binding,
             expected_base_fingerprints=base, rendered_fingerprints=snapshot.fingerprints,
             permission_policy_digest=digest(checks), validation_evidence_digest=digest(results['validation']),
