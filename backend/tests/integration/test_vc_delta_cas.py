@@ -323,8 +323,18 @@ def delta(request):
             ports = DeltaArtifacts(connection, artifacts_table, binding)
             contenders.append(SimpleNamespace(store=store, artifacts=ports, request=operation,
                 grant=grant, executor=executor, service=service(store, ports, binding, grant)))
+        def expire_lease(claim):
+            # Owner-only fault injection, NOT runtime takeover or a local clock fake.
+            execute(owner, f'''UPDATE {table}
+                SET lease_expires_at = :expired, row_version = row_version + 1
+                WHERE binding_id = :binding AND attempt_id = :attempt''',
+                {'expired': (Clock().now() - timedelta(minutes=1)).replace(tzinfo=None),
+                 'binding': binding.binding_id, 'attempt': claim.attempt_id})
+            assert observer.read(binding.binding_id).lease_expires_at < Clock().now()
+
         yield SimpleNamespace(binding=binding, initial=initial, seed=seed, observer=observer,
-                              artifacts=artifacts, preimage=preimage, contenders=contenders)
+                              artifacts=artifacts, preimage=preimage, contenders=contenders,
+                              expire_lease=expire_lease)
 
 
 def reserve(contender, binding):
@@ -400,3 +410,77 @@ def assert_one_admitted_trace(delta, results):
 
 def test_real_delta_same_row_cas_one_winner(delta):
     assert_one_admitted_trace(delta, race(delta))
+
+
+@pytest.mark.parametrize('delta', [True], indirect=True, ids=['same-sp'])
+def test_real_delta_same_sp_different_attempt_is_fenced(delta):
+    winner, loser, claim = assert_one_admitted_trace(delta, race(delta))
+    assert winner.executor.principal_id == loser.executor.principal_id
+    assert winner.executor.execution_ref != loser.executor.execution_ref
+    losing_attempt = loser.store.proposals[0][1].attempt_id
+    stale = replace(claim, attempt_id=losing_attempt)
+    before = delta.observer.read(delta.binding.binding_id)
+    with pytest.raises(OwnershipError):
+        loser.service.renew(stale)
+    with pytest.raises(OwnershipError):
+        loser.service.assert_owner(stale)
+    with pytest.raises(OwnershipError):
+        loser.service.checkpoint(stale, c.PatchStage.CONFIG_IN_FLIGHT,
+            c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, Clock().now(), '8' * 64, None))
+    assert delta.observer.read(delta.binding.binding_id) == before
+    assert len(delta.artifacts.get('mutation_trace')) == 1
+
+
+@pytest.mark.parametrize('delta', [True], indirect=True, ids=['same-sp'])
+def test_real_delta_expired_lease_quarantines_without_takeover(delta):
+    original = delta.contenders[0]
+    reservation = original.service.reserve(delta.binding, original.request, original.executor)
+    claim = original.service.admit(reservation, delta.preimage, original.grant)
+    delta.expire_lease(claim)
+    expired = delta.observer.read(delta.binding.binding_id)
+    with pytest.raises(OwnershipError):
+        original.service.assert_owner(claim)  # real UPDATE to quarantine, not a renewal
+    quarantined = delta.observer.read(delta.binding.binding_id)
+    assert quarantined.state == c.CoordinationState.QUARANTINED and quarantined.unresolved
+    assert quarantined.quarantine_reason
+    assert quarantined.row_version == expired.row_version + 1
+    assert (quarantined.attempt_id, quarantined.generation, quarantined.active_operation_id,
+            quarantined.pre_version_id, quarantined.lease_expires_at) == (
+        claim.attempt_id, claim.generation, claim.request.operation_id,
+        delta.preimage.version_id, expired.lease_expires_at)
+    history = delta.artifacts.lookup_request(delta.binding, claim.request.idempotency_key)
+    assert len(history.facts) == 1 and history.facts[0].status == c.FactStatus.QUARANTINED
+    assert history.facts[0].attempt_id == claim.attempt_id
+    # Independent same-SP workers issue NEW requests, not duplicate receipts.
+    for contender in delta.contenders:
+        contender.request = c.RequestIdentity(uid(), uid(), '9' * 64)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda contender: reserve(contender, delta.binding), delta.contenders))
+    assert all(isinstance(result, OwnershipError) for result in results)
+    for contender in delta.contenders:
+        assert_conflict(delta, contender)
+        with pytest.raises(OwnershipError):
+            contender.service.renew(claim)
+        with pytest.raises(OwnershipError):
+            contender.service.assert_owner(claim)
+    assert delta.observer.read(delta.binding.binding_id) == quarantined
+    assert len(delta.observer.rows()) == 1
+    assert delta.artifacts.verify_flush(claim)  # durable old claim survives expiry
+    assert len(delta.artifacts.get('consumption')) == 1
+    assert delta.artifacts.get('mutation_trace') == []
+
+
+def test_real_delta_seeded_duplicate_rows_block_both_clients(delta):
+    delta.seed(delta.initial)  # provisioning owner deliberately violates logical uniqueness
+    before = delta.observer.rows()
+    assert len(before) == 2
+    with pytest.raises(OwnershipError, match='Duplicate'):
+        delta.observer.read(delta.binding.binding_id)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda contender: reserve(contender, delta.binding), delta.contenders))
+    assert all(isinstance(result, OwnershipError) for result in results)
+    assert all('Duplicate' in str(result) for result in results)
+    assert delta.observer.rows() == before  # no UPDATE or INSERT to "repair" authority
+    assert all(not contender.store.proposals for contender in delta.contenders)
+    assert delta.artifacts.get('consumption') == []
+    assert delta.artifacts.get('mutation_trace') == []
