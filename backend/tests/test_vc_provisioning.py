@@ -1,5 +1,8 @@
 from pathlib import Path
+import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -12,6 +15,78 @@ from backend.tests.integration.conftest import live_platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("scenario", ["clear", "dual_authority", "unknown", "missing_yaml"])
+def test_bundle_guard_runs_on_destroy_and_separates_tooling_failure_from_dual_authority(tmp_path, scenario):
+    bundle = tmp_path / "databricks.yml"
+    contents = {
+        "clear": "resources: {jobs: {}}\n",
+        "dual_authority": "resources: {genie_spaces: {managed: {}}}\n",
+        "unknown": "include: [missing.yml]\n",
+        "missing_yaml": "resources: {jobs: {}}\n",
+    }
+    bundle.write_text(contents[scenario])
+    environment = dict(os.environ, PYTHONPATH=str(ROOT))
+    if scenario == "missing_yaml":
+        (tmp_path / "yaml.py").write_text("raise ImportError('simulated missing PyYAML')\n")
+        environment["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(ROOT)))
+    expected = {"clear": 0, "dual_authority": 1, "unknown": 2, "missing_yaml": 2}[scenario]
+    command = [sys.executable, str(ROOT / "scripts/version_control/bundle_guard.py"), str(bundle)]
+    result = subprocess.run(command, env=environment, capture_output=True, text=True)
+    assert result.returncode == expected, result.stdout + result.stderr
+    if scenario != "missing_yaml":
+        assert scenario in result.stdout
+    else:
+        assert "tooling" in result.stderr.lower()
+        assert "dual_authority" not in result.stdout
+
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    (scripts / "version_control").mkdir(parents=True)
+    for relative in ("deploy.sh", "deploy-config.sh", "preflight.sh", "version_control/bundle_guard.py"):
+        shutil.copyfile(ROOT / "scripts" / relative, scripts / relative)
+    shutil.copyfile(bundle, project / "databricks.yml")
+    optimizer = project / "packages/genie-space-optimizer"
+    optimizer.mkdir(parents=True)
+    (optimizer / "databricks.yml").write_text("resources: {jobs: {}}\n")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    platform_calls = tmp_path / "platform-calls"
+    (binaries / "databricks").write_text(f"#!/bin/sh\necho called >> {shlex.quote(str(platform_calls))}\nexit 99\n")
+    (binaries / "databricks").chmod(0o755)
+    (binaries / "python3").write_text("#!/bin/sh\necho 'bare python3 invoked' >&2\nexit 99\n")
+    (binaries / "python3").chmod(0o755)
+    interpreter = project / ".venv/bin/python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    interpreter.chmod(0o755)
+    environment.update(PATH=f"{binaries}:/usr/bin:/bin", GENIE_WAREHOUSE_ID="offline",
+                       GENIE_CATALOG="offline", GENIE_DEPLOY_PROFILE="explicit-test-profile")
+    shell = ["bash", "-c", 'set -euo pipefail; PROJECT_DIR="$1"; source "$1/scripts/preflight.sh"; _preflight_check_vc_bundle_content', "guard", str(project)]
+    result = subprocess.run(shell, env=environment, capture_output=True, text=True)
+    assert result.returncode == expected, result.stdout + result.stderr
+    if expected:
+        assert ("dual_authority" if expected == 1 else "tooling") in result.stderr.lower()
+        for flags in ([], ["--update"], ["--destroy", "--auto-approve"]):
+            result = subprocess.run(["bash", str(scripts / "deploy.sh"), *flags],
+                                    env=environment, capture_output=True, text=True)
+            assert result.returncode == expected, result.stdout + result.stderr
+            assert not platform_calls.exists(), "Guard refusal must precede every platform call"
+    deploy = (scripts / "deploy.sh").read_text()
+    destroy = deploy.split('if [ "$DESTROY_MODE" = "true" ]; then', 1)[1]
+    assert destroy.index("_preflight_check_vc_bundle_content") < destroy.index("databricks bundle destroy")
+
+    interpreter.unlink()
+    fallback = binaries / "uv"
+    fallback.write_text(f'#!/bin/sh\n[ "$1" = run ] && [ "$2" = --project ] && [ "$3" = {shlex.quote(str(project))} ] && [ "$4" = python ] || exit 99\nshift 4\nexec {shlex.quote(sys.executable)} "$@"\n')
+    fallback.chmod(0o755)
+    result = subprocess.run(shell, env=environment, capture_output=True, text=True)
+    assert result.returncode == expected, result.stdout + result.stderr
+    fallback.unlink()
+    result = subprocess.run(shell, env=environment, capture_output=True, text=True)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "tooling" in result.stderr.lower()
 
 
 def test_platform_package_import_requires_only_declared_root_dependencies():

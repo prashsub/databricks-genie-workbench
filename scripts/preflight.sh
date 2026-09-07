@@ -27,11 +27,29 @@ _header() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}\n"; }
 
 _preflight_check_vc_bundle_content() {
     local root="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-    python3 "$root/scripts/version_control/bundle_guard.py" \
-        "$root/databricks.yml" "$root/packages/genie-space-optimizer/databricks.yml" || {
-        _error "VC bundle content guard failed; refusing deployment."
-        exit 1
-    }
+    local status=0
+    local -a guard_python
+    if [ -x "$root/.venv/bin/python" ]; then
+        guard_python=("$root/.venv/bin/python")
+    elif command -v uv &>/dev/null; then
+        guard_python=(uv run --project "$root" python)
+    else
+        _error "VC bundle guard tooling failure: project Python and uv unavailable; refusing deployment or destroy."
+        exit 2
+    fi
+    "${guard_python[@]}" "$root/scripts/version_control/bundle_guard.py" \
+        "$root/databricks.yml" "$root/packages/genie-space-optimizer/databricks.yml" || status=$?
+    case "$status" in
+        0) return 0 ;;
+        1)
+            _error "VC dual_authority finding; refusing deployment or destroy."
+            exit 1
+            ;;
+        *)
+            _error "VC bundle guard tooling/unresolvable-input failure; refusing deployment or destroy."
+            exit 2
+            ;;
+    esac
 }
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────

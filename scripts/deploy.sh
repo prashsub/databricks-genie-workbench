@@ -124,6 +124,7 @@ for j in (jobs if isinstance(jobs, list) else jobs.get('jobs', [])):
     # ── Step 2: Destroy bundle-managed optimization job ───────────────
     echo ""
     echo "▸ Step 2/3: Destroying bundle-managed optimization job..."
+    _preflight_check_vc_bundle_content
     if (cd "$PROJECT_DIR" && databricks bundle destroy -t app \
         --var="catalog=${CATALOG}" \
         --var="warehouse_id=${WAREHOUSE_ID:-placeholder}" \
