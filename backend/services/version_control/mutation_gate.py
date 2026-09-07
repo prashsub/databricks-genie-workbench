@@ -79,6 +79,40 @@ class MutationGate:
         except Exception:
             return self._unverified(request, executor, claim, "Final publication unavailable")
 
+    def create(self, request, executor):
+        if request.binding.space_id is not None or self.registry.resolve(request.binding.binding_id) != request.binding:
+            raise PermissionError("A durable provisional logical binding is required")
+        if self.facts.get_request(request.identity.operation_id).request != request:
+            raise PermissionError("Create request must be durable and immutable")
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
+            raise PermissionError("Create identity is ambiguous or reused")
+        if history.facts:
+            return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_UNVERIFIED,
+                                      None, None, True, ("Audited orphan resolution required; never replay create",))
+        intent = vc.CreateIntentRef(str(uuid4()), request.identity.operation_id,
+            request.binding.binding_id, request.binding.binding_revision, request.identity.request_digest)
+        actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
+        self.facts.append(vc.OperationFact(intent.event_id, vc.FactKind.CREATE_INTENT,
+            request.identity.operation_id, 0, f"{request.identity.operation_id}:create-intent",
+            request.binding, request.identity, "create", executor.principal_id, actor,
+            vc.FactStatus.REQUESTED, intent, datetime.now(timezone.utc)))
+        committed = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        if committed.ambiguous or not any(fact.evidence == intent for fact in committed.facts):
+            raise RuntimeError("Create intent was not durably committed")
+        reservation = self.coordination.reserve(request.binding, request.identity, executor)
+        empty = self.canonicalizer.observe({"serialized_space": {}})
+        mutation = vc.MutationRequest(request.identity, request.binding, "create", intent.event_id,
+            empty.state_digest, request.payload.serialized_space, request.payload.description, request.approval_id)
+        grant = self.approvals.authorize(mutation, executor)
+        claim = self.coordination.admit(reservation, intent, grant)
+        self._checkpoint(claim, vc.PatchStage.CONFIG_IN_FLIGHT, None)
+        self.coordination.assert_owner(claim)
+        try:
+            self.transport.create_once(request.payload, claim)
+        except Exception:
+            return self._unverified(mutation, executor, claim, "Possible create orphan; audited identity resolution required")
+
     def _partial(self, request, claim, observation, reason):
         self.coordination.quarantine(claim, reason)
         return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_PARTIAL,
@@ -120,7 +154,7 @@ class MutationGate:
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
             vc.FactStatus(status.value), evidence, datetime.now(timezone.utc),
             attempt_id=claim.attempt_id, generation=claim.generation,
-            pre_version_id=claim.preimage.version_id,
+            pre_version_id=claim.preimage.version_id if isinstance(claim.preimage, vc.ObservationRef) else None,
             post_version_id=postimage.version_id if postimage else None))
 
     def _capture(self, request, executor, fence, snapshot, reason, parent=None):
