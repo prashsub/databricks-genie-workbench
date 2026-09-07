@@ -373,6 +373,20 @@ def test_unverified_cross_metastore_artifact_transport_disables_topology():
     assert verify(proof) is False
 
 
+def _has_module_integration_mark(module):
+    for statement in module.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "pytestmark"
+                   for target in statement.targets):
+            continue
+        marks = (statement.value.elts if isinstance(statement.value, (ast.List, ast.Tuple))
+                 else [statement.value])
+        if any(ast.unparse(mark) == "pytest.mark.integration" for mark in marks):
+            return True
+    return False
+
+
 def test_integration_gate_command_collects_every_integration_test():
     # The sanctioned release-gate command from testing-strategy.md must actually
     # traverse the honest deployment blockers. If the integration tests live in
@@ -391,14 +405,18 @@ def test_integration_gate_command_collects_every_integration_test():
     collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
     declared_count = 0
     for path in (ROOT / "backend" / "tests" / "integration").glob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+        module = ast.parse(path.read_text(), filename=str(path))
+        module_integration_mark = _has_module_integration_mark(module)
+        for node in ast.walk(module):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not node.name.startswith("test_"):
                 continue
             decorators = {
                 ast.unparse(decorator.func if isinstance(decorator, ast.Call) else decorator): decorator
                 for decorator in node.decorator_list
             }
-            if "pytest.mark.integration" not in decorators:
+            if not module_integration_mark and "pytest.mark.integration" not in decorators:
                 continue
             case_count = 1
             for decorator in node.decorator_list:
@@ -423,7 +441,10 @@ def test_integration_gate_command_collects_every_integration_test():
     marker_decorator = re.compile(r"^\s*@pytest\.mark\.integration\b", re.MULTILINE)
     tests_dir = ROOT / "backend" / "tests"
     for path in tests_dir.glob("*.py"):
-        assert not marker_decorator.search(path.read_text()), (
+        source = path.read_text()
+        assert not marker_decorator.search(source), (
+            f"{path} carries an integration test outside backend/tests/integration/")
+        assert not _has_module_integration_mark(ast.parse(source, filename=str(path))), (
             f"{path} carries an integration test outside backend/tests/integration/")
 
     assert (tests_dir / "integration" / "__init__.py").exists(), (
@@ -458,3 +479,63 @@ def test_integration_gate_rejects_partial_collection(monkeypatch):
     declared, collected = map(int, re.search(r"Expected all (\d+).*saw (\d+)", str(error.value)).groups())
     assert collected == declared - 1
     assert collected >= 5
+
+
+@pytest.fixture
+def integration_gate_layout(tmp_path, monkeypatch):
+    tests_dir = tmp_path / "backend" / "tests"
+    integration_dir = tests_dir / "integration"
+    integration_dir.mkdir(parents=True)
+    (integration_dir / "__init__.py").touch()
+    (integration_dir / "conftest.py").write_text(
+        "import pytest\ndef live_platform():\n    pytest.fail('unconfigured')\n")
+    (integration_dir / "test_sample.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.integration\n"
+        "@pytest.mark.parametrize('value', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])\n"
+        "def test_sample(value): pass\n")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    return tests_dir
+
+
+@pytest.mark.parametrize("mark", [
+    "pytest.mark.integration",
+    "[pytest.mark.integration, pytest.mark.other]",
+    "(pytest.mark.other, pytest.mark.integration)",
+])
+@pytest.mark.parametrize("redundant_decorator", ["", "@pytest.mark.integration\n"])
+def test_integration_gate_counts_module_marks(integration_gate_layout, mark, redundant_decorator):
+    (integration_gate_layout / "integration" / "test_sample.py").write_text(
+        f"import pytest\npytestmark = {mark}\n"
+        "if isinstance(pytestmark, tuple): pytestmark = list(pytestmark)\n"
+        f"{redundant_decorator}"
+        "@pytest.mark.parametrize('first', [0, 1])\n"
+        "@pytest.mark.parametrize(argnames='second', argvalues=(0, 1, 2))\n"
+        "def test_sync(first, second): pass\n"
+        "@pytest.mark.parametrize('value', (0, 1, 2, 3))\n"
+        "async def test_async(value): pass\n"
+        "def helper(): pass\n")
+    test_integration_gate_command_collects_every_integration_test()
+
+
+@pytest.mark.parametrize("source", [
+    "pytestmark = pytest.mark.integration\n",
+    "pytestmark = [pytest.mark.other, pytest.mark.integration]\n",
+    "pytestmark = (pytest.mark.integration, pytest.mark.other)\n",
+    "@pytest.mark.integration\ndef test_outside(): pass\n",
+])
+def test_integration_gate_rejects_marks_outside_layout(integration_gate_layout, source):
+    (integration_gate_layout / "test_outside.py").write_text("import pytest\n" + source)
+    with pytest.raises(AssertionError, match="carries an integration test outside"):
+        test_integration_gate_command_collects_every_integration_test()
+
+
+@pytest.mark.parametrize("source", [
+    "def helper():\n    pytestmark = pytest.mark.integration\n",
+    "class Helper:\n    pytestmark = pytest.mark.integration\n",
+    "pytestmark = [pytest.mark.other]\n",
+    "example = 'pytestmark = pytest.mark.integration'\n",
+])
+def test_integration_gate_ignores_non_module_marks(integration_gate_layout, source):
+    (integration_gate_layout / "test_outside.py").write_text("import pytest\n" + source)
+    test_integration_gate_command_collects_every_integration_test()
