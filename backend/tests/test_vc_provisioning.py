@@ -154,3 +154,35 @@ def test_missing_fine_grained_dml_or_serializable_disables_writes():
     probe.side_effect = TimeoutError("warehouse unavailable")
     assert check(probe) is False
     assert check(None) is False
+
+
+def test_bundle_inventory_guard_rejects_governed_content_and_exports_detection_evidence(tmp_path):
+    scan = getattr(platform, "bundle_detection_evidence", None)
+    assert callable(scan), "M05 needs read-only dual-authority detection evidence"
+    root = tmp_path / "databricks.yml"
+    child = tmp_path / "child.yml"
+    root.write_text("include: [child.yml]\n")
+    child.write_text("resources: {genie_spaces: {managed: {}}}\n")
+    evidence = scan(root)
+    assert evidence.status == "dual_authority"
+    assert evidence.schema_version == "VC/1.0"
+    assert str(child) in evidence.file_digests
+    assert evidence.findings == ("resources.genie_spaces",)
+    assert not hasattr(evidence, "actor_id")
+    original = child.read_bytes()
+    import subprocess
+    import sys
+    command = [sys.executable, str(ROOT / "scripts/version_control/bundle_guard.py"), str(root)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "dual_authority" in result.stdout
+    assert child.read_bytes() == original
+    child.write_text("resources: {jobs: {worker: {name: worker}}}\n")
+    assert scan(root).status == "clear"
+    assert subprocess.run(command, capture_output=True).returncode == 0
+    child.unlink()
+    assert scan(root).status == "unknown"
+    deploy = (ROOT / "scripts/deploy.sh").read_text()
+    assert deploy.index("_preflight_check_vc_bundle_content") < deploy.index("DEPLOYER=$(databricks current-user")
+    installer = (ROOT / "scripts/deploy_lib/install.py").read_text()
+    assert installer.index("preflight_deployment(Path(cfg.repo_root") < installer.index("ensure_app(w, cfg)")

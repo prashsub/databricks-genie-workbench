@@ -20,6 +20,7 @@ from .lakebase import ensure_lakebase
 from .uc import ensure_uc_objects_and_grants
 from .verify import verify_app_deployment
 from .workspace_source import prepare_workspace_source
+from backend.services.version_control.platform import preflight_deployment
 
 
 def _default_status(message: str) -> None:
@@ -41,6 +42,7 @@ def run_install(w, cfg: InstallConfig, status_fn=None) -> dict[str, Any]:
     status = status_fn or _default_status
     cfg = cfg.normalized()
     cfg.validate()
+    preflight_deployment(Path(cfg.repo_root or ""))
 
     status("Resolving current Databricks user...")
     deployer_user = get_deployer_user(w)

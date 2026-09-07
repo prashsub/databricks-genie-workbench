@@ -176,6 +176,7 @@ echo "▸ Step 1/$TOTAL_STEPS: Pre-flight checks..."
 _preflight_check_tools
 _preflight_check_python_dependency_sources
 _preflight_check_venv
+_preflight_check_vc_bundle_content
 _preflight_check_npm_lockfiles
 _preflight_check_npm_registry
 _preflight_check_profile "$PROFILE"
