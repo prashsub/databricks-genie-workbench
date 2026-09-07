@@ -9,6 +9,7 @@ import pytest
 
 from backend.services.version_control import contracts as c
 from backend.services.version_control.coordination import CoordinationService, CoordinationError
+from backend.services.version_control.coordination.service import AuthorityUnavailable, OwnershipError
 from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
 from backend.tests.vc_fakes.stores import (
     CoordinationRow, FakeCoordinationStore, FakeFactStore, ManualClock,
@@ -63,6 +64,108 @@ def reserve(h):
 
 def admit(h):
     return h.service.admit(reserve(h), h.preimage, h.grant)
+
+
+def test_reject_reservation_releases_presend_with_durable_conflict(h):
+    durable_facts(h)
+    enroll(h)
+    row = h.store.read(h.binding.binding_id)
+    h.store.compare_and_swap(h.binding.binding_id, 1, row.row_version, row.generation,
+                             lambda current: current == row,
+                             heads=c.Heads(uid(), uid(), uid()), observed_sequence=7)
+    reservation = reserve(h)
+    before = h.store.read(h.binding.binding_id)
+
+    assert h.service.reject_reservation(reservation, 'Reviewed base changed') is None
+
+    released = h.store.read(h.binding.binding_id)
+    assert released.state == c.CoordinationState.IDLE
+    assert not released.unresolved
+    assert released.heads == before.heads
+    assert released.observed_sequence == before.observed_sequence
+    assert released.generation == before.generation
+    assert released.row_version == before.row_version + 1
+    history = h.facts.lookup_request(h.binding, h.request.idempotency_key)
+    assert len(history.facts) == 1
+    fact = history.facts[0]
+    assert fact.status == c.FactStatus.CONFLICTED
+    assert fact.request == reservation.request
+    assert fact.attempt_id == reservation.fence.attempt_id
+    assert fact.generation == reservation.fence.generation
+    corrected = c.RequestIdentity(uid(), 'corrected-key', 'b' * 64)
+    assert h.service.reserve(h.binding, corrected, h.executor).request == corrected
+
+
+@pytest.mark.parametrize('in_flight', [False, True])
+def test_reject_reservation_refuses_admitted_attempt(h, in_flight):
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    claim = h.service.admit(reservation, h.preimage, h.grant)
+    if in_flight:
+        h.service.checkpoint(claim, c.PatchStage.CONFIG_IN_FLIGHT,
+            c.StageEvidence('VC/1.0', c.PatchStage.CONFIG_IN_FLIGHT, h.clock.now(),
+                            h.request.request_digest, None))
+    before = h.store.read(h.binding.binding_id)
+    facts_before = tuple(h.durable.state.rows)
+
+    with pytest.raises(OwnershipError):
+        h.service.reject_reservation(reservation, 'Cannot bypass quarantine')
+
+    assert h.store.read(h.binding.binding_id) == before
+    assert tuple(h.durable.state.rows) == facts_before
+
+
+@pytest.mark.parametrize('foreign', ['fence', 'request', 'principal', 'executor_ref'])
+def test_reject_reservation_refuses_foreign_reservation(h, foreign):
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    if foreign == 'fence':
+        reservation = replace(reservation, fence=replace(reservation.fence, attempt_id=uid()))
+    elif foreign == 'request':
+        reservation = replace(reservation, request=replace(h.request, request_digest='a' * 64))
+    elif foreign == 'principal':
+        reservation = replace(reservation, executor=replace(h.executor, principal_id='foreign'))
+    else:
+        reservation = replace(reservation, executor=replace(h.executor, execution_ref='foreign/run'))
+    before = h.store.read(h.binding.binding_id)
+
+    with pytest.raises(OwnershipError):
+        h.service.reject_reservation(reservation, 'Foreign reservation')
+
+    assert h.store.read(h.binding.binding_id) == before
+    assert not h.durable.state.rows
+
+
+@pytest.mark.parametrize('failure', ['append', 'unverified', 'ambiguous', 'cas', 'possible_send'])
+def test_reject_reservation_fails_closed_without_proven_release(h, failure):
+    durable_facts(h)
+    enroll(h)
+    reservation = reserve(h)
+    expected_error = AuthorityUnavailable
+    if failure == 'append':
+        h.facts.append.side_effect = RuntimeError('Unavailable')
+    elif failure in {'unverified', 'ambiguous'}:
+        h.facts.lookup_request.side_effect = None
+        h.facts.lookup_request.return_value = c.RequestHistory((), failure == 'ambiguous')
+        if failure == 'ambiguous':
+            expected_error = CoordinationError
+    elif failure == 'cas':
+        h.store.compare_and_swap = Mock(return_value=None)
+        expected_error = OwnershipError
+    else:
+        row = h.store.read(h.binding.binding_id)
+        h.store.compare_and_swap(h.binding.binding_id, 1, row.row_version, row.generation,
+                                 lambda current: current == row,
+                                 checkpoint={'resume_classification': 'read-only-possible-send'})
+    before = h.store.read(h.binding.binding_id)
+
+    with pytest.raises(expected_error):
+        h.service.reject_reservation(reservation, 'Ambiguous durable request history')
+
+    assert h.store.read(h.binding.binding_id) == before
+    assert before.unresolved
 
 
 def test_missing_or_duplicate_ownership_row_blocks_admission(h):

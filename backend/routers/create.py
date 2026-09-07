@@ -142,28 +142,9 @@ async def validate_config(body: ValidateRequest):
 
 @router.post("", response_model=CreateSpaceResponse)
 async def create_space_endpoint(body: CreateSpaceRequest):
-    try:
-        result = create_genie_space(
-            display_name=body.display_name,
-            merged_config=body.serialized_space,
-            parent_path=body.parent_path,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except TimeoutError as e:
-        raise HTTPException(status_code=504, detail=str(e))
-    except Exception as e:
-        logger.exception(f"create_genie_space failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create Genie Agent")
-
-    # genie_creator returns genie_space_id; our response model uses space_id
-    return CreateSpaceResponse(
-        space_id=result["genie_space_id"],
-        display_name=result["display_name"],
-        space_url=result["space_url"],
-    )
+    """Fail closed until OBO create-intent composition is installed."""
+    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
+        "message": "Create requires durable intent and mutation-gate integration"})
 
 
 # ── Agent chat (agentic create flow) ─────────────────────────────────────────

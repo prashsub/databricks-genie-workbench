@@ -38,6 +38,10 @@ class AuthorityUnavailable(CoordinationError):
     pass
 
 
+class _RejectionReleased(CoordinationError):
+    """A definite rejection was durably published and the binding released."""
+
+
 class ExistingReceipt(CoordinationError):
     """Non-admitting result channel; preserves the frozen reserve() return type."""
 
@@ -349,7 +353,7 @@ class CoordinationService:
                    for f in self._history_raw(row, request.idempotency_key).facts):
             raise AuthorityUnavailable('Rejection fact not durably verified; row stays unresolved')
         self._release(row)
-        raise CoordinationError(message)
+        raise _RejectionReleased(message)
 
     def _history(self, row, request):
         history = self._history_raw(row, request.idempotency_key)
@@ -369,6 +373,19 @@ class CoordinationService:
             approval_consumption_published=False, pre_version_id=None, preimage_digest=None,
             create_intent_event_id=None, expected_base_fingerprint=None, admitted_at=None,
             mutation_stage=None, checkpoint=None, quarantine_reason=None, termination_evidence=None)
+
+    def reject_reservation(self, reservation: c.Reservation, message: str) -> None:
+        row = self._owned(reservation.fence)
+        if row.state != c.CoordinationState.RESERVED:
+            raise OwnershipError('Only a reserved pre-send attempt can be reject-released')
+        if (reservation.request != self._request(row)
+                or reservation.executor.principal_id != row.holder
+                or reservation.executor.execution_ref != row.executor_ref):
+            raise OwnershipError('Reservation identity differs from durable row')
+        try:
+            self._reject(row, reservation.request, message)
+        except _RejectionReleased:
+            return None
 
     def finish(self, claim: c.AdmissionClaim, result: c.OperationResult) -> None:
         self.assert_owner(claim)

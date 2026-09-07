@@ -1400,62 +1400,9 @@ async def check_permissions(space_id: SpaceId):
 
 @router.post("/trigger")
 async def trigger(body: TriggerRequest, request: Request):
-    """Trigger an optimization run for a Genie Agent."""
-    if not _is_configured():
-        raise HTTPException(status_code=503, detail="Auto-Optimize is not configured. Set GSO_CATALOG and GSO_JOB_ID.")
-
-    ws = get_workspace_client()
-    sp_ws = get_service_principal_client()
-    selected_llm_model = (body.llm_model or "").strip() or None
-    if selected_llm_model:
-        try:
-            selected_llm_model = validate_chat_model(selected_llm_model, client=sp_ws)
-        except ModelValidationError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-    config = _build_gso_config(llm_model_override=selected_llm_model)
-
-    try:
-        result = trigger_optimization(
-            space_id=body.space_id,
-            ws=ws,
-            sp_ws=sp_ws,
-            config=config,
-            user_email=request.headers.get("x-forwarded-email"),
-            user_name=request.headers.get("x-forwarded-preferred-username"),
-            apply_mode=body.apply_mode,
-            levers=body.levers,
-            target_accuracy=body.target_accuracy,
-            max_attempts=body.max_attempts,
-            workload_warehouse_ids=body.workload_warehouse_ids,
-            benchmark_policy=body.benchmark_policy,
-        )
-        # Echo the resolved knobs (request value or the job default) so the UI
-        # can confirm what the run will use without re-reading the job config.
-        resolved_target = body.target_accuracy if body.target_accuracy is not None else _DEFAULT_TARGET_ACCURACY
-        resolved_max_attempts = body.max_attempts if body.max_attempts is not None else _DEFAULT_MAX_ATTEMPTS
-        return {
-            "runId": result.run_id,
-            "jobRunId": result.job_run_id,
-            "jobUrl": result.job_url,
-            "status": result.status,
-            "targetAccuracy": resolved_target,
-            "maxAttempts": resolved_max_attempts,
-            "benchmarkPolicy": body.benchmark_policy,
-        }
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except RuntimeError as e:
-        msg = str(e)
-        if "already in progress" in msg:
-            raise HTTPException(status_code=409, detail=msg)
-        logger.exception("Trigger optimization failed: %s", e)
-        raise HTTPException(status_code=500, detail=msg)
-    except Exception as e:
-        logger.exception("Failed to trigger optimization: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to start optimization job.")
+    """Legacy managed mutation disabled pending the M10 governed adapter."""
+    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
+        "message": "Use a governed operation; optimizer mutation-gate integration required"})
 
 
 # ---------------------------------------------------------------------------
@@ -2021,43 +1968,16 @@ async def list_levers():
 
 @router.post("/runs/{run_id}/apply")
 async def apply_run(run_id: RunId):
-    """Apply an optimization run's results to the Genie Agent."""
-    ws = get_workspace_client()
-    config = _build_gso_config()
-
-    try:
-        result = await _offload(apply_optimization, run_id, ws, config)
-        await _offload(_invalidate_live_fingerprint_for_run, run_id)
-        return {"status": result.status, "runId": result.run_id, "message": result.message}
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.exception("Failed to apply optimization %s: %s", run_id, e)
-        raise HTTPException(status_code=500, detail="Failed to apply optimization.")
+    """Legacy managed mutation disabled pending the M10 governed adapter."""
+    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
+        "message": "Use a governed operation; optimizer mutation-gate integration required"})
 
 
 @router.post("/runs/{run_id}/discard")
 async def discard_run(run_id: RunId):
-    """Discard an optimization run and rollback to pre-optimization state."""
-    ws = get_workspace_client()
-    sp_ws = get_service_principal_client()
-    config = _build_gso_config()
-
-    try:
-        result = await _offload(discard_optimization, run_id, ws, sp_ws, config)
-        await _offload(_invalidate_live_fingerprint_for_run, run_id)
-        return {"status": result.status, "runId": result.run_id, "message": result.message}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.exception("Failed to discard optimization %s: %s", run_id, e)
-        raise HTTPException(status_code=500, detail="Failed to discard optimization.")
+    """Legacy managed mutation disabled pending the M10 governed adapter."""
+    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
+        "message": "Use a governed operation; optimizer mutation-gate integration required"})
 
 
 @router.post("/runs/{run_id}/revert")
@@ -2078,53 +1998,14 @@ async def revert_run(
     # Deprecated alias retained for existing callers and bookmarked URLs.
     target: str | None = Query(None, include_in_schema=False),
 ):
-    """Revert a past run with independently selected config/benchmark scopes.
-
-    ``config_target=champion`` uses the champion iteration's authoritative
-    observed config (with legacy ``config_json`` fallback), while
-    ``config_target=baseline`` uses the run's pre-run ``config_snapshot``.
-    ``benchmark_target=current`` composes the live benchmark block into that
-    config; ``benchmark_target=champion`` restores the benchmark block captured
-    with the winning iteration; and ``benchmark_target=baseline`` restores the
-    benchmark block from the pre-run snapshot. Unlike ``/discard``, this leaves
-    the historical run status untouched. Active same-Space runs are refused.
-    """
+    """Legacy managed mutation disabled pending the M10 governed adapter."""
     resolved_config_target = target or config_target
     if resolved_config_target not in ("champion", "baseline"):
-        raise HTTPException(
-            status_code=422,
-            detail="config_target must be 'champion' or 'baseline'.",
-        )
+        raise HTTPException(status_code=422, detail="config_target must be champion or baseline")
     if benchmark_target not in ("current", "champion", "baseline"):
-        raise HTTPException(
-            status_code=422,
-            detail="benchmark_target must be 'current', 'champion', or 'baseline'.",
-        )
-    ws = get_workspace_client()
-    sp_ws = get_service_principal_client()
-    config = _build_gso_config()
-
-    try:
-        result = await _offload(
-            revert_optimization,
-            run_id,
-            ws,
-            sp_ws,
-            config,
-            target=resolved_config_target,
-            benchmark_target=benchmark_target,
-        )
-        await _offload(_invalidate_live_fingerprint_for_run, run_id)
-        return {"status": result.status, "runId": result.run_id, "message": result.message}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.exception("Failed to revert to run %s: %s", run_id, e)
-        raise HTTPException(status_code=500, detail="Failed to revert the Genie Agent.")
+        raise HTTPException(status_code=422, detail="benchmark_target must be current, champion, or baseline")
+    raise HTTPException(status_code=503, detail={"code": "vc_writes_disabled", "retryable": False,
+        "message": "Use a governed operation; optimizer mutation-gate integration required"})
 
 
 @router.get("/runs/{run_id}/revert-options")

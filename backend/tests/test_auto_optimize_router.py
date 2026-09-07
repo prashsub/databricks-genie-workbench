@@ -53,6 +53,20 @@ def mock_user_ws() -> MagicMock:
     return MagicMock()
 
 
+@pytest.mark.parametrize("endpoint", ["trigger", "runs/00000000-0000-4000-8000-000000000001/apply",
+    "runs/00000000-0000-4000-8000-000000000001/discard", "runs/00000000-0000-4000-8000-000000000001/revert"])
+def test_all_existing_mutation_entrypoints_use_gate_and_fail_closed(client, monkeypatch, endpoint):
+    writes = MagicMock()
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: MagicMock())
+    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: MagicMock())
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    writes.assert_not_called()
+
+
 # ── /permissions — advisory UI gate ─────────────────────────────────────
 
 
@@ -192,114 +206,46 @@ def test_permissions_requires_configured_gso(client, monkeypatch) -> None:
 def test_trigger_proceeds_without_prompt_registry_gate(
     client, mock_sp_ws, mock_user_ws, monkeypatch,
 ) -> None:
-    """Prompt Registry availability no longer blocks app-layer job launch."""
-    monkeypatch.setattr(
-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
-    )
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setenv("LLM_MODEL", "custom-trigger-model")
-
-    fake_result = MagicMock(
-        run_id="run-xyz",
-        job_run_id=9999,
-        job_url="https://example.com/jobs/12345/runs/9999",
-        status="QUEUED",
-    )
-
-    with patch.object(
-        auto_optimize, "trigger_optimization", return_value=fake_result
-    ) as trigger_mock:
-        resp = client.post(
-            "/api/auto-optimize/trigger",
-            json={"space_id": "space-abc", "apply_mode": "genie_config"},
-        )
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body == {
-        "runId": "run-xyz",
-        "jobRunId": 9999,
-        "jobUrl": "https://example.com/jobs/12345/runs/9999",
-        "status": "QUEUED",
-        # GSO v2 loop knobs default to the job defaults when the request omits
-        # them, and are echoed back so the UI can confirm what the run uses.
-        "targetAccuracy": 0.90,
-        "maxAttempts": 3,
-        # Legacy API callers retain the historical repair behavior; the
-        # Workbench sends review_only explicitly for its safer UI default.
-        "benchmarkPolicy": "repair_allowed",
-    }
-    trigger_mock.assert_called_once()
-    config = trigger_mock.call_args.kwargs["config"]
-    assert config.llm_model == "custom-trigger-model"
-    # Omitted knobs flow to trigger_optimization as None (it resolves defaults).
-    assert trigger_mock.call_args.kwargs["target_accuracy"] is None
-    assert trigger_mock.call_args.kwargs["max_attempts"] is None
-    assert trigger_mock.call_args.kwargs["benchmark_policy"] == "repair_allowed"
-    assert "deploy_target" not in trigger_mock.call_args.kwargs
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "trigger"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_trigger_uses_selected_llm_model(
     client, mock_sp_ws, mock_user_ws, monkeypatch,
 ) -> None:
-    """Explicit llm_model overrides the env default after metadata validation."""
-    monkeypatch.setattr(
-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
-    )
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setenv("LLM_MODEL", "env-default-model")
-    monkeypatch.setattr(
-        auto_optimize,
-        "validate_chat_model",
-        lambda model, client=None: model,
-    )
-
-    fake_result = MagicMock(
-        run_id="run-selected",
-        job_run_id=123,
-        job_url=None,
-        status="QUEUED",
-    )
-
-    with patch.object(
-        auto_optimize, "trigger_optimization", return_value=fake_result
-    ) as trigger_mock:
-        resp = client.post(
-            "/api/auto-optimize/trigger",
-            json={
-                "space_id": "space-abc",
-                "apply_mode": "genie_config",
-                "llm_model": "selected-chat",
-            },
-        )
-
-    assert resp.status_code == 200, resp.text
-    config = trigger_mock.call_args.kwargs["config"]
-    assert config.llm_model == "selected-chat"
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "trigger"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_trigger_rejects_invalid_llm_model(
     client, mock_sp_ws, mock_user_ws, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
-    )
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-
-    def reject(model, client=None):
-        raise auto_optimize.ModelValidationError("not a chat model")
-
-    monkeypatch.setattr(auto_optimize, "validate_chat_model", reject)
-
-    with patch.object(auto_optimize, "trigger_optimization") as trigger_mock:
-        resp = client.post(
-            "/api/auto-optimize/trigger",
-            json={"space_id": "space-abc", "llm_model": "bad-model"},
-        )
-
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "not a chat model"
-    trigger_mock.assert_not_called()
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "trigger"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_trigger_unconfigured_returns_503(client, monkeypatch) -> None:
@@ -325,28 +271,16 @@ def test_trigger_rejects_malformed_space_id(client) -> None:
 def test_trigger_forwards_workload_warehouse_ids(
     client, mock_sp_ws, mock_user_ws, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws
-    )
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    fake_result = MagicMock(
-        run_id="run-workloads", job_run_id=1, job_url=None, status="QUEUED",
-    )
-    with patch.object(
-        auto_optimize, "trigger_optimization", return_value=fake_result,
-    ) as trigger_mock:
-        response = client.post(
-            "/api/auto-optimize/trigger",
-            json={
-                "space_id": "space-abc",
-                "workload_warehouse_ids": ["wh-a", "wh-b"],
-            },
-        )
-
-    assert response.status_code == 200
-    assert trigger_mock.call_args.kwargs["workload_warehouse_ids"] == [
-        "wh-a", "wh-b",
-    ]
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "trigger"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 # ── Bug #2 — derived accuracy ───────────────────────────────────────────
@@ -1694,32 +1628,16 @@ def test_remove_history_entry_fails_when_tombstone_cannot_be_persisted(
 
 
 def test_trigger_round_trips_loop_knobs(client, mock_sp_ws, mock_user_ws, monkeypatch) -> None:
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "validate_chat_model", lambda m, client=None: m)
-
-    fake_result = MagicMock(run_id="run-1", job_run_id=1, job_url=None, status="QUEUED")
-    with patch.object(auto_optimize, "trigger_optimization", return_value=fake_result) as tmock:
-        resp = client.post(
-            "/api/auto-optimize/trigger",
-            json={
-                "space_id": "space-abc",
-                "target_accuracy": 0.85,
-                "max_attempts": 5,
-                "benchmark_policy": "review_only",
-            },
-        )
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    # Echoed back exactly as requested.
-    assert body["targetAccuracy"] == 0.85
-    assert body["maxAttempts"] == 5
-    assert body["benchmarkPolicy"] == "review_only"
-    # Threaded into trigger_optimization.
-    assert tmock.call_args.kwargs["target_accuracy"] == 0.85
-    assert tmock.call_args.kwargs["max_attempts"] == 5
-    assert tmock.call_args.kwargs["benchmark_policy"] == "review_only"
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "trigger"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_trigger_rejects_out_of_range_target_accuracy(client) -> None:
@@ -2259,103 +2177,60 @@ def test_mutation_routes_offload_operations_and_fingerprint_lookup(
     operation_name: str,
     result_status: str,
 ) -> None:
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(
-        auto_optimize, "get_service_principal_client", lambda: mock_sp_ws,
-    )
-    operation = MagicMock(
-        return_value=MagicMock(
-            status=result_status,
-            run_id=run_id,
-            message="ok",
-        )
-    )
-    invalidate = MagicMock()
-    monkeypatch.setattr(auto_optimize, operation_name, operation)
-    monkeypatch.setattr(
-        auto_optimize, "_invalidate_live_fingerprint_for_run", invalidate,
-    )
-    offloaded: list[object] = []
-
-    async def record_offload(fn, *args, **kwargs):
-        offloaded.append(fn)
-        return fn(*args, **kwargs)
-
-    monkeypatch.setattr(auto_optimize, "_offload", record_offload)
-
-    response = client.post(f"/api/auto-optimize/runs/{run_id}/{path_suffix}")
-
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == result_status
-    assert offloaded == [operation, invalidate]
-    operation.assert_called_once()
-    invalidate.assert_called_once_with(run_id)
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = f"runs/12345678-1234-1234-1234-1234567890ab/{path_suffix}"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 # ── /runs/{run_id}/revert ───────────────────────────────────────────────
 
 
 def test_revert_run_happy_path(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
-    """A successful revert returns 200 + the integration ActionResult payload."""
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-    fake = MagicMock(status="reverted", run_id=run_id,
-                      message="Genie Agent reverted to this run's champion configuration.")
-    captured = {}
-    def _stub(*a, **k):
-        captured.update(k)
-        return fake
-    monkeypatch.setattr(auto_optimize, "revert_optimization", _stub)
-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert?target=champion")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "reverted"
-    assert body["runId"] == run_id
-    assert "reverted" in body["message"].lower()
-    # The target query param is forwarded to the integration function.
-    assert captured.get("target") == "champion"
-    assert captured.get("benchmark_target") == "current"
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_revert_run_defaults_target_to_champion(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
-    """Omitting ?target defaults to 'champion' (back-compat)."""
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-    captured = {}
-    def _stub(*a, **k):
-        captured.update(k)
-        return MagicMock(status="reverted", run_id=run_id, message="ok")
-    monkeypatch.setattr(auto_optimize, "revert_optimization", _stub)
-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
-    assert resp.status_code == 200
-    assert captured.get("target") == "champion"
-    assert captured.get("benchmark_target") == "current"
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_revert_run_forwards_both_selected_scopes(
     client, monkeypatch, mock_sp_ws, mock_user_ws,
 ) -> None:
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-    captured = {}
-
-    def _stub(*args, **kwargs):
-        captured.update(kwargs)
-        return MagicMock(status="reverted", run_id=run_id, message="ok")
-
-    monkeypatch.setattr(auto_optimize, "revert_optimization", _stub)
-    resp = client.post(
-        f"/api/auto-optimize/runs/{run_id}/revert"
-        "?config_target=baseline&benchmark_target=champion"
-    )
-
-    assert resp.status_code == 200
-    assert captured["target"] == "baseline"
-    assert captured["benchmark_target"] == "champion"
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_revert_run_rejects_invalid_target(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
@@ -2390,60 +2265,57 @@ def test_revert_run_rejects_invalid_benchmark_target(
 
 
 def test_revert_run_returns_409_for_value_error(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
-    """Still-in-progress / missing-snapshot runs surface as a 409."""
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-    def _raise(*a, **k):
-        raise ValueError("Cannot revert to a run that is still in progress.")
-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
-    assert resp.status_code == 409
-    assert "in progress" in resp.json()["detail"].lower()
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_revert_run_returns_403_for_permission_error(
     client, monkeypatch, mock_sp_ws, mock_user_ws,
 ) -> None:
-    """An OBO caller without CAN_EDIT/CAN_MANAGE cannot use the SP to mutate."""
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-
-    def _raise(*args, **kwargs):
-        raise PermissionError("You need CAN_EDIT or CAN_MANAGE permission.")
-
-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
-
-    assert resp.status_code == 403
-    assert "can_edit" in resp.json()["detail"].lower()
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_revert_run_returns_422_for_runtime_error(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
-    """A failed Genie PATCH rollback surfaces as a 422 (unprocessable)."""
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-    def _raise(*a, **k):
-        raise RuntimeError("Failed to apply rollback via API")
-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
-    assert resp.status_code == 422
-    assert "rollback" in resp.json()["detail"].lower()
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_revert_run_returns_500_for_unexpected_exception(client, monkeypatch, mock_sp_ws, mock_user_ws) -> None:
-    """Any unexpected error maps to a generic 500, never a stack trace."""
-    run_id = "12345678-1234-1234-1234-1234567890ab"
-    monkeypatch.setattr(auto_optimize, "get_workspace_client", lambda: mock_user_ws)
-    monkeypatch.setattr(auto_optimize, "get_service_principal_client", lambda: mock_sp_ws)
-    def _raise(*a, **k):
-        raise OSError("boom")
-    monkeypatch.setattr(auto_optimize, "revert_optimization", _raise)
-    resp = client.post(f"/api/auto-optimize/runs/{run_id}/revert")
-    assert resp.status_code == 500
-    assert resp.json()["detail"] == "Failed to revert the Genie Agent."
+    """Legacy behavior is superseded by fail-closed governed mutation admission."""
+    writes = MagicMock(side_effect=AssertionError("Legacy managed write reached"))
+    for name in ("trigger_optimization", "apply_optimization", "discard_optimization", "revert_optimization"):
+        monkeypatch.setattr(auto_optimize, name, writes)
+    endpoint = "runs/12345678-1234-1234-1234-1234567890ab/revert"
+    response = client.post(f"/api/auto-optimize/{endpoint}", json={"space_id": "space"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_writes_disabled"
+    assert response.json()["detail"]["retryable"] is False
+    writes.assert_not_called()
 
 
 def test_revert_options_returns_preview(
