@@ -6,7 +6,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
 
-from .ports import BindingInventory, Projections, ReconcilePolicy
+from .ports import BindingInventory, BundleInventory, Projections, ReconcilePolicy
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,8 @@ class DriftService:
                  clock=None, dispatcher: vc.JobDispatcher | None = None,
                  facts: vc.OperationFacts | None = None, dispatch_enabled=False,
                  inventory: BindingInventory | None = None, projections: Projections | None = None,
-                 scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30)):
+                 scan_enabled=False, batch_size=100, full_fetch_interval=timedelta(minutes=30),
+                 bundles: BundleInventory | None = None):
         if not 1 <= batch_size <= 100 or full_fetch_interval <= timedelta(0):
             raise ValueError("Invalid scan bounds or full-fetch interval")
         self.canonicalizer = canonicalizer
@@ -47,6 +48,7 @@ class DriftService:
         self.scan_enabled = scan_enabled
         self.batch_size = batch_size
         self.full_fetch_interval = full_fetch_interval
+        self.bundles = bundles
 
     def scan(self, workspace_id: str, cursor: str | None) -> vc.ReconcileBatch:
         if self.scan_enabled is not True:
@@ -67,7 +69,19 @@ class DriftService:
                         or status.binding_id != entry.binding.binding_id
                         or status.binding_revision != entry.binding.binding_revision):
                     raise PermissionError("Inventory binding scope mismatch")
-                due = (status.stale or full_fetch_at is None or full_fetch_at > self.clock()
+                conflicts = ()
+                if entry.governed_by == "workbench" and self.bundles is not None:
+                    status = replace(status, drift=vc.DriftState.UNKNOWN, allowed_actions=())
+                    bundle_snapshot = self.bundles.for_binding(entry.binding)
+                    if not bundle_snapshot.complete:
+                        raise RuntimeError("Sanctioned bundle inventory incomplete")
+                    conflicts = tuple(resource for resource in bundle_snapshot.resources
+                                      if resource.workspace_id == workspace_id
+                                      and resource.space_id == entry.binding.space_id
+                                      and resource.manages_content
+                                      and resource.resource_path.startswith("resources.genie_spaces."))
+                    status = self._bundle_status(entry.status, conflicts)
+                due = (conflicts or status.stale or full_fetch_at is None or full_fetch_at > self.clock()
                        or self.clock() - full_fetch_at >= self.full_fetch_interval
                        or entry.api_update_time is None or entry.api_update_time != entry.previous_update_time)
                 if due:
@@ -78,7 +92,9 @@ class DriftService:
                         status = entry.status
                         raise PermissionError("Observation binding scope mismatch")
                     if captured.busy or status.stale:
+                        status = self._bundle_status(status, conflicts)
                         raise RuntimeError("Observation busy or unavailable")
+                    status = self._bundle_status(status, conflicts)
                     full_fetch_at = self.clock()
                 self.projections.publish(entry.binding, status, full_fetch_at, entry.api_update_time)
             except Exception:
@@ -92,6 +108,14 @@ class DriftService:
                         pass
             results.append(status)
         return vc.ReconcileBatch(tuple(results), page.next_cursor)
+
+    def _bundle_status(self, status, conflicts):
+        if not conflicts:
+            return status
+        reasons = tuple(f"Dual authority: {resource.bundle} {resource.resource_path}; "
+                        f"actor={resource.audit_actor or 'unknown'}" for resource in conflicts)
+        return replace(status, drift=vc.DriftState.CONFLICTED, allowed_actions=(),
+                       reasons=(*status.reasons, *reasons))
 
     def reconcile(self, binding: vc.BindingRef, action: vc.ReconcileRequest,
                   actor: vc.ActorContext) -> vc.OperationHandle:

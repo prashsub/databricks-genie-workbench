@@ -21,6 +21,27 @@ class ScanEntry(vc.WireValue):
     api_update_time: datetime | None
     previous_update_time: datetime | None
     last_full_fetch_at: datetime | None
+    governed_by: str = "workbench"
+
+
+@dataclass(frozen=True)
+class BundleResource(vc.WireValue):
+    workspace_id: str
+    space_id: str | None
+    bundle: str
+    resource_path: str
+    manages_content: bool
+    audit_actor: str | None
+
+
+@dataclass(frozen=True)
+class BundleSnapshot(vc.WireValue):
+    resources: tuple[BundleResource, ...]
+    complete: bool
+
+
+class BundleInventory(Protocol):
+    def for_binding(self, binding: vc.BindingRef) -> BundleSnapshot: ...
 
 
 class BindingInventory(Protocol):
