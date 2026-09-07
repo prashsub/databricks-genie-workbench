@@ -189,6 +189,7 @@ class MutationGate:
             vc.FactStatus.APPLIED_UNVERIFIED,
             vc.FactStatus.APPLIED_PARTIAL,
             vc.FactStatus.CONFIRMED,
+            vc.FactStatus.NOOP,
         }:
             return True
         if fact.status not in {vc.FactStatus.CONFLICTED, vc.FactStatus.QUARANTINED}:
