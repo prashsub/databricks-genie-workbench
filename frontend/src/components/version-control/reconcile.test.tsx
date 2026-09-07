@@ -49,3 +49,20 @@ it('reconcile_result_renders_operation_evidence_not_a_bare_message', async () =>
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+
+it('adopt_with_fresh_bound_approval_posts_reconcile_action_adopt', async () => {
+  const operation = { operation_id: 'adopt-1', status: 'confirmed', job_run_id: null, checkpoints: [], audit: [], receipt_references: [] }
+  const transport = vi.fn(async () => new Response(JSON.stringify(operation)))
+  const api = new VersionControlApi(transport)
+  const approval = { ...approvalFixture, valid: true, inputs: { ...approvalInputsFixture, expires_at: new Date(Date.now() + 60000).toISOString() } }
+  const reviewed = { binding_revision: 3, expected_base: fingerprints, approval_id: approval.approval_id }
+  await reconcileAction(api, 'demo-binding', 'adopt', reviewed, approvalInputsFixture, approval, 'fresh')
+  expect(transport.mock.calls[0][0]).toBe('/api/version-control/bindings/demo-binding/reconcile')
+  expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toMatchObject({ ...reviewed, action: 'adopt' })
+  for (const inputs of [{ ...approval.inputs, expires_at: '2000-01-01T00:00:00Z' }, { ...approval.inputs, expected_base_fingerprints: { ...fingerprints, config: 'changed' } }]) {
+    const staleTransport = vi.fn(async () => new Response(JSON.stringify(approvalFixture)))
+    await reconcileAction(new VersionControlApi(staleTransport), 'demo-binding', 'adopt', reviewed, approvalInputsFixture, { ...approval, inputs }, 'stale')
+    expect(staleTransport).toHaveBeenCalledTimes(1)
+    expect(staleTransport.mock.calls[0][0]).toBe('/api/version-control/approvals')
+  }
+})
