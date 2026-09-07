@@ -27,8 +27,19 @@ class Observer:
         return self._capture(binding, reason, executor, self.status_reader(binding, actor))
 
     def _capture(self, binding, reason, executor, status):
-        lease = self.coordination.observe_exclusively(binding, executor)
+        try:
+            lease = self.coordination.observe_exclusively(binding, executor)
+        except Exception:
+            return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
+                reasons=(*status.reasons, "Observation busy or unavailable")), None, True)
+        actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
+        status = self.status_reader(binding, actor)
         snapshot = self.canonicalizer.observe(self.transport.get(binding, executor))
+        if status.heads.observed is not None:
+            previous = self.ledger.get_version(binding, status.heads.observed)
+            if self.canonicalizer.compare(previous.snapshot, snapshot) == vc.Comparison.EQUAL:
+                self.coordination.advance_heads(lease.fence, vc.HeadUpdate(None, None, None, None))
+                return vc.ObservationResult(replace(status, stale=False), None, False)
         context = vc.CaptureContext(binding, f"{lease.fence.attempt_id}:observe",
             datetime.now(timezone.utc), reason,
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),

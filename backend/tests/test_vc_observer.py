@@ -1,6 +1,9 @@
 """M04 serialized observer port tests (no platform claims)."""
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import Mock
 
 import pytest
@@ -44,3 +47,41 @@ def test_capture_on_open_commits_before_display_and_advances_only_observed(obser
     assert update.approved is update.deployed is None
     assert rig.transport.get.call_args.args[1] is rig.executor
     identity.executor.assert_called_once()
+
+
+def test_concurrent_opens_deduplicate_without_regressing_or_mislabeling_managed_checkpoint(observer_rig):
+    rig, observer, viewer, status, identity = observer_rig
+    entered, release = Event(), Event()
+    lease = rig.coordination.observe_exclusively.side_effect
+    def acquire(*args):
+        if entered.is_set():
+            raise RuntimeError("active observation or managed checkpoint")
+        return lease(*args)
+    def slow_get(*args):
+        entered.set()
+        assert release.wait(5)
+        return rig.get(*args)
+    rig.coordination.observe_exclusively.side_effect = acquire
+    rig.transport.get.side_effect = slow_get
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(observer.capture_on_open, rig.binding, viewer)
+        assert entered.wait(5)
+        try:
+            second = observer.capture_on_open(rig.binding, viewer)
+            assert second.busy and second.status.stale
+            assert second.captured_version is None
+            assert second.status.heads == status.heads
+        finally:
+            release.set()
+        assert first.result().captured_version is not None
+    rig.transport.get.assert_called_once()
+    rig.ledger.append_observation.assert_called_once()
+
+
+def test_unchanged_open_deduplicates_committed_observation(observer_rig):
+    rig, observer, viewer, status, identity = observer_rig
+    first = observer.capture_on_open(rig.binding, viewer)
+    observer.status_reader = lambda *args: first.status
+    second = observer.capture_on_open(rig.binding, viewer)
+    assert second.status.heads.observed == first.status.heads.observed
+    rig.ledger.append_observation.assert_called_once()
