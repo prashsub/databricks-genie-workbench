@@ -6,7 +6,7 @@ import pytest
 
 from backend.services.version_control.contracts import (
     ActorContext, ApprovalInputs, ApprovalUse, ApprovalVote, AuthenticatedRequest,
-    FactKind, FactStatus, Fingerprints, MutationRequest, RequestHistory,
+    FactKind, FactStatus, Fingerprints, MutationRequest, ObservationRef, PatchStage, RequestHistory, StageEvidence,
     RequestIdentity, canonical_json_hash, from_wire, to_wire,
 )
 from backend.tests.test_vc_operation_facts import NOW, DIGEST, durable, fact, uid
@@ -327,3 +327,33 @@ def test_approval_request_rejects_inputs_not_bound_to_durable_request():
     with pytest.raises(ValueError, match='bound'):
         context.service.request(replace(context.bound, rendered_target_digest='b' * 64),
                                 context.identity.actors['requester'])
+
+
+@pytest.mark.parametrize('action', ['adopt', 'reapply'])
+def test_adopt_and_reapply_need_new_approval_for_newly_captured_base(action):
+    from backend.services.version_control.governance.approvals import request_digest
+
+    context = setup_approval(operation_type=action)
+    with pytest.raises(PermissionError, match='captured base'):
+        submit(context)
+    observation = ObservationRef(uid(3), context.request.binding.binding_id, 1,
+                                 context.request.expected_base, DIGEST)
+    capture = fact(binding=context.request.binding, request=context.request.identity,
+                   operation_type=action, transition_sequence=1,
+                   status=FactStatus.PREIMAGE_CAPTURED, pre_version_id=observation.version_id,
+                   evidence=StageEvidence('VC/1.0', PatchStage.CONFIG_PENDING, NOW, DIGEST, observation))
+    context.facts.append(capture)
+    assert context.facts.get_request(uid(2)).approval is None
+    approve(context)
+    assert context.service.authorize(context.request, context.executor).approval_id == uid(2)
+    new_base = replace(context.bound.expected_base_fingerprints, metadata='b' * 64)
+    new_request = replace(context.request, identity=RequestIdentity(uid(22), 'new-base', DIGEST),
+                          expected_base=new_base.state_digest)
+    new_request = replace(new_request, identity=replace(new_request.identity, request_digest=request_digest(new_request)))
+    context.facts.record_request(new_request, fact(operation_id=uid(22), binding=new_request.binding,
+                                                 request=new_request.identity, operation_type=action))
+    new_inputs = replace(context.bound, operation_id=uid(22), expected_base_fingerprints=new_base)
+    with pytest.raises((ValueError, PermissionError)):
+        context.service.request(new_inputs, context.identity.actors['requester'])
+    with pytest.raises((ValueError, PermissionError)):
+        context.service.authorize(new_request, context.executor)

@@ -6,7 +6,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control.contracts import (
     ApprovalRecord, ApprovalRequest, ApprovalVote, AuthorizationGrant, FactKind, FactStatus,
-    IdentityProvider, OperationFact, OperationFacts, Registry, canonical_json_hash, to_wire,
+    IdentityProvider, OperationFact, OperationFacts, Registry, StageEvidence, canonical_json_hash, to_wire,
 )
 from .facts import fact_key
 
@@ -61,11 +61,30 @@ class ApprovalService:
         })
         if (request.identity.request_digest != request_digest(request)
                 or request.identity.operation_id != inputs.operation_id
+                or request.approval_id != inputs.operation_id
                 or request.binding != inputs.target_binding or request.operation_type != inputs.operation_type
                 or request.source_version_id != inputs.source_version_id
                 or request.expected_base != inputs.expected_base_fingerprints.state_digest
                 or rendered != inputs.rendered_target_digest):
             raise ValueError('Request is not bound to reviewed immutable inputs')
+
+    def _captured_base(self, request, reviewed_at):
+        if request.operation_type not in ('adopt', 'reapply'):
+            return
+        history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
+        captures = [row for row in history.facts if row.status == FactStatus.PREIMAGE_CAPTURED
+                    and isinstance(row.evidence, StageEvidence) and row.evidence.observation is not None]
+        if history.ambiguous or not captures:
+            raise PermissionError('Fresh captured base evidence required')
+        latest = max(captures, key=lambda row: row.transition_sequence)
+        observation = latest.evidence.observation
+        if (observation.state_digest != request.expected_base
+                or observation.binding_id != request.binding.binding_id
+                or observation.binding_revision != request.binding.binding_revision
+                or latest.pre_version_id != observation.version_id
+                or latest.recorded_at > reviewed_at
+                or (request.operation_type == 'adopt' and request.source_version_id != observation.version_id)):
+            raise PermissionError('Approval must review newly captured base')
 
     def _unused(self, request, approval_id):
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
@@ -101,6 +120,7 @@ class ApprovalService:
         self._fresh(inputs, self.now())
         stored = self.facts.get_request(inputs.operation_id)
         self._bound(stored.request, inputs)
+        self._captured_base(stored.request, self.now())
         if stored.approval is not None:
             if stored.approval.request.inputs != inputs:
                 raise ValueError('Approval inputs are immutable')
@@ -141,6 +161,7 @@ class ApprovalService:
         if request != stored.request:
             raise ValueError('Immutable request identity or digest mismatch')
         self._bound(request, inputs)
+        self._captured_base(request, record.request.requested_at)
         self._unused(request, record.request.approval_id)
         if executor.workspace_id != inputs.target_binding.workspace_id or executor.actor_kind != 'service':
             raise PermissionError('Target service executor required')
