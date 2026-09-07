@@ -1,6 +1,7 @@
 """Fail-closed orchestration over VC/1.0 ports."""
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from backend.services.version_control import contracts as vc
 
@@ -23,8 +24,33 @@ class MutationGate:
         preimage = self._capture(request, executor, reservation.fence, snapshot, "preimage")
         authorization = self.approvals.authorize(request, executor)
         claim = self.coordination.admit(reservation, preimage, authorization)
+        desired = self.canonicalizer.observe({
+            **vc.to_wire(snapshot.response_envelope),
+            "serialized_space": vc.to_wire(request.serialized_space),
+            **({"description": request.description} if request.description is not None else {})})
+        if self.canonicalizer.compare(snapshot, desired) == vc.Comparison.EQUAL:
+            return self._finish(request, executor, claim, vc.OperationStatus.NOOP, preimage)
         self.coordination.assert_owner(claim)
         self.transport.patch_config_once(request.binding, vc.to_wire(request.serialized_space), claim)
+
+    def _finish(self, request, executor, claim, status, postimage=None):
+        evidence = vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+                                    datetime.now(timezone.utc),
+                                    postimage.state_digest if postimage else request.identity.request_digest,
+                                    postimage)
+        self.facts.append(vc.OperationFact(
+            str(uuid4()), vc.FactKind.OPERATION, request.identity.operation_id, 100,
+            f"{claim.attempt_id}:{status.value}", request.binding, request.identity,
+            request.operation_type, executor.principal_id,
+            vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
+            vc.FactStatus(status.value), evidence, datetime.now(timezone.utc),
+            attempt_id=claim.attempt_id, generation=claim.generation,
+            pre_version_id=claim.preimage.version_id,
+            post_version_id=postimage.version_id if postimage else None))
+        result = vc.OperationResult(request.identity.operation_id, status, claim.preimage,
+                                    postimage, False, ())
+        self.coordination.finish(claim, result)
+        return result
 
     def _capture(self, request, executor, fence, snapshot, reason, parent=None):
         context = vc.CaptureContext(

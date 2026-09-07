@@ -104,3 +104,21 @@ def test_required_port_failure_never_writes(rig, failure):
         rig.gate.execute(rig.request, rig.executor)
     rig.transport.patch_config_once.assert_not_called()
     rig.transport.patch_description_once.assert_not_called()
+
+
+def test_noop_all_three_fingerprints_skips_both_patches(rig):
+    request = replace(rig.request, serialized_space=rig.state["serialized_space"], description="old")
+    result = rig.gate.execute(request, rig.executor)
+    assert result.status == vc.OperationStatus.NOOP
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+    assert rig.facts.append.call_args.args[0].status == vc.FactStatus.NOOP
+    rig.coordination.finish.assert_called_once()
+
+
+@pytest.mark.parametrize("field", ["instructions", "benchmarks"])
+def test_noop_requires_config_and_benchmark_equality(rig, field):
+    request = replace(rig.request, serialized_space={**rig.state["serialized_space"], field: {"value": "changed"}}, description="old")
+    rig.gate.execute(request, rig.executor)
+    rig.transport.patch_config_once.assert_called_once()
+
