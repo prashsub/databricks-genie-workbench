@@ -135,8 +135,9 @@
       "desc": "Cross-module actor_kind vocab drift + M04 retry short-circuit fix (integrator-sanctioned)",
       "worker": "codex",
       "conversation_id": "3773493063976171",
-      "status": "FIX COMPLETE + VERIFIED (commits 6462f58, 0188353; pushed vc/xmod-actor-retry-fix). BLOCKER1 actor_kind human/service fixed + cross-module RED test (M08 service executor passes M04 gate). BLOCKER2 CONFIRMED REAL + fixed (execution-outcome-filtered short-circuit; requested-only history now executes). Both mutation-verified by polly. 183 affected-suite pass, 1081 full offline pass zero regressions, owned-paths clean (4 files). IN CROSS-REVIEW claude_code conv 3773493063976190. Integrate after review clear (touches M04+M08 already-integrated shared code).",
-      "review_conversation_id": "3773493063976190"
+      "status": "FIX v1 done (6462f58,0188353). Cross-review BLOCK: execute() short-circuit set derived from wrong source (lookup_request returns ALL OPERATION facts incl coordination-written). 1a CONFLICTED is pre-send on coordination producers -> retry of approved write wrongly short-circuits, wedges write (no PATCH). 1b NOOP omitted (completed terminal) -> unhandled ExistingReceipt. FIX2 RUNNING codex/Astra conv 3773493063976232: discriminate pre-send vs post-send CONFLICTED (attempt_id/PatchStage), add NOOP, 3 RED tests incl no-double-PATCH guard. Vocab confirmed correct (+6th consumer vc_reconcile.py). Owned-paths mutation_gate.py+test only.",
+      "review_conversation_id": "3773493063976190",
+      "fix2_conversation_id": "3773493063976232"
     }
   ],
   "reviews": {
