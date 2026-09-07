@@ -1,5 +1,7 @@
 from unittest.mock import Mock
 from types import SimpleNamespace
+import subprocess
+import sys
 
 from genie_space_optimizer.integration.version_control import ChampionRun
 
@@ -64,3 +66,42 @@ def test_noop_champion_has_receipt_but_no_new_optimizer_version():
     assert run.receipt is receipt
     assert run.pre_version is existing
     assert run.post_version is None
+
+
+def test_package_install_exposes_shared_gate_without_importing_backend_app():
+    script = '''
+import importlib.abc
+import importlib.metadata
+import sys
+class NoBackend(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "backend" or fullname.startswith(("backend.", "fastapi")):
+            raise AssertionError("package imported backend application: " + fullname)
+sys.meta_path.insert(0, NoBackend())
+entries = importlib.metadata.entry_points(group="genie_space_optimizer.vc")
+assert len(entries) == 1, "installed VC/1.0 port entry point missing; run uv sync --frozen"
+entry = next(iter(entries))
+assert entry.name == "ports"
+assert entry.value == "genie_space_optimizer.integration.version_control:OptimizerRuntime"
+runtime_type = entry.load()
+assert runtime_type.contract_version == "VC/1.0"
+assert "backend.main" not in sys.modules
+from types import SimpleNamespace
+from unittest.mock import Mock
+adapter = Mock()
+adapter.apply.return_value = SimpleNamespace(
+    status="noop", preimage=None, postimage=None, unresolved=False,
+    evidence_references=(), operation_id="operation",
+)
+restore_jobs = Mock()
+isolation_registry = Mock()
+runtime = runtime_type(adapter, restore_jobs, isolation_registry)
+assert runtime.restore_jobs is restore_jobs
+assert runtime.isolation_registry is isolation_registry
+run = runtime.champion_run("run")
+assert run.apply("champion", "binding", "base", "job") is adapter.apply.return_value
+adapter.apply.assert_called_once_with("run", "champion", "binding", "base", "job")
+assert "backend.main" not in sys.modules
+'''
+    completed = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr

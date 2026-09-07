@@ -23,6 +23,9 @@ spark = [
     "databricks-connect==18.0.3; python_version >= '3.12'",
 ]
 
+[project.entry-points."genie_space_optimizer.vc"]
+ports = "genie_space_optimizer.integration.version_control:OptimizerRuntime"
+
 [dependency-groups]
 dev = [
     "ty==0.0.25",
@@ -33,6 +36,8 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = ["integration: requires explicit real nonproduction Databricks platform"]
 
 [tool.ty.src]
 include = ["src/**"]

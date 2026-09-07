@@ -69,6 +69,14 @@ class _EvaluationClient:
         return self._client.api_client.do(method, path, **kwargs)
 
 
+def assert_candidate_write(client: Any, space_id: str) -> None:
+    if not isinstance(client, _EvaluationClient):
+        raise PermissionError("Managed writes require the champion gate; candidate proof is missing")
+    resource = client._session.validate(client._session.resource.run_id)
+    if resource.space_id != space_id:
+        raise PermissionError("Mutation does not target the isolated candidate resource")
+
+
 class ChampionAdapter(Protocol):
     def apply(self, run_id: str, champion_id: str, binding: Any,
               expected_base: str, executor: Any) -> Any: ...
@@ -93,6 +101,19 @@ class RestoreJobs(Protocol):
     def submit(self, selection: RestoreSelection, requester: Any) -> Any:
         """Resolve immutable approved restore inputs and submit through M04."""
         ...
+
+
+@dataclass(frozen=True)
+class OptimizerRuntime:
+    """Entry point for explicit M08 target-local composition, not backend startup."""
+
+    contract_version = "VC/1.0"
+    champion_adapter: ChampionAdapter
+    restore_jobs: RestoreJobs
+    isolation_registry: IsolationRegistry
+
+    def champion_run(self, run_id: str) -> "ChampionRun":
+        return ChampionRun(run_id, self.champion_adapter)
 
 
 class ChampionRun:

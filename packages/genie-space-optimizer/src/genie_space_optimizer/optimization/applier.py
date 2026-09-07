@@ -4051,6 +4051,11 @@ def apply_patch_set(
 
     Returns an ``apply_log`` dict with pre/post snapshots and rollback info.
     """
+    if w is not None:
+        from genie_space_optimizer.integration.version_control import assert_candidate_write
+        assert_candidate_write(w, space_id)
+        if apply_mode != "genie_config":
+            raise PermissionError("Candidate evaluation cannot mutate shared UC artifacts")
     pre_snapshot = copy.deepcopy(metadata_snapshot)
     config = copy.deepcopy(metadata_snapshot)
 
@@ -4558,6 +4563,9 @@ def rollback(
     Primary mechanism: replace current config with ``apply_log["pre_snapshot"]``.
     Fallback: execute rollback_commands in reverse order (HIGH -> MEDIUM -> LOW).
     """
+    if w is not None:
+        from genie_space_optimizer.integration.version_control import assert_candidate_write
+        assert_candidate_write(w, space_id)
     pre_snapshot = apply_log.get("pre_snapshot")
     if pre_snapshot is None:
         return {

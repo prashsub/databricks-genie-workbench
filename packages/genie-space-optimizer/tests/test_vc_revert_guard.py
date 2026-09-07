@@ -68,3 +68,30 @@ def test_historical_revert_dispatches_governed_restore_job():
         revert.revert_optimization("run", client, client, Mock(), selection=selection,
                                    restore_jobs=jobs, requester="human")
     jobs.submit.assert_called_once()
+
+
+def test_discard_only_updates_telemetry_and_never_rolls_back_managed_state(monkeypatch):
+    from genie_space_optimizer.integration import discard
+
+    monkeypatch.setattr(discard, "wh_load_run", lambda *args: {
+        "status": "CONVERGED", "space_id": "live", "config_snapshot": {"version": 2},
+    })
+    monkeypatch.setattr("genie_space_optimizer.common.genie_client.user_can_edit_space", lambda *args, **kwargs: True)
+    monkeypatch.setattr(discard, "_assert_no_active_space_runs", lambda **kwargs: None)
+    write = Mock()
+    monkeypatch.setattr(discard, "sql_warehouse_execute", write)
+    rollback = Mock(return_value={"status": "SUCCESS"})
+    monkeypatch.setattr("genie_space_optimizer.optimization.applier.rollback", rollback)
+    result = discard.discard_optimization("run", Mock(), Mock(), Mock())
+    assert result.status == "discarded"
+    rollback.assert_not_called()
+    write.assert_called_once()
+
+
+def test_legacy_apply_cannot_claim_applied_without_gate():
+    from genie_space_optimizer.integration.apply import apply_optimization
+
+    client = Mock()
+    with pytest.raises(PermissionError, match="champion"):
+        apply_optimization("run", client, Mock())
+    assert client.mock_calls == []

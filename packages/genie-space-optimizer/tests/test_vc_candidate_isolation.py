@@ -67,3 +67,21 @@ def test_legacy_loop_refuses_unproven_target_before_work():
         run_unified_optimization_loop(Mock(), Mock(), run_id="run", space_id="live",
                                       benchmarks=[], catalog="cat", schema="sch", levers=[],
                                       max_attempts=1, target_accuracy=90)
+
+
+@pytest.mark.parametrize("entry", ["config", "description", "patch_set", "rollback"])
+def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry):
+    from genie_space_optimizer.common.genie_client import patch_space_config, update_space_description
+    from genie_space_optimizer.optimization.applier import apply_patch_set, rollback
+
+    client = Mock()
+    with pytest.raises(PermissionError):
+        if entry == "config":
+            patch_space_config(client, "live", {})
+        elif entry == "description":
+            update_space_description(client, "live", "changed")
+        elif entry == "patch_set":
+            apply_patch_set(client, "live", [], {}, apply_mode="both")
+        else:
+            rollback({"pre_snapshot": {}}, client, "live")
+    assert client.mock_calls == []
