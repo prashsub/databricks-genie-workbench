@@ -348,8 +348,20 @@ def race(delta):
     barrier = Barrier(2)
     for contender in delta.contenders:
         contender.store.barrier = barrier
+    reservations_done = Barrier(2)
+
+    def run(contender):
+        result = reserve(contender, delta.binding)
+        # Both workers follow the SAME reserve -> admit -> send-boundary path.
+        # Let the losing conflict commit before testing admission publication;
+        # only the coordination-row CAS is the contested authority in this gate.
+        reservations_done.wait(timeout=120)
+        if isinstance(result, c.Reservation):
+            return result, admit_and_trace(delta, contender, result)
+        return result
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda contender: reserve(contender, delta.binding), delta.contenders))
+        results = list(pool.map(run, delta.contenders))
     proposals = [contender.store.proposals for contender in delta.contenders]
     assert all(len(proposal) == 1 for proposal in proposals), 'No acquisition retry allowed'
     assert proposals[0][0][0] == proposals[1][0][0] == delta.initial
@@ -365,20 +377,13 @@ def assert_conflict(delta, contender):
     assert history.facts[0].status in {c.FactStatus.CONFLICTED, c.FactStatus.QUARANTINED}
 
 
-def assert_one_admitted_trace(delta, results):
-    winners = [(contender, result) for contender, result in zip(delta.contenders, results)
-               if isinstance(result, c.Reservation)]
-    assert len(winners) == 1
-    assert sum(isinstance(result, OwnershipError) for result in results) == 1
-    contender, reservation = winners[0]
-    loser = next(item for item in delta.contenders if item is not contender)
+def admit_and_trace(delta, contender, reservation):
     row = delta.observer.read(delta.binding.binding_id)  # independent connection read-back
     assert len(delta.observer.rows()) == 1
     assert row.state == c.CoordinationState.RESERVED and row.unresolved
     assert (row.attempt_id, row.holder, row.generation, row.row_version) == (
         reservation.fence.attempt_id, contender.executor.principal_id, 1, 1)
     assert row.active_operation_id == contender.request.operation_id
-    assert_conflict(delta, loser)
     with pytest.raises(CoordinationError):
         contender.service.assert_owner(reservation.fence)  # reservation is NOT admission
     claim = contender.service.admit(reservation, delta.preimage, contender.grant)
@@ -405,6 +410,26 @@ def assert_one_admitted_trace(delta, results):
     }]
     assert delta.observer.read(delta.binding.binding_id).mutation_stage == c.PatchStage.CONFIG_IN_FLIGHT
     assert len(delta.artifacts.get('consumption')) == 1
+    return claim
+
+
+def assert_one_admitted_trace(delta, results):
+    winners = [(contender, result) for contender, result in zip(delta.contenders, results)
+               if isinstance(result, tuple)]
+    assert len(winners) == 1
+    assert sum(isinstance(result, OwnershipError) for result in results) == 1
+    contender, (reservation, claim) = winners[0]
+    assert isinstance(reservation, c.Reservation) and isinstance(claim, c.AdmissionClaim)
+    loser = next(item for item in delta.contenders if item is not contender)
+    assert_conflict(delta, loser)
+    row = delta.observer.read(delta.binding.binding_id)
+    assert row.attempt_id == reservation.fence.attempt_id == claim.attempt_id
+    assert row.active_operation_id == contender.request.operation_id
+    assert len(delta.observer.rows()) == 1
+    assert delta.artifacts.get('mutation_trace') == [{
+        'attempt_id': claim.attempt_id, 'operation_id': claim.request.operation_id,
+        'stage': c.PatchStage.CONFIG_IN_FLIGHT.value,
+    }]
     return contender, loser, claim
 
 
