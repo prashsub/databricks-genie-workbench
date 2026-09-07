@@ -99,6 +99,62 @@ def test_gate_has_no_transport_write_before_reserve_evidence_and_admit(rig):
     assert rig.trace.index("admit") < rig.trace.index("patch_config")
 
 
+def test_requested_only_history_proceeds_to_first_execution(rig):
+    now = datetime.now(timezone.utc)
+    inputs = vc.ApprovalInputs(
+        "VC/1.0", rig.identity.operation_id, rig.request.operation_type,
+        rig.request.source_version_id, rig.before.raw_state_digest, rig.before.fingerprints,
+        None, None, rig.desired.state_digest, None,
+        rig.before.fingerprints.canonicalizer_version, rig.binding, rig.before.fingerprints,
+        None, "a" * 64, "b" * 64, "c" * 64, {}, "requester", {},
+        now + timedelta(minutes=5),
+    )
+    approval_request = vc.ApprovalRequest(uid(), inputs, now)
+    record = vc.ApprovalRecord(approval_request, (), vc.FactStatus.REQUESTED, None)
+    requested = vc.OperationFact(
+        uid(), vc.FactKind.APPROVAL_REQUEST, rig.identity.operation_id, 0,
+        "approval-request", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("requester", rig.binding.workspace_id, "human"),
+        vc.FactStatus.REQUESTED, record, now, approval_id=approval_request.approval_id,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((requested,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.CONFIRMED
+    rig.coordination.reserve.assert_called_once()
+    rig.coordination.admit.assert_called_once()
+    rig.transport.patch_config_once.assert_called_once()
+    rig.transport.patch_description_once.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [
+    vc.FactStatus.APPLIED_UNVERIFIED,
+    vc.FactStatus.APPLIED_PARTIAL,
+    vc.FactStatus.CONFIRMED,
+    vc.FactStatus.CONFLICTED,
+])
+def test_execution_outcome_history_routes_to_verify_only_without_second_patch(rig, status):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "execution-outcome", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        status, vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+                                 datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc),
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    rig.coordination.reserve.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+
+
 def test_m08_service_executor_passes_m04_governed_write_identity_check(rig):
     client = Mock()
     client.config.host = "https://example.invalid"

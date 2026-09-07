@@ -24,7 +24,14 @@ class MutationGate:
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
         if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
             raise RuntimeError("Ambiguous or reused request identity")
-        if history.facts:
+        execution_outcomes = {
+            vc.FactStatus.APPLIED_UNVERIFIED,
+            vc.FactStatus.APPLIED_PARTIAL,
+            vc.FactStatus.CONFIRMED,
+            vc.FactStatus.CONFLICTED,
+        }
+        if any(fact.fact_kind == vc.FactKind.OPERATION and fact.status in execution_outcomes
+               for fact in history.facts):
             return self.verify_only(request.identity.operation_id, executor)
         reservation = self.coordination.reserve(request.binding, request.identity, executor)
         snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
