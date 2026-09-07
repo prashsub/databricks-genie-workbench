@@ -1,6 +1,7 @@
 """M04 Job restore and conditional compensation port tests."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
@@ -14,7 +15,7 @@ from backend.tests.vc_fakes.fixtures import actor_fixture
 @pytest.fixture
 def restore_rig(rig):
     source = vc.Version(rig.request.source_version_id, rig.desired,
-        vc.CaptureContext(rig.binding, "historical", __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        vc.CaptureContext(rig.binding, "historical", datetime.now(timezone.utc),
                           "history", actor_fixture(), vc.Origin.WORKBENCH))
     rig.versions[source.version_id] = source
     request = replace(rig.request, operation_type="restore")
@@ -61,3 +62,35 @@ def test_restore_rejects_invalid_job_or_historical_payload(restore_rig, invalid)
     with pytest.raises((PermissionError, ValueError)):
         service.run(request.identity.operation_id, executor)
     rig.transport.patch_config_once.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["authorized", "no_policy", "external_drift", "ambiguous"])
+def test_compensation_requires_preauthorization_and_unchanged_post_stage(restore_rig, case):
+    rig, service, original, dispatcher, identity, validate = restore_rig
+    applied = service.run(original.identity.operation_id, rig.executor)
+    original_fact = rig.facts.append.call_args.args[0]
+    compensation = replace(original, identity=vc.RequestIdentity(uid(), "compensate", "b" * 64),
+        source_version_id=applied.preimage.version_id, expected_base=applied.postimage.state_digest,
+        serialized_space=rig.before.serialized_space, description="old")
+    approval = Mock(spec=vc.ApprovalRecord)
+    approval.request = Mock(spec=vc.ApprovalRequest)
+    approval.request.requested_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    approval.request.inputs = Mock(spec=vc.ApprovalInputs)
+    approval.request.inputs.recovery_policy = {} if case == "no_policy" else {
+        "compensation_operation_id": compensation.identity.operation_id,
+        "compensation_request_digest": compensation.identity.request_digest}
+    rig.facts.get_request.side_effect = lambda operation_id: vc.ApprovedOperation(
+        original, approval) if operation_id == original.identity.operation_id else vc.ApprovedOperation(compensation, None)
+    rig.facts.lookup_request.side_effect = lambda binding, key: vc.RequestHistory(
+        (replace(original_fact, status=vc.FactStatus.APPLIED_UNVERIFIED),) if case == "ambiguous" else (original_fact,),
+        False) if key == original.identity.idempotency_key else vc.RequestHistory((), False)
+    if case == "external_drift":
+        rig.state["description"] = "external edit after restore"
+    if case in {"no_policy", "ambiguous"}:
+        with pytest.raises(PermissionError):
+            service.compensate(original.identity.operation_id, compensation.identity.operation_id, rig.executor)
+    else:
+        result = service.compensate(original.identity.operation_id, compensation.identity.operation_id, rig.executor)
+        assert result is not None, "Compensation must be a fresh guarded operation"
+        assert result.status == (vc.OperationStatus.CONFLICTED if case == "external_drift" else vc.OperationStatus.CONFIRMED)
+    assert rig.transport.patch_config_once.call_count == (2 if case == "authorized" else 1)

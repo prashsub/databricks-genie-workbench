@@ -28,6 +28,28 @@ class RestoreService:
         self.identity.verify_run_as(executor.execution_ref, executor.principal_id)
         return self.gate.execute(request, executor)
 
+    def compensate(self, original_operation_id, compensation_operation_id, executor):
+        original = self.facts.get_request(original_operation_id)
+        compensation = self._load(compensation_operation_id)
+        if original.approval is None or compensation.identity.operation_id == original_operation_id:
+            raise PermissionError("Compensation requires preauthorization and a new operation")
+        policy = original.approval.request.inputs.recovery_policy
+        if (policy.get("compensation_operation_id") != compensation_operation_id
+                or policy.get("compensation_request_digest") != compensation.identity.request_digest
+                or compensation.binding != original.request.binding):
+            raise PermissionError("Compensation is not bound to preauthorized recovery policy")
+        history = self.facts.lookup_request(original.request.binding, original.request.identity.idempotency_key)
+        if history.ambiguous or not history.facts:
+            raise PermissionError("Original outcome is ambiguous")
+        terminal = max(history.facts, key=lambda fact: fact.transition_sequence)
+        if (terminal.status != vc.FactStatus.CONFIRMED or not terminal.post_version_id
+                or original.approval.request.requested_at >= terminal.recorded_at):
+            raise PermissionError("Unresolved original send cannot authorize compensation")
+        post = self.ledger.get_version(original.request.binding, terminal.post_version_id)
+        if post.snapshot.state_digest != compensation.expected_base:
+            raise PermissionError("Compensation must bind the exact original post-stage")
+        return self.run(compensation_operation_id, executor)
+
     def _load(self, operation_id):
         if self.flags.enabled("vc_restore_enabled") is not True:
             raise PermissionError("VC restore writes disabled")
