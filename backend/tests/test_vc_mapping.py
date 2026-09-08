@@ -116,3 +116,34 @@ def test_join_specs_and_sql_function_identifiers_map_exactly_or_fail_closed(pack
     assert instructions['join_specs'][0]['left']['identifier'] == 'prod.sales.orders'
     assert instructions['join_specs'][0]['right']['identifier'] == 'prod.sales.customers'
     assert instructions['sql_functions'][0]['identifier'] == 'prod.sales.fiscal_quarter'
+
+
+@pytest.mark.parametrize('override', [False, True])
+def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(package_rig, override):
+    rig = package_rig
+    condition = '`dev`.`sales`.`orders`.`customer_id` = `customers`.`customer_id`'
+    annotation = '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'
+    measure = 'SUM(dev.sales.orders.amount)'
+    mappings = {**dict(rig.mapping.mappings), 'dev.sales.customers': 'prod.sales.customers'}
+    if override:
+        mappings.update({'sql:' + condition: condition.replace('dev', 'prod'),
+                         'sql:' + measure: 'SUM(prod.sales.orders.amount)'})
+    mapping = replace(rig.mapping, mappings=mappings)
+    artifact = {'serialized_space': {'instructions': {
+        'join_specs': [{'left': {'identifier': 'dev.sales.orders'},
+                        'right': {'identifier': 'dev.sales.customers'},
+                        'sql': [condition, annotation]}],
+        'sql_snippets': {'measures': [{'sql': [measure]}],
+                         'filters': [{'sql': ['dev.sales.orders.amount > 0']}],
+                         'expressions': [{'sql': ['YEAR(dev.sales.orders.order_date)']}]},
+        'example_question_sqls': [{'sql': ['SELECT *\n', 'FROM dev.sales.orders']}]
+    }}}
+    original = deepcopy(artifact)
+    result = MappingTransformer().render(artifact, mapping, rig.target).serialized_space['instructions']
+    assert result['join_specs'][0]['sql'] == [condition.replace('`dev`', '`prod`'), annotation]
+    assert len(result['join_specs'][0]['sql']) == 2
+    assert result['sql_snippets']['measures'][0]['sql'] == ['SUM(prod.sales.orders.amount)']
+    assert result['sql_snippets']['filters'][0]['sql'] == ['prod.sales.orders.amount > 0']
+    assert result['sql_snippets']['expressions'][0]['sql'] == ['YEAR(prod.sales.orders.order_date)']
+    assert result['example_question_sqls'][0]['sql'] == ['SELECT *\n', 'FROM prod.sales.orders']
+    assert artifact == original
