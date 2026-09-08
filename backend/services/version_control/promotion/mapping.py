@@ -138,19 +138,25 @@ def map_executable_fields(value, mappings, path=()):
                                       or not all(isinstance(item, str) for item in child)):
                     raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
                 if isinstance(child, list):
-                    rendered = []
-                    for index, fragment_sql in enumerate(child):
-                        if join_fragment and index > 0:
-                            if not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--', fragment_sql):
-                                raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
-                            rendered.append(fragment_sql)
-                        else:
-                            rendered.append(map_sql(fragment_sql, mappings,
-                                                    fragment=fragment_mode or index > 0))
-                    # Validate statement-wide guards across clause-array boundaries too.
-                    if not fragment_mode:
-                        map_sql(''.join(rendered), mappings)
-                    value[key] = rendered
+                    if join_fragment and not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--', child[1]):
+                        raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
+                    # Genie concatenates arrays without separators. Parse and map that
+                    # exact SQL once, so split tokens cannot evade guards or mapping.
+                    rendered_sql = map_sql(''.join(child), mappings, fragment=fragment_mode)
+                    if join_fragment:
+                        # The annotation is a schema element, not an arbitrary SQL boundary.
+                        if not rendered_sql.endswith(child[1]):
+                            raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
+                        value[key] = [rendered_sql[:-len(child[1])], child[1]]
+                    else:
+                        rendered = []
+                        offset = 0
+                        for fragment_sql in child[:-1]:
+                            end = offset + len(fragment_sql)
+                            rendered.append(rendered_sql[offset:end])
+                            offset = end
+                        rendered.append(rendered_sql[offset:])
+                        value[key] = rendered
                 else:
                     value[key] = map_sql(child, mappings, fragment=fragment_mode)
             else:

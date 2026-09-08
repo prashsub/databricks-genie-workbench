@@ -192,3 +192,24 @@ def test_join_spec_sql_requires_two_element_array(package_rig, sql):
     artifact = {'serialized_space': {'instructions': {'join_specs': [{'sql': sql}]}}}
     with pytest.raises(ValueError, match='join_specs.sql requires'):
         MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+
+
+@pytest.mark.parametrize(('elements', 'expected'), [
+    (['de', 'v.internal.pii_raw.amount'], None),
+    (['de', 'v.sales.orders.amount'], 'prod.sales.orders.amount'),
+    (['1 UNI', 'ON SELECT 1'], None),
+    (['1 DR', 'OP TAB', 'LE prod.sales.orders'], None),
+])
+def test_snippet_sql_arrays_are_validated_after_concatenation(package_rig, elements, expected):
+    artifact = {'serialized_space': {'instructions': {'sql_snippets': {
+        'measures': [{'sql': list(elements)}]}}}}
+    if expected is None:
+        with pytest.raises(ValueError):
+            MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+        return
+    rendered = MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+    sql = rendered.serialized_space['instructions']['sql_snippets']['measures'][0]['sql']
+    assert ''.join(sql) == expected
+    assert len(sql) == len(elements)
+    assert sql[0] == expected[:len(elements[0])]
+    assert artifact['serialized_space']['instructions']['sql_snippets']['measures'][0]['sql'] == elements
