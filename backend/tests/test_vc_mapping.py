@@ -147,3 +147,10 @@ def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(
     assert result['sql_snippets']['expressions'][0]['sql'] == ['YEAR(prod.sales.orders.order_date)']
     assert result['example_question_sqls'][0]['sql'] == ['SELECT *\n', 'FROM prod.sales.orders']
     assert artifact == original
+
+
+@pytest.mark.parametrize('key', ['sample_warehouse_id', 'folder', 'principals'])
+def test_nested_environment_bindings_cannot_bypass_render(package_rig, key):
+    artifact = {'serialized_space': {'config': {'nested': [{key: 'source-binding'}]}}}
+    with pytest.raises(ValueError, match='Environment bindings'):
+        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)

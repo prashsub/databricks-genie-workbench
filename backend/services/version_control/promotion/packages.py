@@ -4,7 +4,7 @@ import json
 from hashlib import sha256
 
 from backend.services.version_control import contracts as vc
-from .mapping import structured_identifiers
+from .mapping import ENVIRONMENT_KEYS, structured_identifiers
 
 
 def encode(value):
@@ -31,10 +31,18 @@ def policy_digests(policy):
             digest(policy.thresholds.get('benchmark', {})))
 
 
+def strip_environment(value):
+    """Drop source bindings at any depth before portable bytes are hashed/shared."""
+    if isinstance(value, dict):
+        return {key: strip_environment(child) for key, child in value.items()
+                if key not in ENVIRONMENT_KEYS}
+    if isinstance(value, list):
+        return [strip_environment(child) for child in value]
+    return value
+
+
 def portable(snapshot):
-    content = vc.to_wire(snapshot.serialized_space)
-    for key in ('workspace_id', 'space_id', 'warehouse_id', 'parent_path', 'folder', 'permissions'):
-        content.pop(key, None)
+    content = strip_environment(vc.to_wire(snapshot.serialized_space))
     return {'serialized_space': content, 'description': snapshot.restorable_metadata.get('description')}
 
 

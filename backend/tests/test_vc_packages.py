@@ -1,6 +1,7 @@
 """M07 immutable package contract tests."""
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from types import SimpleNamespace
@@ -64,6 +65,17 @@ def package_rig():
 
 def test_package_pins_immutable_source_and_excludes_source_environment_ids(package_rig):
     rig = package_rig
+    envelope = vc.to_wire(rig.version.snapshot.response_envelope)
+    content = envelope['serialized_space']
+    content['config'] = {'warehouse_id': 'nested-source-warehouse',
+                         'nested': [{'workspace_id': 'nested-source-workspace',
+                                     'space_id': 'nested-source-space',
+                                     'parent_path': '/nested/source/folder',
+                                     'folder': '/nested/source/legacy-folder',
+                                     'permissions': ['source-grant'], 'principals': ['source-principal']}]}
+    content['data_sources']['tables'][0]['sample_warehouse_id'] = 'source-sample-warehouse'
+    rig.version = replace(rig.version, snapshot=rig.service.canonicalizer.observe(envelope))
+    rig.ledger.get_version.return_value = rig.version
     reference = rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
     manifest = json.loads(rig.store.read(reference.manifest_uri))
     prefix = reference.manifest_uri.rsplit('/', 1)[0]
@@ -71,7 +83,18 @@ def test_package_pins_immutable_source_and_excludes_source_environment_ids(packa
     assert manifest['source_version_id'] == rig.version.version_id
     assert manifest['raw_source_digest'] == rig.version.snapshot.raw_state_digest
     assert manifest['package_digest'] == reference.package_digest
-    assert all(value not in artifact.decode() for value in ('source-space', 'source-warehouse', '/source/folder', 'workspace_id'))
+    seeded_values = ('nested-source-warehouse', 'nested-source-workspace', 'nested-source-space',
+                     '/nested/source/folder', '/nested/source/legacy-folder', 'source-grant',
+                     'source-principal', 'source-sample-warehouse')
+    # Prove these bindings really reached the snapshot, not just its GET envelope.
+    assert all(value in json.dumps(vc.to_wire(rig.version.snapshot.serialized_space)) for value in seeded_values)
+    assert all(value not in artifact.decode() for value in seeded_values)
+    from backend.services.version_control.promotion.packages import encode
+    expected = {'serialized_space': {'version': 2, 'config': {'nested': [{}]},
+                'data_sources': {'tables': [{'identifier': 'dev.sales.orders'}]}}, 'description': 'Sales'}
+    assert artifact == encode(expected)
+    assert manifest['artifact_digest'] == sha256(encode(expected)).hexdigest()
+    assert 'source-sample-warehouse' in json.dumps(vc.to_wire(rig.version.snapshot.serialized_space))
     assert json.loads(artifact)['serialized_space']['data_sources']['tables'][0]['identifier'] == 'dev.sales.orders'
     for filename, digest in manifest['file_digests'].items():
         assert sha256(rig.store.read(prefix + '/' + filename)).hexdigest() == digest
