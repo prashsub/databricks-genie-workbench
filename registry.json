@@ -174,16 +174,14 @@
     "review_conv": "3773493063976495 (claude_code)"
   },
   "m07_redo": {
-    "status": "dispatched_astra",
-    "conv": "3773493063976496",
-    "worker": "pi",
-    "model": "system.ai.gpt-6-astra",
-    "base": "d1163a3",
-    "specs": [
-      "m07_fixspec.md B1-B4",
-      "m07_fix2_spec.md F1/F2"
-    ],
-    "note": "routed to pi/Astra because codex terminal-boot degraded (httpx ReadTimeout x3)"
+    "status": "fix_complete_verified_in_rereview",
+    "conv": "3773493063976496 (pi/system.ai.gpt-6-astra, done)",
+    "head": "d1a489e",
+    "branch": "vc/m07-astra (pushed)",
+    "commits": "B1 244b180, B2 89a150e, B3 1008a6b, B4 a20c509, F1 3aead70, F2 d1a489e",
+    "verified": "107 M07 + 1182 full offline pass, F1+F2 source-leak fixes mutation-confirmed, owned-paths clean (7 files)",
+    "review_conv": "3773493063976501 (claude_code)",
+    "note": "old origin/vc/m07=1491eac is superseded non-Astra (==vc/m07-nonastra-ref); Astra redo pushed to vc/m07-astra since branch delete blocked by policy"
   },
   "infra_note": "codex Native terminal failed to start x3 (control-plane httpx.ReadTimeout in session-mirroring, NOT missing CLI, NOT Astra). Workaround: route Astra implement work to pi (headless, system.ai.gpt-6-astra) - still Astra-compliant. Both Astra endpoints also intermittently 429."
 }
