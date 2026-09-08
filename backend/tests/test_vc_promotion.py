@@ -130,6 +130,41 @@ def test_preflight_checks_executor_and_consumer_dependencies_and_permissions(pro
     rig.gate.execute.assert_not_called()
 
 
+def test_dependency_preflight_checks_join_relations_and_sql_functions(promotion_rig):
+    rig = promotion_rig
+    serialized_space = {
+        'version': 2,
+        'data_sources': {'tables': [{'identifier': 'dev.sales.orders'}]},
+        'instructions': {
+            'join_specs': [{
+                'left': {'identifier': 'dev.sales.orders'},
+                'right': {'identifier': 'dev.sales.customers'},
+            }],
+            'sql_functions': [{'identifier': 'dev.sales.fiscal_quarter'}],
+        },
+    }
+    rig.version = replace(rig.version, snapshot=rig.service.canonicalizer.observe({
+        'serialized_space': serialized_space,
+        'description': 'Sales',
+    }))
+    rig.ledger.get_version.return_value = rig.version
+    rig.mapping = replace(rig.mapping, mappings={
+        **dict(rig.mapping.mappings),
+        'dev.sales.customers': 'prod.sales.customers',
+        'dev.sales.fiscal_quarter': 'prod.sales.fiscal_quarter',
+    })
+    rig.reference = rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
+    rig.releases.get.return_value.package = rig.reference
+
+    rig.service.preflight(rig.request.identity.operation_id, rig.executor)
+
+    checked = {(call.args[2], call.args[3], call.args[4]) for call in rig.dependencies.check.call_args_list}
+    for principal in ('target-sp', 'target-analysts'):
+        assert (principal, 'table', 'prod.sales.orders') in checked
+        assert (principal, 'table', 'prod.sales.customers') in checked
+        assert (principal, 'function', 'prod.sales.fiscal_quarter') in checked
+
+
 @pytest.mark.parametrize('case', ['missing', 'revision', 'drift', 'busy', 'stale', 'quarantined', 'unknown'])
 def test_target_drift_or_missing_pre_enrollment_blocks_without_create(promotion_rig, case):
     rig = promotion_rig

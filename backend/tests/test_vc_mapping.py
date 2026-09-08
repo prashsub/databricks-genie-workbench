@@ -29,6 +29,32 @@ def test_structured_tables_metric_views_catalogs_schemas_map_exactly(package_rig
     assert artifact == original
 
 
+def test_join_specs_and_sql_function_identifiers_map_exactly_or_fail_closed(package_rig):
+    mappings = {
+        **dict(package_rig.mapping.mappings),
+        'dev.sales.customers': 'prod.sales.customers',
+        'dev.sales.fiscal_quarter': 'prod.sales.fiscal_quarter',
+    }
+    mapping = replace(package_rig.mapping, mappings=mappings)
+    artifact = {'serialized_space': {'instructions': {
+        'join_specs': [{
+            'left': {'identifier': 'dev.sales.orders'},
+            'right': {'identifier': 'dev.sales.customers'},
+        }],
+        'sql_functions': [{'identifier': 'dev.sales.fiscal_quarter'}],
+    }}}
+
+    rendered = MappingTransformer().render(artifact, mapping, package_rig.target).serialized_space
+
+    assert rendered['instructions']['join_specs'][0]['left']['identifier'] == 'prod.sales.orders'
+    assert rendered['instructions']['join_specs'][0]['right']['identifier'] == 'prod.sales.customers'
+    assert rendered['instructions']['sql_functions'][0]['identifier'] == 'prod.sales.fiscal_quarter'
+
+    artifact['serialized_space']['instructions']['future_field'] = [{'identifier': 'dev.sales.orders'}]
+    with pytest.raises(ValueError, match='identifier'):
+        MappingTransformer().render(artifact, mapping, package_rig.target)
+
+
 def test_sql_identifier_mapping_preserves_literals_comments_and_instruction_prose(package_rig):
     rig = package_rig
     sql = "SELECT 'dev.sales.orders', total FROM `dev`.`sales`.`orders` -- dev.sales.orders\n/* dev.sales.orders */"

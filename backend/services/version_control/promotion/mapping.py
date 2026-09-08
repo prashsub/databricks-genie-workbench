@@ -15,6 +15,38 @@ class RenderedPayload:
 
 TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*|\s+|.")
 IDENTIFIER = re.compile(r'(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*)\Z')
+IDENTIFIER_PATHS = (
+    (('data_sources', 'tables', '*', 'identifier'), 'table'),
+    (('data_sources', 'metric_views', '*', 'identifier'), 'metric_view'),
+    (('data_sources', 'catalogs', '*', 'identifier'), 'catalog'),
+    (('data_sources', 'schemas', '*', 'identifier'), 'schema'),
+    (('instructions', 'join_specs', '*', 'left', 'identifier'), 'table'),
+    (('instructions', 'join_specs', '*', 'right', 'identifier'), 'table'),
+    (('instructions', 'sql_functions', '*', 'identifier'), 'function'),
+)
+
+
+def identifier_fields(value, path=()):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = path + (key,)
+            if key == 'identifier':
+                matches = [kind for pattern, kind in IDENTIFIER_PATHS
+                           if len(pattern) == len(child_path)
+                           and all(expected == '*' or expected == actual
+                                   for expected, actual in zip(pattern, child_path))]
+                if len(matches) != 1 or not isinstance(child, str):
+                    raise ValueError('Unrecognized structured identifier path')
+                yield matches[0], value, key
+            else:
+                yield from identifier_fields(child, child_path)
+    elif isinstance(value, list):
+        for child in value:
+            yield from identifier_fields(child, path + ('*',))
+
+
+def identifier_resources(value):
+    return [(kind, parent[key]) for kind, parent, key in identifier_fields(value)]
 
 
 def map_sql(sql, mappings):
@@ -105,13 +137,11 @@ class MappingTransformer:
         if mapping.transformer_version != self.version:
             raise ValueError('Unsupported mapping transformer version')
         content = vc.to_wire(artifact['serialized_space'])
-        sources = content.get('data_sources', {})
-        for kind in ('tables', 'metric_views', 'catalogs', 'schemas'):
-            for entry in sources.get(kind, []):
-                identifier = entry['identifier']
-                if identifier not in mapping.mappings and identifier not in mapping.mappings.values():
-                    raise ValueError('Unresolved structured identifier')
-                entry['identifier'] = mapping.mappings.get(identifier, identifier)
+        for _, parent, key in identifier_fields(content):
+            identifier = parent[key]
+            if identifier not in mapping.mappings and identifier not in mapping.mappings.values():
+                raise ValueError('Unresolved structured identifier')
+            parent[key] = mapping.mappings.get(identifier, identifier)
         map_executable_fields(content, mapping.mappings)
         environment = {key.removeprefix('target:'): value for key, value in mapping.mappings.items()
                        if key in {'target:warehouse_id', 'target:parent_path'}}

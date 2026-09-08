@@ -4,6 +4,7 @@ import json
 from hashlib import sha256
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control.promotion.mapping import identifier_resources
 
 
 def encode(value):
@@ -42,14 +43,13 @@ def build(version, mapping, policy):
     artifact_bytes = encode(artifact)
     files = {'artifact.json': artifact_bytes, 'mapping.json': encode(mapping), 'validation.json': encode(policy)}
     validation, benchmark = policy_digests(policy)
-    sources = artifact['serialized_space'].get('data_sources', {})
     manifest = dict(schema_version='VC/1.0', space_key=version.context.binding.space_key,
         source_version_id=version.version_id, raw_source_digest=version.snapshot.raw_state_digest,
         source_fingerprints=vc.to_wire(version.snapshot.fingerprints),
         artifact_digest=sha256(artifact_bytes).hexdigest(), mapping_digest=mapping_digest(mapping),
         transformer_version=mapping.transformer_version,
-        required_sources=sorted({entry['identifier'] for kind in ('tables', 'metric_views')
-                                 for entry in sources.get(kind, [])}),
+        required_sources=sorted({identifier for _, identifier
+                                 in identifier_resources(artifact['serialized_space'])}),
         validation_policy_digest=validation, benchmark_policy_digest=benchmark,
         ownership={'space_key': version.context.binding.space_key},
         file_digests={name: sha256(content).hexdigest() for name, content in files.items()})
