@@ -1,0 +1,466 @@
+diff --git a/backend/services/version_control/promotion/__init__.py b/backend/services/version_control/promotion/__init__.py
+index 6624235..5b5e2ad 100644
+--- a/backend/services/version_control/promotion/__init__.py
++++ b/backend/services/version_control/promotion/__init__.py
+@@ -7,6 +7,7 @@ import json
+ from backend.services.version_control import contracts as vc
+ from backend.services.version_control.platform.identity import canonical_host
+ from .packages import build, digest, encode, immutable_put, mapping_digest, policy_digests, portable
++from .mapping import identifier_resources
+ from . import receipts
+ from .transport import separate_volumes
+ 
+@@ -120,10 +121,7 @@ class PromotionService:
+         if not all(environment.get(key) for key in ('warehouse_id', 'parent_path', 'consumers')):
+             raise PermissionError('Explicit target warehouse, folder and consumers required')
+         resources = [('warehouse', environment['warehouse_id']), ('folder', environment['parent_path'])]
+-        sources = rendered.serialized_space.get('data_sources', {})
+-        for collection, kind in (('tables', 'table'), ('metric_views', 'metric_view'),
+-                                 ('catalogs', 'catalog'), ('schemas', 'schema')):
+-            resources.extend((kind, entry['identifier']) for entry in sources.get(collection, []))
++        resources.extend(identifier_resources(rendered.serialized_space))
+         checks = []
+         for principal in (executor.principal_id, *environment['consumers']):
+             for kind, identifier in resources:
+diff --git a/backend/services/version_control/promotion/mapping.py b/backend/services/version_control/promotion/mapping.py
+index 37b59ed..578bc82 100644
+--- a/backend/services/version_control/promotion/mapping.py
++++ b/backend/services/version_control/promotion/mapping.py
+@@ -15,17 +15,55 @@ class RenderedPayload:
+ 
+ TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*|\s+|.")
+ IDENTIFIER = re.compile(r'(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*)\Z')
++ENVIRONMENT_BINDING_KEYS = frozenset({
++    'workspace_id', 'space_id', 'warehouse_id', 'sample_warehouse_id', 'parent_path',
++    'folder', 'permissions', 'principals',
++})
++IDENTIFIER_PATHS = (
++    (('data_sources', 'tables', '*', 'identifier'), 'table'),
++    (('data_sources', 'metric_views', '*', 'identifier'), 'metric_view'),
++    (('data_sources', 'catalogs', '*', 'identifier'), 'catalog'),
++    (('data_sources', 'schemas', '*', 'identifier'), 'schema'),
++    (('instructions', 'join_specs', '*', 'left', 'identifier'), 'table'),
++    (('instructions', 'join_specs', '*', 'right', 'identifier'), 'table'),
++    (('instructions', 'sql_functions', '*', 'identifier'), 'function'),
++)
+ 
+ 
+-def map_sql(sql, mappings):
+-    override = mappings.get('sql:' + sql)
++def identifier_fields(value, path=()):
++    if isinstance(value, dict):
++        for key, child in value.items():
++            child_path = path + (key,)
++            if key == 'identifier':
++                matches = [kind for pattern, kind in IDENTIFIER_PATHS
++                           if len(pattern) == len(child_path)
++                           and all(expected == '*' or expected == actual
++                                   for expected, actual in zip(pattern, child_path))]
++                if len(matches) != 1 or not isinstance(child, str):
++                    raise ValueError('Unrecognized structured identifier path')
++                yield matches[0], value, key
++            else:
++                yield from identifier_fields(child, child_path)
++    elif isinstance(value, list):
++        for child in value:
++            yield from identifier_fields(child, path + ('*',))
++
++
++def identifier_resources(value):
++    return [(kind, parent[key]) for kind, parent, key in identifier_fields(value)]
++
++
++def map_sql(sql, mappings, fragment=False):
++    override_prefix = 'fragment:' if fragment else 'sql:'
++    override = mappings.get(override_prefix + sql)
+     if override is not None:
+-        return map_sql(override, {key: value for key, value in mappings.items() if not key.startswith('sql:')})
++        return map_sql(override, {key: value for key, value in mappings.items()
++                                  if not key.startswith(('sql:', 'fragment:'))}, fragment=fragment)
+     tokens = TOKEN.findall(sql)
+     if any(token in {"'", '`'} for token in tokens):
+         raise ValueError('Unterminated quoted SQL token')
+     code = [token for token in tokens if not token.isspace() and not token.startswith(('--', '/*', "'"))]
+-    if (not code or code[0].upper() != 'SELECT'
++    if (not code or (not fragment and code[0].upper() != 'SELECT')
+             or any(token.upper() in {'IDENTIFIER', 'EXECUTE', 'IMMEDIATE', 'WITH', 'UNION', 'PIVOT',
+                                      'LATERAL', 'TABLE', 'USE', 'INSERT', 'UPDATE', 'DELETE', 'DROP'} for token in code)
+             or any(token in {';', '"', "'", '`', '$', '\\', '{', '}'} for token in code)
+@@ -35,8 +73,10 @@ def map_sql(sql, mappings):
+     position = 0
+     relation_pending = False
+     relation_section = False
+-    source_catalogs = {key.split('.')[0] for key in mappings if not key.startswith('sql:')}
+-    target_identifiers = set(mappings.values())
++    identifier_mappings = {key: value for key, value in mappings.items()
++                           if not key.startswith(('sql:', 'fragment:', 'target:'))}
++    source_catalogs = {key.split('.')[0] for key in identifier_mappings}
++    target_identifiers = set(identifier_mappings.values())
+     while position < len(tokens):
+         token = tokens[position]
+         if token.isspace() or token.startswith(('--', '/*', "'")):
+@@ -52,12 +92,16 @@ def map_sql(sql, mappings):
+         identifier = '.'.join(part.strip('`').replace('``', '`') for part in parts)
+         if any('.' in part.strip('`') for part in parts):
+             raise ValueError('Ambiguous quoted qualified identifier')
++        mapped_prefix = next((source for source in sorted(identifier_mappings, key=len, reverse=True)
++                              if identifier == source or identifier.startswith(source + '.')), None)
++        target_prefix = next((target for target in sorted(target_identifiers, key=len, reverse=True)
++                              if identifier == target or identifier.startswith(target + '.')), None)
+         if relation_pending:
+-            if len(parts) != 3 or (identifier not in mappings and identifier not in target_identifiers):
++            if len(parts) < 3 or (mapped_prefix is None and target_prefix is None):
+                 raise ValueError('Unresolved relation requires an exact reviewed mapping')
+             relation_pending = False
+         if (len(parts) > 1 and parts[0].strip('`') in source_catalogs
+-                and identifier not in mappings and identifier not in target_identifiers):
++                and mapped_prefix is None and target_prefix is None):
+             raise ValueError('Unresolved source identifier')
+         if token.upper() in {'FROM', 'JOIN'}:
+             relation_pending = True
+@@ -66,8 +110,8 @@ def map_sql(sql, mappings):
+             relation_section = False
+         if token == ',' and relation_section:
+             raise ValueError('Comma relations require reviewed explicit JOIN syntax')
+-        if len(parts) > 1 and identifier in mappings:
+-            target = mappings[identifier].split('.')
++        if len(parts) > 1 and mapped_prefix is not None:
++            target = identifier_mappings[mapped_prefix].split('.') + identifier.split('.')[len(mapped_prefix.split('.')):]
+             output.append('.'.join(f'`{part}`' for part in target) if any(part.startswith('`') for part in parts)
+                           else '.'.join(target))
+         else:
+@@ -78,22 +122,35 @@ def map_sql(sql, mappings):
+     return ''.join(output)
+ 
+ 
+-def map_executable_fields(value, mappings):
++def map_executable_fields(value, mappings, path=()):
+     if isinstance(value, dict):
+         for key, child in value.items():
+-            if key in {'warehouse_id', 'workspace_id', 'space_id', 'parent_path', 'permissions', 'principals'}:
++            child_path = path + (key,)
++            if key in ENVIRONMENT_BINDING_KEYS:
+                 raise ValueError('Environment bindings cannot appear in portable content')
+             if key in {'expression', 'sql_expression', 'query', 'function_name'}:
+                 raise ValueError('Unsupported executable field requires schema review')
+             if key == 'sql' or (key == 'content' and value.get('format') == 'SQL'):
+-                fragments = isinstance(child, list)
+-                rendered = map_sql(''.join(child) if fragments else child, mappings)
+-                value[key] = [rendered] if fragments else rendered
++                join_fragment = child_path == ('instructions', 'join_specs', '*', 'sql')
++                snippet_fragment = (len(child_path) == 5 and child_path[:2] == ('instructions', 'sql_snippets')
++                                    and child_path[2] in {'filters', 'expressions', 'measures'}
++                                    and child_path[3:] == ('*', 'sql'))
++                if isinstance(child, list):
++                    rendered = []
++                    for index, fragment_sql in enumerate(child):
++                        if join_fragment and index > 0:
++                            rendered.append(fragment_sql)
++                        else:
++                            rendered.append(map_sql(fragment_sql, mappings,
++                                                    fragment=join_fragment or snippet_fragment or index > 0))
++                    value[key] = rendered
++                else:
++                    value[key] = map_sql(child, mappings, fragment=join_fragment or snippet_fragment)
+             else:
+-                map_executable_fields(child, mappings)
++                map_executable_fields(child, mappings, child_path)
+     elif isinstance(value, list):
+         for child in value:
+-            map_executable_fields(child, mappings)
++            map_executable_fields(child, mappings, path + ('*',))
+ 
+ 
+ class MappingTransformer:
+@@ -105,13 +162,11 @@ class MappingTransformer:
+         if mapping.transformer_version != self.version:
+             raise ValueError('Unsupported mapping transformer version')
+         content = vc.to_wire(artifact['serialized_space'])
+-        sources = content.get('data_sources', {})
+-        for kind in ('tables', 'metric_views', 'catalogs', 'schemas'):
+-            for entry in sources.get(kind, []):
+-                identifier = entry['identifier']
+-                if identifier not in mapping.mappings and identifier not in mapping.mappings.values():
+-                    raise ValueError('Unresolved structured identifier')
+-                entry['identifier'] = mapping.mappings.get(identifier, identifier)
++        for _, parent, key in identifier_fields(content):
++            identifier = parent[key]
++            if identifier not in mapping.mappings and identifier not in mapping.mappings.values():
++                raise ValueError('Unresolved structured identifier')
++            parent[key] = mapping.mappings.get(identifier, identifier)
+         map_executable_fields(content, mapping.mappings)
+         environment = {key.removeprefix('target:'): value for key, value in mapping.mappings.items()
+                        if key in {'target:warehouse_id', 'target:parent_path'}}
+diff --git a/backend/services/version_control/promotion/packages.py b/backend/services/version_control/promotion/packages.py
+index d1a22ac..364c5c8 100644
+--- a/backend/services/version_control/promotion/packages.py
++++ b/backend/services/version_control/promotion/packages.py
+@@ -4,6 +4,7 @@ import json
+ from hashlib import sha256
+ 
+ from backend.services.version_control import contracts as vc
++from backend.services.version_control.promotion.mapping import ENVIRONMENT_BINDING_KEYS, identifier_resources
+ 
+ 
+ def encode(value):
+@@ -31,9 +32,15 @@ def policy_digests(policy):
+ 
+ 
+ def portable(snapshot):
+-    content = vc.to_wire(snapshot.serialized_space)
+-    for key in ('workspace_id', 'space_id', 'warehouse_id', 'parent_path', 'folder', 'permissions'):
+-        content.pop(key, None)
++    def strip_environment(value):
++        if isinstance(value, dict):
++            return {key: strip_environment(child) for key, child in value.items()
++                    if key not in ENVIRONMENT_BINDING_KEYS}
++        if isinstance(value, list):
++            return [strip_environment(child) for child in value]
++        return value
++
++    content = strip_environment(vc.to_wire(snapshot.serialized_space))
+     return {'serialized_space': content, 'description': snapshot.restorable_metadata.get('description')}
+ 
+ 
+@@ -42,14 +49,13 @@ def build(version, mapping, policy):
+     artifact_bytes = encode(artifact)
+     files = {'artifact.json': artifact_bytes, 'mapping.json': encode(mapping), 'validation.json': encode(policy)}
+     validation, benchmark = policy_digests(policy)
+-    sources = artifact['serialized_space'].get('data_sources', {})
+     manifest = dict(schema_version='VC/1.0', space_key=version.context.binding.space_key,
+         source_version_id=version.version_id, raw_source_digest=version.snapshot.raw_state_digest,
+         source_fingerprints=vc.to_wire(version.snapshot.fingerprints),
+         artifact_digest=sha256(artifact_bytes).hexdigest(), mapping_digest=mapping_digest(mapping),
+         transformer_version=mapping.transformer_version,
+-        required_sources=sorted({entry['identifier'] for kind in ('tables', 'metric_views')
+-                                 for entry in sources.get(kind, [])}),
++        required_sources=sorted({identifier for _, identifier
++                                 in identifier_resources(artifact['serialized_space'])}),
+         validation_policy_digest=validation, benchmark_policy_digest=benchmark,
+         ownership={'space_key': version.context.binding.space_key},
+         file_digests={name: sha256(content).hexdigest() for name, content in files.items()})
+diff --git a/backend/tests/test_vc_dispatch.py b/backend/tests/test_vc_dispatch.py
+index 3342fd5..2a81935 100644
+--- a/backend/tests/test_vc_dispatch.py
++++ b/backend/tests/test_vc_dispatch.py
+@@ -1,16 +1,59 @@
+ """Target operation polling and native Job retry tests."""
+ 
+ from dataclasses import replace
++from datetime import datetime, timezone
++import json
+ from types import SimpleNamespace
+ from unittest.mock import Mock
+ 
+ import pytest
+ 
+ from backend.services.version_control import contracts as vc
++from backend.services.version_control.promotion.dispatch import PendingOperations
++from backend.services.version_control.promotion.releases import (
++    ADMISSION_REFERENCE,
++    ReleaseCatalog,
++    fact_for,
++)
+ from backend.tests.test_vc_packages import package_rig, uid
+ from backend.tests.test_vc_promotion import promotion_rig, approve
+ 
+ 
++def test_pending_projection_admits_only_admission_referenced_local_promotion_facts(promotion_rig):
++    rig = promotion_rig
++    actor = vc.ActorContext('target-human', 'target', 'human')
++    evidence = vc.StageEvidence('VC/1.0', vc.PatchStage.CONFIG_PENDING,
++                                datetime.now(timezone.utc), 'a' * 64, None)
++    admitted = replace(fact_for(rig.request, actor, vc.FactKind.OPERATION, evidence),
++                       approval_reference=ADMISSION_REFERENCE)
++    validated = replace(admitted, event_id=uid(7), operation_id=uid(7), approval_reference=None)
++    foreign = replace(admitted, event_id=uid(8), operation_id=uid(8), binding=rig.source)
++    non_promotion = replace(admitted, event_id=uid(9), operation_id=uid(9), operation_type='restore')
++    projection = PendingOperations(lambda workspace_id, cursor: vc.Page(
++        (admitted, validated, foreign, non_promotion), 'next'))
++
++    page = projection.scan('target', 'cursor')
++
++    assert [item.operation_id for item in page.items] == [admitted.operation_id]
++    assert page.next_cursor == 'next'
++
++
++def test_release_catalog_rejects_conflicting_release_facts(promotion_rig):
++    rig = promotion_rig
++    actor = vc.ActorContext('target-human', 'target', 'human')
++    manifest = vc.from_wire(vc.PackageManifest, json.loads(rig.store.read(rig.reference.manifest_uri)))
++    release = fact_for(rig.request, actor, vc.FactKind.RELEASE, manifest)
++    conflicting = replace(release, release_id=uid(7))
++    catalog = ReleaseCatalog(lambda operation_id: [release, conflicting],
++                             rig.service.outbound_volume, rig.executor.host)
++
++    with pytest.raises(ValueError, match='Ambiguous'):
++        catalog.get(rig.request.identity.operation_id)
++    with pytest.raises(LookupError, match='not registered'):
++        ReleaseCatalog(lambda operation_id: [], rig.service.outbound_volume,
++                       rig.executor.host).get(rig.request.identity.operation_id)
++
++
+ def test_polling_discovers_only_local_approved_pending_operations(promotion_rig):
+     rig = promotion_rig
+     approve(rig)
+diff --git a/backend/tests/test_vc_mapping.py b/backend/tests/test_vc_mapping.py
+index a8f760b..4effb8e 100644
+--- a/backend/tests/test_vc_mapping.py
++++ b/backend/tests/test_vc_mapping.py
+@@ -29,6 +29,32 @@ def test_structured_tables_metric_views_catalogs_schemas_map_exactly(package_rig
+     assert artifact == original
+ 
+ 
++def test_join_specs_and_sql_function_identifiers_map_exactly_or_fail_closed(package_rig):
++    mappings = {
++        **dict(package_rig.mapping.mappings),
++        'dev.sales.customers': 'prod.sales.customers',
++        'dev.sales.fiscal_quarter': 'prod.sales.fiscal_quarter',
++    }
++    mapping = replace(package_rig.mapping, mappings=mappings)
++    artifact = {'serialized_space': {'instructions': {
++        'join_specs': [{
++            'left': {'identifier': 'dev.sales.orders'},
++            'right': {'identifier': 'dev.sales.customers'},
++        }],
++        'sql_functions': [{'identifier': 'dev.sales.fiscal_quarter'}],
++    }}}
++
++    rendered = MappingTransformer().render(artifact, mapping, package_rig.target).serialized_space
++
++    assert rendered['instructions']['join_specs'][0]['left']['identifier'] == 'prod.sales.orders'
++    assert rendered['instructions']['join_specs'][0]['right']['identifier'] == 'prod.sales.customers'
++    assert rendered['instructions']['sql_functions'][0]['identifier'] == 'prod.sales.fiscal_quarter'
++
++    artifact['serialized_space']['instructions']['future_field'] = [{'identifier': 'dev.sales.orders'}]
++    with pytest.raises(ValueError, match='identifier'):
++        MappingTransformer().render(artifact, mapping, package_rig.target)
++
++
+ def test_sql_identifier_mapping_preserves_literals_comments_and_instruction_prose(package_rig):
+     rig = package_rig
+     sql = "SELECT 'dev.sales.orders', total FROM `dev`.`sales`.`orders` -- dev.sales.orders\n/* dev.sales.orders */"
+@@ -72,6 +98,32 @@ def test_reviewed_exact_sql_override_is_bound_in_mapping(package_rig):
+     assert rendered.serialized_space['instructions']['example_question_sqls'][0]['sql'] == ['SELECT * FROM prod.sales.orders']
+ 
+ 
++def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(package_rig):
++    join_condition = '`dev`.`sales`.`orders`.`customer_id` = `dev`.`sales`.`customers`.`customer_id`'
++    relationship = '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'
++    snippet = "IDENTIFIER('dev.sales.orders').amount"
++    reviewed_snippet = 'prod.sales.orders.amount'
++    mapping = replace(package_rig.mapping, mappings={
++        **dict(package_rig.mapping.mappings),
++        'dev.sales.customers': 'prod.sales.customers',
++        'fragment:' + snippet: reviewed_snippet,
++    })
++    artifact = {'serialized_space': {'instructions': {
++        'join_specs': [{'left': {'identifier': 'dev.sales.orders'},
++                        'right': {'identifier': 'dev.sales.customers'},
++                        'sql': [join_condition, relationship]}],
++        'sql_snippets': {'measures': [{'sql': [snippet]}]},
++    }}}
++
++    rendered = MappingTransformer().render(artifact, mapping, package_rig.target).serialized_space
++
++    sql = rendered['instructions']['join_specs'][0]['sql']
++    assert sql[0] == '`prod`.`sales`.`orders`.`customer_id` = `prod`.`sales`.`customers`.`customer_id`'
++    assert len(sql) == 2
++    assert sql[1] == relationship
++    assert rendered['instructions']['sql_snippets']['measures'][0]['sql'] == [reviewed_snippet]
++
++
+ @pytest.mark.parametrize('case', ['target', 'wrong_binding', 'injected_environment'])
+ def test_warehouse_folder_binding_and_principals_remain_target_local(package_rig, case):
+     rig = package_rig
+diff --git a/backend/tests/test_vc_packages.py b/backend/tests/test_vc_packages.py
+index 9c3e722..757fac8 100644
+--- a/backend/tests/test_vc_packages.py
++++ b/backend/tests/test_vc_packages.py
+@@ -1,6 +1,7 @@
+ """M07 immutable package contract tests."""
+ 
+ import json
++from dataclasses import replace
+ from datetime import datetime, timezone
+ from hashlib import sha256
+ from types import SimpleNamespace
+@@ -64,6 +65,18 @@ def package_rig():
+ 
+ def test_package_pins_immutable_source_and_excludes_source_environment_ids(package_rig):
+     rig = package_rig
++    serialized_space = vc.to_wire(rig.version.snapshot.serialized_space)
++    serialized_space['config'] = {
++        'warehouse_id': 'nested-source-warehouse',
++        'workspace_id': 'nested-source-workspace',
++        'space_id': 'nested-source-space',
++    }
++    serialized_space['data_sources']['tables'][0]['sample_warehouse_id'] = 'nested-sample-warehouse'
++    rig.version = replace(rig.version, snapshot=rig.service.canonicalizer.observe({
++        'serialized_space': serialized_space,
++        'description': 'Sales',
++    }))
++    rig.ledger.get_version.return_value = rig.version
+     reference = rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
+     manifest = json.loads(rig.store.read(reference.manifest_uri))
+     prefix = reference.manifest_uri.rsplit('/', 1)[0]
+@@ -71,7 +84,12 @@ def test_package_pins_immutable_source_and_excludes_source_environment_ids(packa
+     assert manifest['source_version_id'] == rig.version.version_id
+     assert manifest['raw_source_digest'] == rig.version.snapshot.raw_state_digest
+     assert manifest['package_digest'] == reference.package_digest
+-    assert all(value not in artifact.decode() for value in ('source-space', 'source-warehouse', '/source/folder', 'workspace_id'))
++    artifact_text = artifact.decode()
++    assert all(value not in artifact_text for value in (
++        'nested-source-warehouse', 'nested-source-workspace', 'nested-source-space',
++        'nested-sample-warehouse', 'warehouse_id', 'workspace_id', 'space_id',
++    ))
++    assert manifest['artifact_digest'] == sha256(artifact).hexdigest()
+     assert json.loads(artifact)['serialized_space']['data_sources']['tables'][0]['identifier'] == 'dev.sales.orders'
+     for filename, digest in manifest['file_digests'].items():
+         assert sha256(rig.store.read(prefix + '/' + filename)).hexdigest() == digest
+diff --git a/backend/tests/test_vc_promotion.py b/backend/tests/test_vc_promotion.py
+index 87a5be8..659f812 100644
+--- a/backend/tests/test_vc_promotion.py
++++ b/backend/tests/test_vc_promotion.py
+@@ -130,6 +130,41 @@ def test_preflight_checks_executor_and_consumer_dependencies_and_permissions(pro
+     rig.gate.execute.assert_not_called()
+ 
+ 
++def test_dependency_preflight_checks_join_relations_and_sql_functions(promotion_rig):
++    rig = promotion_rig
++    serialized_space = {
++        'version': 2,
++        'data_sources': {'tables': [{'identifier': 'dev.sales.orders'}]},
++        'instructions': {
++            'join_specs': [{
++                'left': {'identifier': 'dev.sales.orders'},
++                'right': {'identifier': 'dev.sales.customers'},
++            }],
++            'sql_functions': [{'identifier': 'dev.sales.fiscal_quarter'}],
++        },
++    }
++    rig.version = replace(rig.version, snapshot=rig.service.canonicalizer.observe({
++        'serialized_space': serialized_space,
++        'description': 'Sales',
++    }))
++    rig.ledger.get_version.return_value = rig.version
++    rig.mapping = replace(rig.mapping, mappings={
++        **dict(rig.mapping.mappings),
++        'dev.sales.customers': 'prod.sales.customers',
++        'dev.sales.fiscal_quarter': 'prod.sales.fiscal_quarter',
++    })
++    rig.reference = rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
++    rig.releases.get.return_value.package = rig.reference
++
++    rig.service.preflight(rig.request.identity.operation_id, rig.executor)
++
++    checked = {(call.args[2], call.args[3], call.args[4]) for call in rig.dependencies.check.call_args_list}
++    for principal in ('target-sp', 'target-analysts'):
++        assert (principal, 'table', 'prod.sales.orders') in checked
++        assert (principal, 'table', 'prod.sales.customers') in checked
++        assert (principal, 'function', 'prod.sales.fiscal_quarter') in checked
++
++
+ @pytest.mark.parametrize('case', ['missing', 'revision', 'drift', 'busy', 'stale', 'quarantined', 'unknown'])
+ def test_target_drift_or_missing_pre_enrollment_blocks_without_create(promotion_rig, case):
+     rig = promotion_rig
