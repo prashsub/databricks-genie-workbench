@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from genie_space_optimizer.common.genie_client import patch_space_config
+from genie_space_optimizer.integration.version_control import CandidateSession, EvaluationBinding
 from genie_space_optimizer.common.genie_schema import (
     normalize_array_fields,
     validate_serialized_space,
@@ -47,7 +48,13 @@ def _send(config: dict) -> dict:
         return {}
 
     w.api_client.do.side_effect = _do
-    patch_space_config(w, _SPACE_ID, config)
+    registry = MagicMock()
+    registry.resolve_physical.return_value = None
+    registry.optimizer_owner.return_value = "run"
+    registry.workspace_id_for.return_value = "workspace"
+    session = CandidateSession(EvaluationBinding("workspace", _SPACE_ID, "run"), registry,
+                               w, writes_enabled=True)
+    patch_space_config(session.client, _SPACE_ID, config)
     return captured["sent"]
 
 

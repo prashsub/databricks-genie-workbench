@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from genie_space_optimizer.optimization import applier
+from genie_space_optimizer.integration.version_control import CandidateSession, EvaluationBinding
 
 
 def test_update_space_description_uses_metadata_patch_not_serialized_space(monkeypatch) -> None:
@@ -26,8 +27,14 @@ def test_update_space_description_uses_metadata_patch_not_serialized_space(monke
         "instructions": {"text_instructions": []},
     }
 
+    registry = MagicMock()
+    registry.resolve_physical.return_value = None
+    registry.optimizer_owner.return_value = "run"
+    registry.workspace_id_for.return_value = "workspace"
+    session = CandidateSession(EvaluationBinding("workspace", "space", "run"), registry,
+                               MagicMock(), writes_enabled=True)
     out = applier.apply_patch_set(
-        MagicMock(),
+        session.client,
         "space",
         [
             {

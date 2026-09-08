@@ -20,7 +20,7 @@ Covers the Phase 3 work in ``optimization/applier.py`` and
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -38,7 +38,6 @@ from genie_space_optimizer.optimization.applier import (
     _extract_benchmark_col_refs,
     auto_apply_prompt_matching,
 )
-
 
 # ───────────────────────────────────────────────────────────────────────
 # _entity_matching_score — hard disqualifiers (12 cases)
@@ -547,7 +546,7 @@ def _make_config(
     enabled_em = enabled_em or {}
 
     def _cc(tbl: str, col: str) -> dict:
-        entry = {"column_name": col}
+        entry: dict = {"column_name": col}
         if col in enabled_em.get(tbl, set()):
             entry["enable_entity_matching"] = True
             entry["enable_format_assistance"] = True
@@ -579,9 +578,9 @@ def _make_config(
     }
 
 
-def _run_apply(config: dict) -> dict:
+def _run_apply(config: dict, candidate_client_factory) -> dict:
     """Invoke auto_apply_prompt_matching with patch_space_config stubbed."""
-    w = MagicMock()
+    w = candidate_client_factory("sp-1")
     with patch(
         "genie_space_optimizer.optimization.applier.patch_space_config",
     ):
@@ -616,12 +615,12 @@ _NEUTRAL_COLUMNS: list[tuple[str, str]] = [
 class TestIdempotency:
     """Same inputs → same top-120 → empty diff on re-run."""
 
-    def test_second_run_produces_empty_diff(self, monkeypatch):
+    def test_second_run_produces_empty_diff(self, monkeypatch, candidate_client_factory):
         _pin_smarter_scoring(monkeypatch, True)
         config = _make_config({"cat.sch.orders": list(_NEUTRAL_COLUMNS)})
 
         # First run: every column passes the scorer, so they all get enabled.
-        first = _run_apply(config)
+        first = _run_apply(config, candidate_client_factory)
         enabled_first = [
             c for c in first["applied"] if c["type"] == "enable_value_dictionary"
         ]
@@ -636,7 +635,7 @@ class TestIdempotency:
                     cc["enable_entity_matching"] = True
                     cc["enable_format_assistance"] = True
 
-        second = _run_apply(config)
+        second = _run_apply(config, candidate_client_factory)
         em_changes = [
             c
             for c in second["applied"]
@@ -645,7 +644,7 @@ class TestIdempotency:
         ]
         assert em_changes == [], f"second run should be a no-op for EM, got {em_changes}"
 
-    def test_deterministic_tie_breaking(self, monkeypatch):
+    def test_deterministic_tie_breaking(self, monkeypatch, candidate_client_factory):
         """Two candidates with identical scores + descriptions — stable
         sort on ``(-score, table, col)`` must pick the same winner across
         invocations regardless of column_configs insertion order."""
@@ -657,8 +656,8 @@ class TestIdempotency:
         cfg_a = _make_config({"cat.sch.t": cols_a})
         cfg_b = _make_config({"cat.sch.t": cols_b})
 
-        a = _run_apply(cfg_a)
-        b = _run_apply(cfg_b)
+        a = _run_apply(cfg_a, candidate_client_factory)
+        b = _run_apply(cfg_b, candidate_client_factory)
 
         enables_a = sorted(
             c["column"] for c in a["applied"]
@@ -676,7 +675,9 @@ class TestIdempotency:
 class TestDiffApplication:
     """Diff semantics: displacement, PII disable, RLS disable."""
 
-    def test_unknown_type_preserves_existing_entity_matching(self, monkeypatch):
+    def test_unknown_type_preserves_existing_entity_matching(
+        self, monkeypatch, candidate_client_factory,
+    ):
         """A partial UC metadata fetch must not reclaim an untyped slot."""
         _pin_smarter_scoring(monkeypatch, True)
         config = _make_config(
@@ -685,7 +686,7 @@ class TestDiffApplication:
         )
         config["_uc_columns"] = []
 
-        result = _run_apply(config)
+        result = _run_apply(config, candidate_client_factory)
 
         assert not any(
             change["type"] == "disable_value_dictionary"
@@ -694,7 +695,9 @@ class TestDiffApplication:
         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
         assert cc["enable_entity_matching"] is True
 
-    def test_new_high_score_column_displaces_low_score(self, monkeypatch):
+    def test_new_high_score_column_displaces_low_score(
+        self, monkeypatch, candidate_client_factory,
+    ):
         """When the space is at the 120-slot cap with low-score fillers,
         a new high-score candidate should displace exactly one low slot."""
         _pin_smarter_scoring(monkeypatch, True)
@@ -714,7 +717,7 @@ class TestDiffApplication:
             {"cat.sch.t": cols},
             enabled_em={"cat.sch.t": {"login_ip", "session_host"}},
         )
-        result = _run_apply(config)
+        result = _run_apply(config, candidate_client_factory)
         enables = [
             c["column"] for c in result["applied"]
             if c["type"] == "enable_value_dictionary"
@@ -728,7 +731,9 @@ class TestDiffApplication:
         assert len(disables) == 1
         assert disables[0] in {"login_ip", "session_host"}
 
-    def test_pii_column_enabled_previously_gets_disabled(self, monkeypatch):
+    def test_pii_column_enabled_previously_gets_disabled(
+        self, monkeypatch, candidate_client_factory,
+    ):
         """Prior-run space had customer_email enabled (legacy scorer). New
         scorer hard-rejects PII → column falls out of top-120 → disable."""
         _pin_smarter_scoring(monkeypatch, True)
@@ -740,7 +745,7 @@ class TestDiffApplication:
             {"cat.sch.orders": cols},
             enabled_em={"cat.sch.orders": {"customer_email"}},
         )
-        result = _run_apply(config)
+        result = _run_apply(config, candidate_client_factory)
         disables = [
             c["column"] for c in result["applied"]
             if c["type"] == "disable_value_dictionary"
@@ -749,7 +754,7 @@ class TestDiffApplication:
         # pii rejection reflected in aggregate tally too.
         assert result["rejected_by_reason"].get("pii_name", 0) >= 1
 
-    def test_rls_tainted_slot_gets_disabled(self, monkeypatch):
+    def test_rls_tainted_slot_gets_disabled(self, monkeypatch, candidate_client_factory):
         """Existing EM slot on a table whose RLS audit verdict is
         'tainted' — scorer rejects → column falls out → disable."""
         _pin_smarter_scoring(monkeypatch, True)
@@ -765,7 +770,7 @@ class TestDiffApplication:
             enabled_em={"cat.sch.secret": {"region_code"}},
             rls_audit=rls_audit,
         )
-        result = _run_apply(config)
+        result = _run_apply(config, candidate_client_factory)
         disables = [
             c["column"] for c in result["applied"]
             if c["type"] == "disable_value_dictionary"
@@ -773,7 +778,9 @@ class TestDiffApplication:
         assert "region_code" in disables
         assert result["rejected_by_reason"].get("rls_tainted", 0) >= 1
 
-    def test_schema_unchanged_has_no_slots_disabled(self, monkeypatch):
+    def test_schema_unchanged_has_no_slots_disabled(
+        self, monkeypatch, candidate_client_factory,
+    ):
         """Steady state: scores unchanged, slots under cap → zero diff
         after the first-time enablement lands."""
         _pin_smarter_scoring(monkeypatch, True)
@@ -786,7 +793,7 @@ class TestDiffApplication:
             {"cat.sch.t": cols},
             enabled_em={"cat.sch.t": {"region_code", "country_code"}},
         )
-        result = _run_apply(config)
+        result = _run_apply(config, candidate_client_factory)
         em_changes = [
             c for c in result["applied"]
             if c["type"] in ("enable_value_dictionary", "disable_value_dictionary")
@@ -794,7 +801,9 @@ class TestDiffApplication:
         assert em_changes == []
 
     @pytest.mark.parametrize("smarter_scoring", [True, False])
-    def test_small_space_with_pii_column(self, smarter_scoring, monkeypatch):
+    def test_small_space_with_pii_column(
+        self, smarter_scoring, monkeypatch, candidate_client_factory,
+    ):
         """Regression pin: under smarter_scoring=True the new scorer filters
         PII out of the pool; under smarter_scoring=False the legacy shim
         preserves today's silent-leak behaviour — so tests detect any
@@ -813,7 +822,7 @@ class TestDiffApplication:
             ("department", "STRING"),
         ]
         config = _make_config({"cat.sch.orders": cols})
-        result = _run_apply(config)
+        result = _run_apply(config, candidate_client_factory)
         enabled_em = {
             c["column"] for c in result["applied"]
             if c["type"] == "enable_value_dictionary"
@@ -832,7 +841,7 @@ class TestDiffApplication:
 class TestDryRun:
     """DRY_RUN_ENTITY_MATCHING: logs the diff but mutates nothing."""
 
-    def test_dry_run_logs_but_no_changes(self, monkeypatch):
+    def test_dry_run_logs_but_no_changes(self, monkeypatch, candidate_client_factory):
         _pin_smarter_scoring(monkeypatch, True)
         monkeypatch.setattr(cfg, "DRY_RUN_ENTITY_MATCHING", True)
         monkeypatch.setattr(
@@ -847,7 +856,7 @@ class TestDryRun:
             {"cat.sch.orders": cols},
             enabled_em={"cat.sch.orders": {"customer_email"}},
         )
-        result = _run_apply(config)
+        result = _run_apply(config, candidate_client_factory)
         em_changes = [
             c for c in result["applied"]
             if c["type"] in ("enable_value_dictionary", "disable_value_dictionary")
@@ -882,7 +891,9 @@ class TestLegacyScorer:
         assert _entity_matching_score_legacy("login_ip") == 1
 
 
-def test_prompt_matching_uses_semantic_metric_view_split(monkeypatch) -> None:
+def test_prompt_matching_uses_semantic_metric_view_split(
+    monkeypatch, candidate_client_factory,
+) -> None:
     from genie_space_optimizer.common.asset_semantics import (
         KIND_METRIC_VIEW,
         stamp_asset_semantics,
@@ -926,7 +937,7 @@ def test_prompt_matching_uses_semantic_metric_view_split(monkeypatch) -> None:
         },
     })
 
-    result = _run_apply(config)
+    result = _run_apply(config, candidate_client_factory)
 
     enabled = {
         (entry["table"], entry["column"])
@@ -937,7 +948,9 @@ def test_prompt_matching_uses_semantic_metric_view_split(monkeypatch) -> None:
     assert all(table != "cat.sch.mv_sales" or col != "total_sales" for table, col in enabled)
 
 
-def test_prompt_matching_does_not_treat_mv_named_view_as_metric_view(monkeypatch) -> None:
+def test_prompt_matching_does_not_treat_mv_named_view_as_metric_view(
+    monkeypatch, candidate_client_factory,
+) -> None:
     from genie_space_optimizer.common.asset_semantics import (
         KIND_VIEW,
         stamp_asset_semantics,
@@ -958,7 +971,7 @@ def test_prompt_matching_does_not_treat_mv_named_view_as_metric_view(monkeypatch
         },
     })
 
-    result = _run_apply(config)
+    result = _run_apply(config, candidate_client_factory)
 
     enabled = {
         (entry["table"], entry["column"])

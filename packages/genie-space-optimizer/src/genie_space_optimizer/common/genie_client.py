@@ -946,6 +946,9 @@ def patch_space_config(
     """
     from .genie_schema import normalize_array_fields, validate_serialized_space
 
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+    assert_candidate_write(w, space_id)
+
     clean = strip_non_exportable_fields(_serialized_space_for_patch(config))
     clean = sort_genie_config(clean)
     # Coerce every array-typed leaf field (description / synonyms / content /
@@ -1018,6 +1021,8 @@ def update_space_description(
     ``{"description": "..."}`` to avoid coupling with config updates.
     """
     payload = {"description": description}
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+    assert_candidate_write(w, space_id)
     logger.info(
         "PATCHing Genie Agent %s description (%d chars)", space_id, len(description),
     )

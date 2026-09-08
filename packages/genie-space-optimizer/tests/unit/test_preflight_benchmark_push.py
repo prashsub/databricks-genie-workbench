@@ -1,6 +1,10 @@
 """GSO Optimizer v2 — Phase 2 benchmark-lifecycle preflight wiring.
 
-Covers the runner-independent preflight push:
+Covers the runner-independent preflight push on an authorized candidate.
+Unproven clients must fail before publication, telemetry, or input mutation.
+The deployed Job remains disabled until its candidate lifecycle is installed.
+
+Retained candidate-local behavior:
 * the 30–40 window recommendation (D8) — computed over the POST-MERGE live
   set, never a silent auto-delete;
 * the prune-invalid-before-publish backstop (eval-validity);
@@ -14,6 +18,7 @@ Covers the runner-independent preflight push:
 
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -586,7 +591,9 @@ def captured_publish():
         yield captured
 
 
-def test_push_excludes_invalid_and_sqlless_rows_before_publish(captured_publish):
+def test_push_excludes_invalid_and_sqlless_rows_before_publish(
+    captured_publish, candidate_client_factory,
+):
     benchmarks = [
         _bench("v1", "valid question one", "SELECT 1"),
         _bench("v2", "valid question two", "SELECT 2"),
@@ -600,7 +607,8 @@ def test_push_excludes_invalid_and_sqlless_rows_before_publish(captured_publish)
         return_value=0,
     ):
         out = preflight_push_benchmarks_to_space(
-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
             benchmarks,
         )
 
@@ -612,7 +620,9 @@ def test_push_excludes_invalid_and_sqlless_rows_before_publish(captured_publish)
     assert out["push_ok"] is True
 
 
-def test_push_authorizes_only_recorded_question_warning_repairs(captured_publish):
+def test_push_authorizes_only_recorded_question_warning_repairs(
+    captured_publish, candidate_client_factory,
+):
     benchmark = _bench(
         "native-q1",
         "Show recognized revenue",
@@ -635,7 +645,7 @@ def test_push_authorizes_only_recorded_question_warning_repairs(captured_publish
         return_value=0,
     ):
         preflight_push_benchmarks_to_space(
-            MagicMock(),
+            candidate_client_factory("space-1", "run-1"),
             MagicMock(),
             "run-1",
             "space-1",
@@ -648,7 +658,7 @@ def test_push_authorizes_only_recorded_question_warning_repairs(captured_publish
     assert captured_publish["question_update_ids"] == {"native-q1"}
 
 
-def test_push_attaches_exact_live_question_id_for_delta_handoff():
+def test_push_attaches_exact_live_question_id_for_delta_handoff(candidate_client_factory):
     native_id = "a" * 32
     benchmark = _bench("internal-q1", "How many tickets were created?", "SELECT 1")
     report = BenchmarkPushReport(
@@ -675,7 +685,8 @@ def test_push_attaches_exact_live_question_id_for_delta_handoff():
         return_value=0,
     ):
         out = preflight_push_benchmarks_to_space(
-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
             [benchmark],
         )
 
@@ -684,7 +695,9 @@ def test_push_attaches_exact_live_question_id_for_delta_handoff():
     assert out["push_ok"] is True
 
 
-def test_push_fails_when_publisher_does_not_return_exact_question_mapping():
+def test_push_fails_when_publisher_does_not_return_exact_question_mapping(
+    candidate_client_factory,
+):
     benchmark = _bench("internal-q1", "How many tickets were created?", "SELECT 1")
     report = BenchmarkPushReport(
         added_count=1,
@@ -706,12 +719,12 @@ def test_push_fails_when_publisher_does_not_return_exact_question_mapping():
         return_value={"benchmark_mutation_count": 4},
     ), patch(
         "genie_space_optimizer.optimization.preflight._update_run_status",
-    ) as update_run_status:
-        with pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
-            preflight_push_benchmarks_to_space(
-                MagicMock(), spark, "run-1", "space-1", "cat", "sch",
-                [benchmark],
-            )
+    ) as update_run_status, pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
+        preflight_push_benchmarks_to_space(
+            candidate_client_factory("space-1", "run-1"),
+            spark, "run-1", "space-1", "cat", "sch",
+            [benchmark],
+        )
 
     assert "space_question_id" not in benchmark
     update_run_status.assert_called_once_with(
@@ -723,7 +736,7 @@ def test_push_fails_when_publisher_does_not_return_exact_question_mapping():
     )
 
 
-def test_push_fails_when_exact_question_mapping_is_ambiguous():
+def test_push_fails_when_exact_question_mapping_is_ambiguous(candidate_client_factory):
     benchmark = _bench("internal-q1", "How many tickets were created?", "SELECT 1")
     merged = [
         {"id": "a" * 32, "question": benchmark["question"], "sql": "SELECT 1"},
@@ -741,17 +754,19 @@ def test_push_fails_when_exact_question_mapping_is_ambiguous():
     ), patch(
         "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
         return_value=0,
-    ):
-        with pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
-            preflight_push_benchmarks_to_space(
-                MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
-                [benchmark],
-            )
+    ), pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
+        preflight_push_benchmarks_to_space(
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
+            [benchmark],
+        )
 
     assert "space_question_id" not in benchmark
 
 
-def test_push_writes_added_excluded_changed_ledger_rows(captured_publish):
+def test_push_writes_added_excluded_changed_ledger_rows(
+    captured_publish, candidate_client_factory,
+):
     benchmarks = [
         _bench("v1", "valid question one", "SELECT 1"),
         _bench(
@@ -799,7 +814,8 @@ def test_push_writes_added_excluded_changed_ledger_rows(captured_publish):
         side_effect=_capture,
     ):
         out = preflight_push_benchmarks_to_space(
-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
             benchmarks,
             rejected_benchmarks=rejected,
             changed_benchmarks=changed,
@@ -835,7 +851,7 @@ def test_push_writes_added_excluded_changed_ledger_rows(captured_publish):
     assert out["pruned_at_push"] == 2
 
 
-def test_push_ledgers_native_sql_repair_as_changed() -> None:
+def test_push_ledgers_native_sql_repair_as_changed(candidate_client_factory) -> None:
     updated = [{
         "id": "native-q1",
         "question": "How many tickets were created?",
@@ -868,7 +884,7 @@ def test_push_ledgers_native_sql_repair_as_changed() -> None:
         side_effect=_capture,
     ):
         out = preflight_push_benchmarks_to_space(
-            MagicMock(),
+            candidate_client_factory("space-1", "run-1"),
             MagicMock(),
             "run-1",
             "space-1",
@@ -886,7 +902,9 @@ def test_push_ledgers_native_sql_repair_as_changed() -> None:
     assert out["benchmark_mutation_count"] == 1
 
 
-def test_push_preserves_warning_repair_reason_for_sql_only_update() -> None:
+def test_push_preserves_warning_repair_reason_for_sql_only_update(
+    candidate_client_factory,
+) -> None:
     question = "Show recognized revenue"
     updated = [{
         "id": "native-q1",
@@ -930,7 +948,7 @@ def test_push_preserves_warning_repair_reason_for_sql_only_update() -> None:
         side_effect=_capture,
     ):
         preflight_push_benchmarks_to_space(
-            MagicMock(),
+            candidate_client_factory("space-1", "run-1"),
             MagicMock(),
             "run-1",
             "space-1",
@@ -945,7 +963,7 @@ def test_push_preserves_warning_repair_reason_for_sql_only_update() -> None:
     assert changed[0]["reason"] == "benchmark_quality_warning_repair"
 
 
-def test_push_records_over_window_prune_recommendations_in_ledger():
+def test_push_records_over_window_prune_recommendations_in_ledger(candidate_client_factory):
     """Over-window prune RECOMMENDATIONS are recorded as non-mutating
     advisory ledger rows (op=prune_recommended), and the net-new push set is
     recorded as added rows — contract 5 stays satisfied with no truncation."""
@@ -971,7 +989,8 @@ def test_push_records_over_window_prune_recommendations_in_ledger():
         _FETCH_PATH, return_value={"_parsed_space": _parsed_space(existing=[])},
     ), patch(_PATCH_PATH, side_effect=_capture_patch):
         out = preflight_push_benchmarks_to_space(
-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
             benchmarks,
         )
 
@@ -986,7 +1005,9 @@ def test_push_records_over_window_prune_recommendations_in_ledger():
                for r in by_op["prune_recommended"])
 
 
-def test_push_skips_when_publishing_disabled(monkeypatch, captured_publish):
+def test_push_skips_when_publishing_disabled(
+    monkeypatch, captured_publish, candidate_client_factory,
+):
     monkeypatch.setattr(
         "genie_space_optimizer.optimization.preflight.PUBLISH_BENCHMARKS_TO_SPACE",
         False,
@@ -998,7 +1019,8 @@ def test_push_skips_when_publishing_disabled(monkeypatch, captured_publish):
         return_value=0,
     ):
         out = preflight_push_benchmarks_to_space(
-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
             [_bench("v1", "valid question one", "SELECT 1")],
         )
     assert "benchmarks" not in captured_publish  # publisher never called
@@ -1006,7 +1028,7 @@ def test_push_skips_when_publishing_disabled(monkeypatch, captured_publish):
     assert out["push_ok"] is True  # disabled push is not a failure
 
 
-def test_push_failure_is_fatal_when_publishing_enabled():
+def test_push_failure_is_fatal_when_publishing_enabled(candidate_client_factory):
     """Blocking 4: a required push that raises must FAIL the preflight job so
     baseline eval never runs against the stale live benchmark set."""
     def _boom(*a, **k):
@@ -1017,15 +1039,15 @@ def test_push_failure_is_fatal_when_publishing_enabled():
     ), patch(
         "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
         return_value=0,
-    ):
-        with pytest.raises(BenchmarkPushError):
-            preflight_push_benchmarks_to_space(
-                MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
-                [_bench("v1", "valid question one", "SELECT 1")],
-            )
+    ), pytest.raises(BenchmarkPushError):
+        preflight_push_benchmarks_to_space(
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
+            [_bench("v1", "valid question one", "SELECT 1")],
+        )
 
 
-def test_push_over_cap_is_fatal_when_publishing_enabled():
+def test_push_over_cap_is_fatal_when_publishing_enabled(candidate_client_factory):
     """A required push that the publisher refuses (over hard cap, no mutation)
     is also fatal — eval must not run against the stale set."""
     over_cap_report = BenchmarkPushReport(
@@ -1037,9 +1059,47 @@ def test_push_over_cap_is_fatal_when_publishing_enabled():
     ), patch(
         "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
         return_value=0,
-    ):
-        with pytest.raises(BenchmarkPushError):
-            preflight_push_benchmarks_to_space(
-                MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
-                [_bench("v1", "valid question one", "SELECT 1")],
-            )
+    ), pytest.raises(BenchmarkPushError):
+        preflight_push_benchmarks_to_space(
+            candidate_client_factory("space-1", "run-1"),
+            MagicMock(), "run-1", "space-1", "cat", "sch",
+            [_bench("v1", "valid question one", "SELECT 1")],
+        )
+
+
+@pytest.mark.parametrize("publishing_enabled", [True, False])
+@pytest.mark.parametrize("client_kind", ["raw", "none", "wrong_candidate"])
+def test_push_refuses_unproven_target_before_any_work(
+    monkeypatch, candidate_client_factory, publishing_enabled, client_kind,
+):
+    """Even disabled publication cannot report success for an unproven target."""
+    from copy import deepcopy
+
+    monkeypatch.setattr(
+        "genie_space_optimizer.optimization.preflight.PUBLISH_BENCHMARKS_TO_SPACE",
+        publishing_enabled,
+    )
+    raw_client = MagicMock()
+    client = cast(Any, {
+        "raw": raw_client,
+        "none": None,
+        "wrong_candidate": candidate_client_factory("other-space", "run-1"),
+    }[client_kind])
+    spark = MagicMock()
+    benchmarks = [_bench("v1", "valid question", "SELECT 1")]
+    before = deepcopy(benchmarks)
+    with patch(_PUBLISH_PATH) as publish, patch(
+        "genie_space_optimizer.optimization.preflight.write_stage",
+    ) as stage, patch(
+        "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
+    ) as ledger, pytest.raises(PermissionError):
+        preflight_push_benchmarks_to_space(
+            client, spark, "run-1", "space-1", "cat", "sch", benchmarks,
+        )
+
+    publish.assert_not_called()
+    stage.assert_not_called()
+    ledger.assert_not_called()
+    assert raw_client.mock_calls == []
+    assert spark.mock_calls == []
+    assert benchmarks == before

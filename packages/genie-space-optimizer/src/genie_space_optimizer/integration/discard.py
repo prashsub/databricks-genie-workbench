@@ -85,30 +85,6 @@ def discard_optimization(
         action="discard",
     )
 
-    original_snapshot = run_data.get("config_snapshot")
-    if isinstance(original_snapshot, str):
-        try:
-            original_snapshot = json.loads(original_snapshot)
-        except (json.JSONDecodeError, TypeError):
-            original_snapshot = {}
-
-    if not original_snapshot or not isinstance(original_snapshot, dict):
-        raise ValueError(
-            "This run has no pre-optimization snapshot; it cannot be safely discarded."
-        )
-
-    from genie_space_optimizer.optimization.applier import rollback
-
-    apply_log = {"pre_snapshot": original_snapshot}
-    client = _pick_genie_client(ws, sp_ws)
-    rollback_result = rollback(apply_log, client, space_id)
-    if str(rollback_result.get("status") or "").upper() != "SUCCESS":
-        errors = rollback_result.get("errors") or ["unknown rollback failure"]
-        raise RuntimeError(
-            "Optimization was not discarded because rollback failed: "
-            + "; ".join(str(error) for error in errors)
-        )
-
     sql_warehouse_execute(
         sp_ws,
         config.warehouse_id,
@@ -121,7 +97,7 @@ def discard_optimization(
     return ActionResult(
         status="discarded",
         run_id=run_id,
-        message="Optimization discarded and patches rolled back.",
+        message="Optimization discarded; managed state unchanged. Use a governed restore Job for historical state.",
     )
 
 

@@ -1616,6 +1616,9 @@ def auto_apply_prompt_matching(
     ``pre_snapshot``, ``post_snapshot``, and summary stats including
     rejection reason counts under ``rejected_by_reason``.
     """
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+
+    assert_candidate_write(w, space_id)
     if not ENABLE_SMARTER_SCORING:
         return _legacy_apply_em(w, space_id, config, benchmarks=benchmarks)
 
@@ -2011,6 +2014,9 @@ def _legacy_apply_em(
     Scheduled for removal in a follow-up release (along with the
     ``ENABLE_SMARTER_SCORING`` flag).
     """
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+
+    assert_candidate_write(w, space_id)
     parsed = config.get("_parsed_space", config)
     ds = parsed.get("data_sources", {})
     tables, metric_views, unknown_sources = _prompt_matching_sources(config)
@@ -4051,6 +4057,11 @@ def apply_patch_set(
 
     Returns an ``apply_log`` dict with pre/post snapshots and rollback info.
     """
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+
+    if apply_mode != "genie_config":
+        raise PermissionError("Candidate evaluation cannot mutate shared UC artifacts")
+    assert_candidate_write(w, space_id)
     pre_snapshot = copy.deepcopy(metadata_snapshot)
     config = copy.deepcopy(metadata_snapshot)
 
@@ -4558,6 +4569,9 @@ def rollback(
     Primary mechanism: replace current config with ``apply_log["pre_snapshot"]``.
     Fallback: execute rollback_commands in reverse order (HIGH -> MEDIUM -> LOW).
     """
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+
+    assert_candidate_write(w, space_id)
     pre_snapshot = apply_log.get("pre_snapshot")
     if pre_snapshot is None:
         return {
