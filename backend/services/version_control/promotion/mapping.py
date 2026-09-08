@@ -16,7 +16,8 @@ class RenderedPayload:
 TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*|\s+|.")
 IDENTIFIER = re.compile(r'(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*)\Z')
 JOIN_COLUMN = r'`(?:``|[^`])+`\.`(?:``|[^`])+`'
-JOIN_CONDITION = re.compile(rf'\s*{JOIN_COLUMN}\s*=\s*{JOIN_COLUMN}\s*')
+JOIN_EQUALITY = rf'{JOIN_COLUMN}\s*=\s*{JOIN_COLUMN}'
+JOIN_CONDITION = re.compile(rf'\s*{JOIN_EQUALITY}(?:\s+AND\s+{JOIN_EQUALITY})*\s*', re.IGNORECASE)
 
 
 ENVIRONMENT_KEYS = frozenset({'workspace_id', 'space_id', 'warehouse_id', 'sample_warehouse_id',
