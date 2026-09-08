@@ -8,7 +8,7 @@ from backend.services.version_control import contracts as vc
 from backend.tests.vc_fakes.fixtures import (
     FakeCanonicalizer, actor_fixture, binding_fixture, executor_fixture,
 )
-from backend.tests.test_vc_drift import lookup, snapshot, version_id
+from backend.tests.test_vc_drift import approved_targets_fixture, lookup, snapshot, version_id
 
 
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
@@ -31,6 +31,7 @@ def setup_service(**options):
 
     observer = Mock(spec=vc.Observer)
     observer.capture.return_value = observed_result()
+    options.setdefault("approved_targets", approved_targets_fixture())
     service = DriftService(canonicalizer=FakeCanonicalizer(), observer=observer,
                            executor=executor_fixture(), **options)
     return service, observer
@@ -43,7 +44,8 @@ def test_capture_advances_observed_but_drift_remains_until_policy_resolution():
     assert captured.status.heads == vc.Heads(version_id(2), version_id(1), version_id(1))
     result = service.classify(captured.status.heads,
                              lookup({version_id(1): snapshot("policy"),
-                                     version_id(2): snapshot("external")}), "reachable")
+                                     version_id(2): snapshot("external")}), "reachable",
+                             target_binding=binding_fixture())
     assert result.state == vc.DriftState.EXTERNAL_AHEAD
     assert captured.captured_version.version_id == version_id(2)
 

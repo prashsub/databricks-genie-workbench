@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 from uuid import UUID
 
@@ -23,6 +23,34 @@ def lookup(states):
     return port
 
 
+def approved_targets_fixture(states=None):
+    """Identity-rendered, bound approval evidence for ordinary M05 happy paths."""
+    from backend.services.version_control.drift.ports import ApprovedTarget, ApprovedTargets
+    from backend.tests.vc_fakes.fixtures import actor_fixture
+
+    states = states if states is not None else {
+        version_id(1): snapshot("policy"), version_id(2): snapshot("external")}
+    now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    targets = Mock(spec=ApprovedTargets)
+
+    def resolve(binding, head_id):
+        rendered = states[head_id]
+        inputs = vc.ApprovalInputs(
+            "VC/1.0", version_id(10), "reapply", head_id, rendered.raw_state_digest,
+            rendered.fingerprints, None, None, rendered.state_digest, None,
+            rendered.fingerprints.canonicalizer_version, binding, rendered.fingerprints,
+            None, "b" * 64, "c" * 64, "d" * 64, {}, actor_fixture().subject_id, {}, now + timedelta(hours=1))
+        approval = vc.ApprovalRecord(vc.ApprovalRequest(version_id(20), inputs, now), (),
+                                     vc.FactStatus.APPROVED, "f" * 64)
+        preflight = vc.PreflightEvidence(
+            "VC/1.0", inputs.operation_id, binding, inputs.expected_base_fingerprints,
+            rendered.fingerprints, None, "b" * 64, "c" * 64, inputs.preflight_evidence_digest, now)
+        return ApprovedTarget(head_id, approval, rendered, preflight)
+
+    targets.resolve.side_effect = resolve
+    return targets
+
+
 @pytest.mark.parametrize("observed,approved,deployed,expected", [
     (1, 1, 1, "clean"), (2, 1, 1, "external_ahead"),
     (1, 2, 1, "desired_ahead"), (2, 3, 1, "diverged"),
@@ -31,9 +59,13 @@ def lookup(states):
 def test_three_heads_classify_clean_external_desired_diverged(observed, approved, deployed, expected):
     from backend.services.version_control.drift import DriftService
 
-    versions = lookup({version_id(number): snapshot(str(number)) for number in (1, 2, 3)})
-    result = DriftService(canonicalizer=FakeCanonicalizer()).classify(
-        vc.Heads(*(version_id(number) for number in (observed, approved, deployed))), versions, "reachable")
+    from backend.tests.vc_fakes.fixtures import binding_fixture
+
+    states = {version_id(number): snapshot(str(number)) for number in (1, 2, 3)}
+    versions = lookup(states)
+    result = DriftService(canonicalizer=FakeCanonicalizer(), approved_targets=approved_targets_fixture(states)).classify(
+        vc.Heads(*(version_id(number) for number in (observed, approved, deployed))), versions, "reachable",
+        target_binding=binding_fixture())
     assert result.state.value == expected
     assert result.policy_target == version_id(approved)
     assert result.common_base == (version_id(1) if observed == 1 or approved == 1 else None)
@@ -56,7 +88,10 @@ def test_missing_history_or_incompatible_canonicalizer_is_unknown(case):
         states = dict.fromkeys(states, unsupported)
     else:
         states[version_id(2)] = unsupported
-    result = DriftService(canonicalizer=FakeCanonicalizer()).classify(heads, lookup(states), "reachable")
+    from backend.tests.vc_fakes.fixtures import binding_fixture
+
+    result = DriftService(canonicalizer=FakeCanonicalizer(), approved_targets=approved_targets_fixture(states)).classify(
+        heads, lookup(states), "reachable", target_binding=binding_fixture())
     assert result.state == vc.DriftState.UNKNOWN
     assert result.allowed_actions == ()
     assert result.reasons
@@ -70,9 +105,12 @@ def test_meaningful_changes_are_not_clean(change):
     before = canonicalizer.observe({"serialized_space": {"queries": ["first", "second"]}, "description": "old"})
     after = canonicalizer.observe({"serialized_space": {"queries": ["second", "first"] if change == "array_order"
                                                     else ["first", "second"]}, "description": "new"})
-    result = DriftService(canonicalizer=canonicalizer).classify(
-        vc.Heads(version_id(2), version_id(1), version_id(1)),
-        lookup({version_id(1): before, version_id(2): after}), "reachable")
+    from backend.tests.vc_fakes.fixtures import binding_fixture
+
+    states = {version_id(1): before, version_id(2): after}
+    result = DriftService(canonicalizer=canonicalizer, approved_targets=approved_targets_fixture(states)).classify(
+        vc.Heads(version_id(2), version_id(1), version_id(1)), lookup(states), "reachable",
+        target_binding=binding_fixture())
     assert result.state == vc.DriftState.EXTERNAL_AHEAD
 
 
@@ -116,7 +154,7 @@ def projection_setup():
     authorize = Mock(return_value=True)
     service = DriftService(canonicalizer=FakeCanonicalizer(), projections=projections, observer=observer,
                            registry=registry, authorize_history=authorize, clock=lambda: NOW,
-                           readiness=Mock(spec=CoordinationReadiness))
+                           readiness=Mock(spec=CoordinationReadiness), approved_targets=approved_targets_fixture())
     return service, projections, observer, registry, authorize
 
 
