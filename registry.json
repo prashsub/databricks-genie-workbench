@@ -3,7 +3,7 @@
   "repo": "databricks-genie-workbench",
   "branch": "version-control-cicd",
   "base_sha": "0f2e9e3b3da4310e0ed20ba011dca4d6d1b80ea7",
-  "integrated_sha": "28c471b",
+  "integrated_sha": "b0b8411",
   "integrated_modules": "FOUND, M01, M08, M06 (+integration-gate reconciliation), M09. Trunk 9fce95d: backend 740 offline pass + frontend vitest 25 files/251 pass, tsc -b clean, integration collection=10 (M08 5 + M06 5). M03 fully verified (12 blockers) but integration BLOCKED on gate-parser reconciliation #2 (module-level pytestmark, conv 3773493063975755 in worktree vc/m03-integ). DATA-LOSS CHECK current: all worktrees clean, all branches PUSHED, trunk 9fce95d PUSHED, .polly backed up.",
   "contract_version": "VC/1.0",
   "execution_mode": "subagents; implementers codex+pi on Astra; claude_code is cross-vendor reviewer",
@@ -136,7 +136,7 @@
       "desc": "Cross-module actor_kind vocab drift + M04 retry short-circuit fix (integrator-sanctioned)",
       "worker": "codex",
       "conversation_id": "3773493063976171",
-      "status": "FIX2 APPROVED (re-review conv 3773493063976235: discriminator correct 10/10 real producer triples, both arms load-bearing, no-double-PATCH preserved, NOOP terminal, guards intact, 3 tests genuine RED, +9 tests 0 regressions). HEAD 6ad2069. Doing NB-1 arm-coverage hardening (conv 3773493063976232): 2 tests pinning each discriminator arm individually + 1-line coupling comment. Then integrate whole xmod-fix onto trunk (unblocks M07 task17).",
+      "status": "INTEGRATED + PUSHED (trunk b0b8411). BLOCKER1 actor_kind vocab (M08 human/service) + BLOCKER2 retry short-circuit correctness (execution-outcome discriminator, pre/post-send CONFLICTED via attempt_id+PatchStage, NOOP terminal). fix2 APPROVED, NB-1 both arms individually test-pinned. 1086 offline pass, switches default-off, integration=14. Unblocks M07 task17.",
       "review_conversation_id": "3773493063976190",
       "fix2_conversation_id": "3773493063976232",
       "fix2_review_conversation_id": "3773493063976235"
