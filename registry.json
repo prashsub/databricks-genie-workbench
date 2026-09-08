@@ -201,14 +201,14 @@
       "conv": "3773493063976871",
       "worktree": "backlog-integ-gate",
       "items": "A floor-tracks-actual-count, B AnnAssign+class-body pytestmark, C recursive glob; test_vc_provisioning.py only",
-      "status": "review APPROVE+1 follow-up (A/B/C correct, ratchet non-tautological confirmed; but dropped monotonic landed-baseline invariant). follow-up dispatched pi/Astra conv 3773493063976871",
+      "status": "A/B/C + D follow-up (537269f, restored monotonic landed-baseline ratchet, deletion RED-first) done+verified 1246 offline/39 provisioning; D re-review conv 3773493063976955",
       "branch": "vc/backlog-integ-gate"
     },
     "m05_f3": {
       "conv": "3773493063976872",
       "worktree": "backlog-m05f3",
       "item": "fail-closed when approved_targets absent",
-      "status": "review BLOCK finding-D (fixture weakened a pre-existing assertion; production fix APPROVED+complete). D-fix dispatched pi/Astra conv 3773493063976872",
+      "status": "F3 fix + D follow-up (d74fa05, restored/tightened assertions, mutation-confirmed non-vacuous) done+verified 1250 offline; D re-review conv 3773493063976954",
       "branch": "vc/backlog-m05f3"
     },
     "m07_nb": {
