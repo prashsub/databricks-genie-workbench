@@ -119,9 +119,10 @@
     {
       "id": "M07",
       "desc": "Cross-workspace promotion",
-      "status": "IMPL COMPLETE 16/17 tasks (worktree worktrees/m07, pushed vc/m07). Task 17 legitimately blocked on 2 cross-module bugs (actor_kind drift, M04 requested-only retry). M07 own deliverable green: 78 unit tests, integration test honest blocker, owned-paths clean. IN CROSS-REVIEW claude_code conv 3773493063976172 (re-dispatched after runner-offline). Cross-module fix running separately. Integrate after review clear + xmod fix lands.",
+      "status": "IMPL 16/17 + review BLOCK (conv 3773493063976266): 4 blockers all in schema-aware mapping (inv 4) + test coverage. B1 join_specs/sql_functions identifiers pass through unmapped (source leak); B2 SQL fragments unpromotable + override collapses array arity; B3 portable() env-strip dead code -> nested source env ids uploaded to cross-ws package + tautological test; B4 PendingOperations/ReleaseCatalog projections zero coverage. Core safety architecture confirmed STRONG (digest recompute, pinning, separate securables, compensation, prod 2-human all correct). BLOCKER-FIX RUNNING codex/Astra conv 3773493063976345. Owned-paths + integration-honesty PASS.",
       "worktree": "worktrees/m07",
-      "review_conversation_id": "3773493063976266"
+      "review_conversation_id": "3773493063976266",
+      "fix_conversation_id": "3773493063976345"
     },
     {
       "id": "M10",
