@@ -128,7 +128,7 @@
     {
       "id": "M10",
       "desc": "Optimizer champion integration",
-      "status": "RE-RUNNING codex/Astra conv 3773493063976023 (prior resume dispatch ReadTimeout'd -> session idle w/ EMPTY history, never ran; re-sent input). Task 1 committed 0ea5541; continuing 2-13. worktree worktrees/m10 @ 6c5ae3a. REAL revert.py = packages/genie-space-optimizer/src/genie_space_optimizer/integration/revert.py. IN CROSS-REVIEW claude_code conv 3773493063976241 (re-dispatched after runner-offline).",
+      "status": "COMPLETE+VERIFIED impl; review BLOCK (conv 3773493063976241). Architecture GOOD (candidate isolation positive-proof seam, real revert.py gutted, legacy apply/discard rollback dead). B1 CONFIRMED: adapter checks nonexistent flag vc_optimizer_contract_ready -> KeyError when writes enabled (not fail-closed PermissionError; makes feature unenablable; no test exercises real M08 FeatureFlags). B2-B5 pending full fixspec (writing to .polly/m10_fixspec.md conv 3773493063976241). Findings 1-3 make champion-apply non-functional in composition (fail-closed, not live-write hazard), 4-5 leave bypasses open.",
       "conversation_id": "3773493063976023",
       "worktree": "worktrees/m10",
       "review_conversation_id": "3773493063976241"
