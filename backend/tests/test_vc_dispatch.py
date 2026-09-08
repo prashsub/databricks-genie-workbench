@@ -1,14 +1,57 @@
 """Target operation polling and native Job retry tests."""
 
 from dataclasses import replace
+from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control.promotion.dispatch import PendingOperations
+from backend.services.version_control.promotion.releases import (
+    ADMISSION_REFERENCE,
+    ReleaseCatalog,
+    fact_for,
+)
 from backend.tests.test_vc_packages import package_rig, uid
 from backend.tests.test_vc_promotion import promotion_rig, approve
+
+
+def test_pending_projection_admits_only_admission_referenced_local_promotion_facts(promotion_rig):
+    rig = promotion_rig
+    actor = vc.ActorContext('target-human', 'target', 'human')
+    evidence = vc.StageEvidence('VC/1.0', vc.PatchStage.CONFIG_PENDING,
+                                datetime.now(timezone.utc), 'a' * 64, None)
+    admitted = replace(fact_for(rig.request, actor, vc.FactKind.OPERATION, evidence),
+                       approval_reference=ADMISSION_REFERENCE)
+    validated = replace(admitted, event_id=uid(7), operation_id=uid(7), approval_reference=None)
+    foreign = replace(admitted, event_id=uid(8), operation_id=uid(8), binding=rig.source)
+    non_promotion = replace(admitted, event_id=uid(9), operation_id=uid(9), operation_type='restore')
+    projection = PendingOperations(lambda workspace_id, cursor: vc.Page(
+        (admitted, validated, foreign, non_promotion), 'next'))
+
+    page = projection.scan('target', 'cursor')
+
+    assert [item.operation_id for item in page.items] == [admitted.operation_id]
+    assert page.next_cursor == 'next'
+
+
+def test_release_catalog_rejects_conflicting_release_facts(promotion_rig):
+    rig = promotion_rig
+    actor = vc.ActorContext('target-human', 'target', 'human')
+    manifest = vc.from_wire(vc.PackageManifest, json.loads(rig.store.read(rig.reference.manifest_uri)))
+    release = fact_for(rig.request, actor, vc.FactKind.RELEASE, manifest)
+    conflicting = replace(release, release_id=uid(7))
+    catalog = ReleaseCatalog(lambda operation_id: [release, conflicting],
+                             rig.service.outbound_volume, rig.executor.host)
+
+    with pytest.raises(ValueError, match='Ambiguous'):
+        catalog.get(rig.request.identity.operation_id)
+    with pytest.raises(LookupError, match='not registered'):
+        ReleaseCatalog(lambda operation_id: [], rig.service.outbound_volume,
+                       rig.executor.host).get(rig.request.identity.operation_id)
 
 
 def test_polling_discovers_only_local_approved_pending_operations(promotion_rig):
