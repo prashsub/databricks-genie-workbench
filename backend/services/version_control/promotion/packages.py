@@ -4,7 +4,7 @@ import json
 from hashlib import sha256
 
 from backend.services.version_control import contracts as vc
-from backend.services.version_control.promotion.mapping import identifier_resources
+from backend.services.version_control.promotion.mapping import ENVIRONMENT_BINDING_KEYS, identifier_resources
 
 
 def encode(value):
@@ -32,9 +32,15 @@ def policy_digests(policy):
 
 
 def portable(snapshot):
-    content = vc.to_wire(snapshot.serialized_space)
-    for key in ('workspace_id', 'space_id', 'warehouse_id', 'parent_path', 'folder', 'permissions'):
-        content.pop(key, None)
+    def strip_environment(value):
+        if isinstance(value, dict):
+            return {key: strip_environment(child) for key, child in value.items()
+                    if key not in ENVIRONMENT_BINDING_KEYS}
+        if isinstance(value, list):
+            return [strip_environment(child) for child in value]
+        return value
+
+    content = strip_environment(vc.to_wire(snapshot.serialized_space))
     return {'serialized_space': content, 'description': snapshot.restorable_metadata.get('description')}
 
 

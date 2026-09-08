@@ -15,6 +15,10 @@ class RenderedPayload:
 
 TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*|\s+|.")
 IDENTIFIER = re.compile(r'(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*)\Z')
+ENVIRONMENT_BINDING_KEYS = frozenset({
+    'workspace_id', 'space_id', 'warehouse_id', 'sample_warehouse_id', 'parent_path',
+    'folder', 'permissions', 'principals',
+})
 IDENTIFIER_PATHS = (
     (('data_sources', 'tables', '*', 'identifier'), 'table'),
     (('data_sources', 'metric_views', '*', 'identifier'), 'metric_view'),
@@ -122,7 +126,7 @@ def map_executable_fields(value, mappings, path=()):
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = path + (key,)
-            if key in {'warehouse_id', 'workspace_id', 'space_id', 'parent_path', 'permissions', 'principals'}:
+            if key in ENVIRONMENT_BINDING_KEYS:
                 raise ValueError('Environment bindings cannot appear in portable content')
             if key in {'expression', 'sql_expression', 'query', 'function_name'}:
                 raise ValueError('Unsupported executable field requires schema review')
