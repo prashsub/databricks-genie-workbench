@@ -166,18 +166,24 @@
   ],
   "compliance_note": "M07-blocker-fix (conv 6345) and M10-blocker-fix (conv 6415) ran on non-Astra gpt-5-6-sol (platform fallback during rate-limit churn). Per directive, discarded and redoing on Astra. Non-Astra work backed up to vc/m07-nonastra-ref (1491eac, incl F1/F2) and vc/m10-nonastra-ref (c52cc62) for reference/diff. Worktrees reset to compliant Astra bases: m07=d1163a3, m10=8bafb8f.",
   "m10_redo": {
-    "status": "dispatched_astra",
-    "conv": "3773493063976449",
-    "model": "databricks-gpt-6-astra",
-    "base": "8bafb8f",
-    "spec": ".polly/m10_fixspec.md"
+    "status": "fix_complete_verified_in_rereview",
+    "conv": "3773493063976484 (pi/system.ai.gpt-6-astra, done)",
+    "head": "c93ee73",
+    "commits": "B1-B5 + B5-propagation e65af6b + reconcile c93ee73",
+    "verified": "918 package pass +6 integ deselected, 15 backend adapter pass, B2+B5 mutation-confirmed, owned-paths clean",
+    "review_conv": "3773493063976495 (claude_code)"
   },
   "m07_redo": {
-    "status": "queued_astra",
+    "status": "dispatched_astra",
+    "conv": "3773493063976496",
+    "worker": "pi",
+    "model": "system.ai.gpt-6-astra",
     "base": "d1163a3",
     "specs": [
-      ".polly/m07_fixspec.md (B1-B4)",
-      ".polly/m07_fix2_spec.md (F1/F2)"
-    ]
-  }
+      "m07_fixspec.md B1-B4",
+      "m07_fix2_spec.md F1/F2"
+    ],
+    "note": "routed to pi/Astra because codex terminal-boot degraded (httpx ReadTimeout x3)"
+  },
+  "infra_note": "codex Native terminal failed to start x3 (control-plane httpx.ReadTimeout in session-mirroring, NOT missing CLI, NOT Astra). Workaround: route Astra implement work to pi (headless, system.ai.gpt-6-astra) - still Astra-compliant. Both Astra endpoints also intermittently 429."
 }

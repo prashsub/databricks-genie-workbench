@@ -1,0 +1,1521 @@
+diff --git a/backend/services/version_control/optimizer_adapter.py b/backend/services/version_control/optimizer_adapter.py
+index 64c05e6..0f40e14 100644
+--- a/backend/services/version_control/optimizer_adapter.py
++++ b/backend/services/version_control/optimizer_adapter.py
+@@ -1,11 +1,13 @@
+ """Target-local M10 seam. Composition supplies durable VC/1.0 implementations."""
+ 
+-from dataclasses import dataclass
++from dataclasses import dataclass, replace
+ from datetime import datetime, timezone
+ from typing import Protocol
+ from uuid import NAMESPACE_URL, uuid5
+ 
+ from backend.services.version_control import contracts as vc
++from backend.services.version_control.governance.approvals import request_digest
++from backend.services.version_control.governance.facts import DurableOperationFacts
+ 
+ 
+ def source_digest(serialized_space, description):
+@@ -36,6 +38,27 @@ class ChampionMutationRequest(vc.MutationRequest):
+     source_payload_digest: vc.Digest
+ 
+ 
++class ChampionOperationFacts(DurableOperationFacts):
++    """Target-local durable facts with the M10 champion request wire extension."""
++
++    def get_request(self, operation_id):
++        rows = self._read()
++        base_fields = vc.MutationRequest.__dataclass_fields__
++        base_rows = [dict(row, operation_request={key: value for key, value in row["operation_request"].items()
++                                                 if key in base_fields})
++                     if ("operation_request" in row
++                         and row["operation_request"].get("operation_type") == "optimizer_apply")
++                     else row for row in rows]
++        projected = DurableOperationFacts(lambda: base_rows, self._insert).get_request(operation_id)
++        if projected.request.operation_type != "optimizer_apply":
++            return projected
++        requests = [vc.from_wire(ChampionMutationRequest, row["operation_request"])
++                    for row in rows if row["operation_id"] == operation_id and "operation_request" in row]
++        if any(request != requests[0] for request in requests):
++            raise ValueError("Ambiguous durable champion request")
++        return vc.ApprovedOperation(requests[0], projected.approval)
++
++
+ class ChampionSources(Protocol):
+     def load(self, run_id: str, champion_id: str) -> ChampionArtifact:
+         """Read immutable, finalized source; never authorize via telemetry fallback."""
+@@ -73,7 +96,7 @@ class OptimizerChampionAdapter:
+ 
+     def apply(self, run_id, champion_id, binding, expected_base, executor):
+         if self.flags is None or any(self.flags.enabled(name) is not True for name in (
+-            "vc_writes_enabled", "vc_optimizer_apply_enabled", "vc_optimizer_contract_ready",
++            "vc_writes_enabled", "vc_optimizer_apply_enabled",
+         )):
+             raise PermissionError("Optimizer champion writes are disabled")
+         if (executor.workspace_id != binding.workspace_id or executor.actor_kind != "service"
+@@ -91,20 +114,18 @@ class OptimizerChampionAdapter:
+         if not source.requester_id:
+             raise PermissionError("Requester must be durably bound to the source")
+         if source.approval_id is None:
+-            if (binding.environment != "dev"
+-                    or self.identity.can_edit(source.requester_id, binding) is not True):
+-                raise PermissionError("Requester edit right or approved release policy is required")
+-        digest = vc.canonical_json_hash("vc-optimizer-request/1", vc.to_wire(source))
++            raise PermissionError("Requester must supply an M06 approval for optimizer champion apply")
+         key = vc.canonical_json_hash("vc-optimizer-run/1", {
+             "run_id": run_id, "binding_id": binding.binding_id,
+             "binding_revision": binding.binding_revision, "workspace_id": binding.workspace_id,
+         })
+         request = ChampionMutationRequest(
+-            vc.RequestIdentity(str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key)), key, digest),
++            vc.RequestIdentity(str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key)), key, "0" * 64),
+             binding, "optimizer_apply",
+             source.source_version_id, expected_base, source.serialized_space, source.description,
+             source.approval_id, vc.Origin.OPTIMIZER, run_id, champion_id, source.payload_digest,
+         )
++        request = replace(request, identity=replace(request.identity, request_digest=request_digest(request)))
+         persisted = self.requests.prepare(request, source.requester_id)
+         if persisted != request:
+             raise ValueError("Run already has a different champion/digest")
+diff --git a/backend/tests/test_vc_optimizer_adapter.py b/backend/tests/test_vc_optimizer_adapter.py
+index 6826372..fc2a3e9 100644
+--- a/backend/tests/test_vc_optimizer_adapter.py
++++ b/backend/tests/test_vc_optimizer_adapter.py
+@@ -1,17 +1,21 @@
+-"""M10 VC/1.0 seam tests: backend services are Protocol fakes only."""
++"""M10 VC/1.0 seam tests, including real M06/M08 provider contracts."""
+ 
+ from dataclasses import replace
+ from datetime import datetime, timedelta, timezone
+ from unittest.mock import Mock
+-from uuid import uuid4
++from uuid import NAMESPACE_URL, uuid4, uuid5
+ 
+ import pytest
+ 
+ from backend.services.version_control import contracts as vc
++from backend.services.version_control.governance.approvals import ApprovalService, request_digest
++from backend.services.version_control.governance.facts import fact_key
+ from backend.services.version_control.optimizer_adapter import (
+-    ChampionArtifact, OptimizerChampionAdapter, source_digest,
++    ChampionArtifact, ChampionMutationRequest, ChampionOperationFacts, OptimizerChampionAdapter, source_digest,
+ )
+-from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
++from backend.tests.vc_fakes.fixtures import FakeIdentityProvider, binding_fixture, executor_fixture
++from backend.tests.vc_fakes.stores import FakeFactStore, ManualClock
++from backend.services.version_control.platform.feature_flags import FeatureFlags
+ 
+ 
+ @pytest.fixture
+@@ -22,7 +26,7 @@ def rig():
+     fingerprints = vc.Fingerprints("a" * 64, "b" * 64, "c" * 64, "vc-c14n/1")
+     source = ChampionArtifact("run", "champion", binding, fingerprints.state_digest,
+                               str(uuid4()), payload, "description",
+-                              source_digest(payload, "description"), "requester", None)
++                              source_digest(payload, "description"), "requester", str(uuid4()))
+     sources = Mock()
+     sources.load.return_value = source
+     gate = Mock(spec=vc.MutationGate)
+@@ -63,6 +67,106 @@ def test_final_champion_applies_once_through_shared_gate(rig):
+     gate.execute.assert_called_once()
+ 
+ 
++def test_champion_request_digest_satisfies_m06_binding(rig):
++    adapter, source, executor, gate, _, _ = rig
++    adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++    request = gate.execute.call_args.args[0]
++    assert request.identity.request_digest == request_digest(request)
++    assert request.source_payload_digest == source_digest(source.serialized_space, source.description)
++    assert request.identity.request_digest != request.source_payload_digest
++
++
++@pytest.mark.parametrize("scenario", ["approved", "missing", "expired", "revoked", "target_revoked"])
++def test_champion_apply_authorizes_through_real_approval_service(rig, scenario):
++    adapter, source, executor, gate, requests, _ = rig
++    clock = ManualClock(datetime.now(timezone.utc))
++    store = FakeFactStore(clock)
++    facts = ChampionOperationFacts(lambda: tuple(row.payload for row in store.state.rows),
++                                   store.append, writes_enabled=True)
++    identity = FakeIdentityProvider()
++    target_identity = FakeIdentityProvider()
++    identity.run_as[executor.execution_ref] = executor.principal_id
++    target_identity.run_as[executor.execution_ref] = executor.principal_id
++    identity.edit_rights.add((source.requester_id, source.binding.workspace_id,
++                             source.binding.binding_id, source.binding.binding_revision))
++    registry = Mock(spec=vc.Registry)
++    registry.resolve.return_value = source.binding
++    service = ApprovalService(facts, identity, registry, clock.now,
++                              target_identity=lambda selected: target_identity, writes_enabled=True)
++    key = vc.canonical_json_hash("vc-optimizer-run/1", {
++        "run_id": source.run_id, "binding_id": source.binding.binding_id,
++        "binding_revision": source.binding.binding_revision, "workspace_id": source.binding.workspace_id,
++    })
++    operation_id = str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key))
++    source = replace(source, approval_id=None if scenario == "missing" else operation_id)
++    request = ChampionMutationRequest(
++        vc.RequestIdentity(operation_id, key, "0" * 64), source.binding, "optimizer_apply",
++        source.source_version_id, source.expected_base, source.serialized_space, source.description,
++        source.approval_id, vc.Origin.OPTIMIZER, source.run_id, source.champion_id, source.payload_digest,
++    )
++    request = replace(request, identity=replace(request.identity, request_digest=request_digest(request)))
++    actor = vc.ActorContext(source.requester_id, source.binding.workspace_id, "human")
++    evidence_digest = "d" * 64
++    provisional = vc.OperationFact(
++        event_id=operation_id, fact_kind=vc.FactKind.OPERATION, operation_id=operation_id,
++        transition_sequence=0, event_key="", binding=source.binding, request=request.identity,
++        operation_type="optimizer_apply", requester_id=source.requester_id, actor=actor,
++        status=vc.FactStatus.REQUESTED, recorded_at=clock.now(),
++        evidence=vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_PENDING, clock.now(), evidence_digest, None),
++    )
++    event_key = fact_key(provisional)
++    facts.record_request(request, replace(provisional, event_key=event_key,
++                                         event_id=str(uuid5(NAMESPACE_URL, event_key))))
++    if scenario != "missing":
++        fingerprints = vc.Fingerprints("a" * 64, "b" * 64, "c" * 64, "vc-c14n/1")
++        inputs = vc.ApprovalInputs(
++            "VC/1.0", operation_id, "optimizer_apply", source.source_version_id, source.payload_digest,
++            fingerprints, None, None, vc.canonical_json_hash("vc-rendered-target/1", {
++                "serialized_space": source.serialized_space, "description": source.description,
++            }), None, "vc-c14n/1", source.binding, fingerprints, None, evidence_digest, evidence_digest,
++            evidence_digest, {"minimum": 2}, source.requester_id, {"verify_only": True},
++            clock.now() + timedelta(hours=1),
++        )
++        service.request(inputs, actor)
++        for subject in ("human-1", "human-2"):
++            identity.memberships[(subject, source.binding.workspace_id)] = frozenset({"approvers"})
++            target_identity.memberships[(subject, source.binding.workspace_id)] = frozenset({"target-approvers"})
++            service.vote(operation_id, "approve", vc.ActorContext(subject, source.binding.workspace_id, "human"))
++        if scenario == "expired":
++            clock.advance(timedelta(hours=2))
++        elif scenario == "revoked":
++            identity.memberships.clear()
++        elif scenario == "target_revoked":
++            target_identity.memberships.clear()
++    adapter.sources.load.return_value = source
++    adapter.flags = FeatureFlags(vc_writes_enabled=True, vc_optimizer_apply_enabled=True)
++    adapter.facts = facts
++    adapter.identity = identity
++    adapter.approvals = service
++    grants = []
++    authorize = service.authorize
++
++    def capture_grant(request, job):
++        grant = authorize(request, job)
++        grants.append(grant)
++        return grant
++
++    service.authorize = Mock(side_effect=capture_grant)
++    if scenario == "approved":
++        assert adapter.apply("run", "champion", source.binding, source.expected_base,
++                             executor) is gate.execute.return_value
++        assert len(grants) == 1 and isinstance(grants[0], vc.AuthorizationGrant)
++        assert grants[0].approval_id == operation_id
++        gate.execute.assert_called_once_with(request, executor)
++    else:
++        with pytest.raises(PermissionError):
++            adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++        gate.execute.assert_not_called()
++        if scenario == "missing":
++            service.authorize.assert_not_called()
++            requests.prepare.assert_not_called()
++
++
+ def test_champion_apply_rejects_app_executor_or_tampered_source(rig):
+     adapter, source, executor, gate, _, _ = rig
+     with pytest.raises(PermissionError):
+@@ -82,6 +186,24 @@ def test_optimizer_write_switches_default_off(rig):
+     gate.execute.assert_not_called()
+ 
+ 
++@pytest.mark.parametrize("enabled", [False, True])
++def test_adapter_uses_only_m08_declared_switches(rig, enabled):
++    adapter, source, executor, gate, _, _ = rig
++    flags = FeatureFlags(vc_writes_enabled=enabled, vc_optimizer_apply_enabled=enabled)
++    adapter.flags = Mock(wraps=flags)
++    try:
++        if enabled:
++            assert adapter.apply("run", "champion", source.binding, source.expected_base,
++                                 executor) is gate.execute.return_value
++            gate.execute.assert_called_once()
++        else:
++            with pytest.raises(PermissionError):
++                adapter.apply("run", "champion", source.binding, source.expected_base, executor)
++            gate.execute.assert_not_called()
++    finally:
++        assert {call.args[0] for call in adapter.flags.enabled.call_args_list} <= flags.registry.keys()
++
++
+ def test_retry_or_second_champion_in_same_run_cannot_append_second_optimizer_version(rig):
+     adapter, source, executor, gate, requests, _ = rig
+     durable_requests = {}
+@@ -130,9 +252,11 @@ def test_job_executor_verifies_requester_edit_or_release_policy(rig):
+     adapter.identity = Mock(spec=vc.IdentityProvider)
+     adapter.identity.can_edit.side_effect = lambda subject, binding: subject == executor.principal_id
+     adapter.approvals = Mock(spec=vc.ApprovalService)
++    adapter.sources.load.return_value = replace(source, approval_id=None)
+     with pytest.raises(PermissionError, match="Requester"):
+         adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+-    adapter.identity.can_edit.assert_called_once_with("requester", source.binding)
++    adapter.identity.can_edit.assert_not_called()
++    adapter.approvals.authorize.assert_not_called()
+     gate.execute.assert_not_called()
+ 
+ 
+diff --git a/packages/genie-space-optimizer/M10_IMPLEMENTATION.md b/packages/genie-space-optimizer/M10_IMPLEMENTATION.md
+index 780971d..7f04a70 100644
+--- a/packages/genie-space-optimizer/M10_IMPLEMENTATION.md
++++ b/packages/genie-space-optimizer/M10_IMPLEMENTATION.md
+@@ -40,6 +40,36 @@ six platform probes, while default selection deselected all six.
+ 
+ ## Real-platform deployment BLOCKER
+ 
++### Cross-review B4: explicit fail-closed milestone (Option 2)
++
++The four-task DAG is **not deployable for optimization writes** in M10. No
++production `IsolationRegistry` or create/own/tear-down candidate lifecycle is
++installed. The QC benchmark-push block and Optimize loop block now explicitly
++raise `PermissionError` naming this deployment blocker before invoking their
++mutation paths. Their existing failure-stage handlers record the error and
++re-raise; the tasks must not report successful optimization. No bundle parameters
++or task definitions change. Both write switches remain disabled by default.
++
++Benchmark publication and quality enrichment refuse raw clients before any API
++or telemetry I/O. Only positively proven `CandidateSession` clients may enter
++these library paths. Enrichment authorization failures propagate rather than
++being logged and ignored. This is not a claim that isolated platform resources
++exist: M08 target-local composition and real lifecycle validation must land
++before replacing the explicit job refusal with constructed sessions.
++
++### Cross-review B1–B3: provider contracts
++
++Champion applies use only the two declared M08 switches, the M06 canonical
++request digest, and an M06 approval even in development (B3 Option 1). Offline
++tests exercise real `FeatureFlags` and `ApprovalService` against the M02 fake
++fact store, including expiry and approver membership revocation. The M10-owned
++`ChampionOperationFacts` codec preserves the champion request extension while
++delegating approval projection to M06; target-local composition must inject it
++(or an equivalent lossless codec) into both the adapter and approval service.
++The base M06 request decoder alone does not accept M10's extra wire fields.
++
++### Platform validation still required
++
+ `tests/integration/test_vc_optimizer_platform.py` is **not platform-validated**.
+ Its six Jobs/Genie/Delta probes remain a deployment blocker until M04/M06/M08
+ target-local composition and disposable fixtures are deployed and exercised.
+@@ -69,3 +99,54 @@ the manifest's service principal. Fixture preparation must establish the
+ scenario-specific initial state, approvals, and ambiguous-outcome injection.
+ Missing configuration fails explicitly; it is never converted into a skip or
+ claimed as a platform pass.
++
++
++## B5 propagation and downstream reconciliation (September 8, 2026)
++
++Task 1 (`e65af6b`) preserves the RED-first refusal test: all three collected
++cases (description, instructions, prompt matching) failed at `f0e1056`.
++Explicit `PermissionError` propagation at the prompt-matching and outer
++boundaries makes them pass without recording COMPLETE or mutating the client
++following refusal. The focused isolation file passed all 30 collected cases.
++
++Task 2 started with `uv run pytest -q`: **32 failed, 880 passed, 6 deselected**.
++Every failure was a retired raw-client invocation, not a regression in the
++underlying candidate-local behavior. All existing behavioral assertions remain:
++
++| Unit file | Previously failing collected cases | Resolution / retained coverage |
++| --- | ---: | --- |
++| `test_preflight_benchmark_push.py` | 12 | Use positively owned candidate clients; retain invalid/SQL-less filtering, recorded warning authorization, exact question ID handoff, missing/ambiguous mapping failures, added/excluded/changed ledgers, SQL repair reasons, prune recommendations, disabled publishing, API failures and hard-cap failures. |
++| `test_applier_rls_entity_matching.py` | 5 | Use candidate clients; retain plain-table enables and table/column/metric-view/mixed RLS exclusions. |
++| `test_entity_matching_scoring.py` | 12 (11 test functions) | Use candidate clients; retain idempotency, deterministic ties, unknown types, displacement, PII and RLS disabling, unchanged slots, both legacy/smarter-scoring PII cases, dry-run behavior and both semantic-view distinctions. |
++| `test_space_quality_enrichment.py` | 3 | Use candidate clients; retain top-level description vs serialized-space separation, instruction seeding, matching audit and propagation waits. Read-only context/scan tests are unchanged. |
++
++The shared fixture constructs real `CandidateSession` wrappers over exact
++in-memory ownership and mock transport. It does not bypass the guard or claim
++platform resource creation. Six additional cases assert raw, absent and
++wrong-candidate clients fail before publication, stage/ledger writes or input
++mutation, with publication both enabled and disabled. Test-only typing/import
++cleanup keeps lint and typecheck green; no existing assertion was removed.
++
++Verification from `packages/genie-space-optimizer`:
++
++```bash
++uv run pytest tests/test_vc_candidate_isolation.py -q
++uv run pytest tests/unit/test_preflight_benchmark_push.py tests/unit/test_applier_rls_entity_matching.py tests/unit/test_entity_matching_scoring.py tests/unit/test_space_quality_enrichment.py -q
++uv run pytest -q
++uv tool run ruff check tests/test_vc_candidate_isolation.py tests/conftest.py tests/unit/test_preflight_benchmark_push.py tests/unit/test_applier_rls_entity_matching.py tests/unit/test_entity_matching_scoring.py tests/unit/test_space_quality_enrichment.py
++uv run ty check tests/test_vc_candidate_isolation.py tests/conftest.py tests/unit/test_preflight_benchmark_push.py tests/unit/test_applier_rls_entity_matching.py tests/unit/test_entity_matching_scoring.py tests/unit/test_space_quality_enrichment.py
++```
++
++Final full suite: **918 passed, 6 integration cases deselected**. No live
++Databricks calls or platform validation were performed. Test-file lint and
++typecheck pass. Targeted production checks were also run:
++
++```bash
++uv tool run ruff check src/genie_space_optimizer/optimization/space_quality_enrichment.py
++uv run ty check src/genie_space_optimizer/optimization/space_quality_enrichment.py
++```
++
++The production file retains 10 pre-existing lint findings and two pre-existing
++`no-matching-overload` type errors at lines 203–204. Both sets were reproduced
++on the file from `f0e1056`; unrelated production cleanup is not part of these
++blocker fixes. The real-platform deployment blocker above remains in force.
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/version_control.py b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/version_control.py
+index e419315..d22d63f 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/integration/version_control.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/integration/version_control.py
+@@ -6,6 +6,13 @@ from typing import Protocol, Any
+ from dataclasses import dataclass
+ 
+ 
++def require_candidate_session_for_job():
++    raise PermissionError(
++        "M10 deployment blocker: no target-local CandidateSession lifecycle is installed; "
++        "QC benchmark publication and optimization/enrichment writes are disabled"
++    )
++
++
+ class IsolationRegistry(Protocol):
+     def resolve_physical(self, workspace_id: str, space_id: str) -> Any: ...
+     def optimizer_owner(self, workspace_id: str, space_id: str) -> str | None: ...
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_benchmark_qc_and_repair.py b/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_benchmark_qc_and_repair.py
+index 7546748..9c596ac 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_benchmark_qc_and_repair.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_benchmark_qc_and_repair.py
+@@ -91,6 +91,7 @@ from genie_space_optimizer.optimization.preflight import (
+ from genie_space_optimizer.optimization.space_quality_enrichment import (
+     build_prompt_matching_context,
+ )
++from genie_space_optimizer.integration.version_control import require_candidate_session_for_job
+ from genie_space_optimizer.optimization.state import (
+     ensure_optimization_tables,
+     load_artifacts,
+@@ -1034,6 +1035,7 @@ _window: dict[str, Any] = {}
+ _benchmark_mutation_count = 0
+ if benchmark_policy == "repair_allowed" and _benchmarks:
+     try:
++        require_candidate_session_for_job()
+         _banner("Step 01c — Push Benchmarks to Live Space")
+         _push = preflight_push_benchmarks_to_space(
+             w, spark, run_id, space_id, catalog, schema, _benchmarks,
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_optimize.py b/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_optimize.py
+index 8d55249..5fd25a0 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_optimize.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/jobs/run_optimize.py
+@@ -68,6 +68,7 @@ from genie_space_optimizer.optimization.unified_loop import (
+     run_unified_optimization_loop,
+     target_accuracy_percent,
+ )
++from genie_space_optimizer.integration.version_control import require_candidate_session_for_job
+ 
+ dbutils = cast(Any, globals().get("dbutils"))
+ 
+@@ -333,6 +334,7 @@ except Exception as exc:
+ # COMMAND ----------
+ 
+ try:
++    require_candidate_session_for_job()
+     _banner("Running unified native-only optimization loop")
+     loop_out = run_unified_optimization_loop(
+         w,
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py
+index cbe2139..5ed8935 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/applier.py
+@@ -1616,6 +1616,9 @@ def auto_apply_prompt_matching(
+     ``pre_snapshot``, ``post_snapshot``, and summary stats including
+     rejection reason counts under ``rejected_by_reason``.
+     """
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++
++    assert_candidate_write(w, space_id)
+     if not ENABLE_SMARTER_SCORING:
+         return _legacy_apply_em(w, space_id, config, benchmarks=benchmarks)
+ 
+@@ -2011,6 +2014,9 @@ def _legacy_apply_em(
+     Scheduled for removal in a follow-up release (along with the
+     ``ENABLE_SMARTER_SCORING`` flag).
+     """
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++
++    assert_candidate_write(w, space_id)
+     parsed = config.get("_parsed_space", config)
+     ds = parsed.get("data_sources", {})
+     tables, metric_views, unknown_sources = _prompt_matching_sources(config)
+@@ -4051,11 +4057,11 @@ def apply_patch_set(
+ 
+     Returns an ``apply_log`` dict with pre/post snapshots and rollback info.
+     """
+-    if w is not None:
+-        from genie_space_optimizer.integration.version_control import assert_candidate_write
+-        assert_candidate_write(w, space_id)
+-        if apply_mode != "genie_config":
+-            raise PermissionError("Candidate evaluation cannot mutate shared UC artifacts")
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++
++    if apply_mode != "genie_config":
++        raise PermissionError("Candidate evaluation cannot mutate shared UC artifacts")
++    assert_candidate_write(w, space_id)
+     pre_snapshot = copy.deepcopy(metadata_snapshot)
+     config = copy.deepcopy(metadata_snapshot)
+ 
+@@ -4563,9 +4569,9 @@ def rollback(
+     Primary mechanism: replace current config with ``apply_log["pre_snapshot"]``.
+     Fallback: execute rollback_commands in reverse order (HIGH -> MEDIUM -> LOW).
+     """
+-    if w is not None:
+-        from genie_space_optimizer.integration.version_control import assert_candidate_write
+-        assert_candidate_write(w, space_id)
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++
++    assert_candidate_write(w, space_id)
+     pre_snapshot = apply_log.get("pre_snapshot")
+     if pre_snapshot is None:
+         return {
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/preflight.py b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/preflight.py
+index 3c8537a..24d335a 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/preflight.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/preflight.py
+@@ -2682,6 +2682,9 @@ def preflight_push_benchmarks_to_space(
+ 
+     Returns a summary dict used by the caller and unit tests.
+     """
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++
++    assert_candidate_write(w, space_id)
+     rejected_benchmarks = rejected_benchmarks or []
+     changed_benchmarks = changed_benchmarks or []
+     changed_benchmarks_by_id = {
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/space_quality_enrichment.py b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/space_quality_enrichment.py
+index b250641..8201d0b 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/space_quality_enrichment.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/space_quality_enrichment.py
+@@ -397,7 +397,10 @@ def run_space_quality_enrichment(
+     prompt_matching_context: dict[str, Any] | None = None,
+     benchmarks: list[dict[str, Any]] | None = None,
+ ) -> SpaceQualityEnrichmentResult:
+-    """Apply narrow, non-fatal quality curation before baseline eval."""
++    """Curate an isolated candidate; authorization failures are always fatal."""
++    from genie_space_optimizer.integration.version_control import assert_candidate_write
++
++    assert_candidate_write(w, space_id)
+     working_raw = copy.deepcopy(raw_config)
+     parsed = parsed_space_from_config(working_raw)
+     result = SpaceQualityEnrichmentResult(
+@@ -547,6 +550,9 @@ def run_space_quality_enrichment(
+         )
+         return result
+ 
++    except PermissionError:
++        # Candidate-write refusals must abort, never record a completed stage.
++        raise
+     except Exception as exc:  # pragma: no cover - defensive non-fatal boundary
+         _record_error("unexpected", exc)
+         write_stage(
+@@ -597,6 +603,8 @@ def _maybe_apply_prompt_matching(
+             runtime_config,
+             benchmarks=benchmarks,
+         )
++    except PermissionError:
++        raise
+     except Exception as exc:
+         on_error("prompt_matching", exc)
+         return patch_index
+@@ -780,6 +788,8 @@ def _maybe_enrich_description(
+             schema,
+         )
+         return patch_index + 1
++    except PermissionError:
++        raise
+     except Exception as exc:
+         on_error("description", exc)
+         return patch_index
+@@ -855,6 +865,8 @@ def _maybe_seed_instructions(
+             schema,
+         )
+         return patch_index + 1
++    except PermissionError:
++        raise
+     except Exception as exc:
+         on_error("instructions", exc)
+         return patch_index
+diff --git a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py
+index b7c2c6e..1873b64 100644
+--- a/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py
++++ b/packages/genie-space-optimizer/src/genie_space_optimizer/optimization/unified_loop.py
+@@ -2850,6 +2850,8 @@ def run_unified_optimization_loop(
+             benchmarks=benchmarks,
+         )
+         current_config = enrichment_result.current_config
++    except PermissionError:
++        raise
+     except Exception:
+         logger.warning(
+             "Space quality enrichment failed before baseline eval; continuing",
+diff --git a/packages/genie-space-optimizer/tests/conftest.py b/packages/genie-space-optimizer/tests/conftest.py
+index 94a13fb..31fbba2 100644
+--- a/packages/genie-space-optimizer/tests/conftest.py
++++ b/packages/genie-space-optimizer/tests/conftest.py
+@@ -3,7 +3,7 @@
+ from __future__ import annotations
+ 
+ from datetime import datetime, timezone
+-from unittest.mock import MagicMock, PropertyMock, patch
++from unittest.mock import MagicMock, patch
+ 
+ import pandas as pd
+ import pytest
+@@ -280,3 +280,39 @@ def sample_clusters():
+             "asi_counterfactual_fixes": [],
+         },
+     ]
++
++
++@pytest.fixture
++def candidate_client_factory():
++    """Real candidate guard over in-memory ownership and mock I/O.
++
++    Unit-test identities only: not evidence of a deployed platform lifecycle.
++    Only the exact workspace/resource/run tuple receives ownership proof.
++    """
++    from genie_space_optimizer.integration.version_control import (
++        CandidateSession,
++        EvaluationBinding,
++    )
++
++    def make_client(space_id: str, run_id: str = "run"):
++        transport = MagicMock()
++        resource = EvaluationBinding("unit-workspace", space_id, run_id)
++
++        class Registry:
++            def resolve_physical(self, workspace_id, space_id):
++                return None
++
++            def optimizer_owner(self, workspace_id, space_id):
++                if (workspace_id, space_id) == (resource.workspace_id, resource.space_id):
++                    return run_id
++                return None
++
++            def workspace_id_for(self, client):
++                assert client is transport
++                return resource.workspace_id
++
++        return CandidateSession(
++            resource, Registry(), transport, writes_enabled=True,
++        ).client
++
++    return make_client
+diff --git a/packages/genie-space-optimizer/tests/test_vc_candidate_isolation.py b/packages/genie-space-optimizer/tests/test_vc_candidate_isolation.py
+index 798d1ca..d19c586 100644
+--- a/packages/genie-space-optimizer/tests/test_vc_candidate_isolation.py
++++ b/packages/genie-space-optimizer/tests/test_vc_candidate_isolation.py
+@@ -1,5 +1,8 @@
++import ast
+ from dataclasses import dataclass
+-from unittest.mock import Mock
++from pathlib import Path
++from typing import Any, cast
++from unittest.mock import MagicMock, Mock
+ 
+ import pytest
+ 
+@@ -61,7 +64,9 @@ def test_candidate_writes_default_off():
+ 
+ 
+ def test_legacy_loop_refuses_unproven_target_before_work():
+-    from genie_space_optimizer.optimization.unified_loop import run_unified_optimization_loop
++    from genie_space_optimizer.optimization.unified_loop import (
++        run_unified_optimization_loop,
++    )
+ 
+     with pytest.raises(PermissionError):
+         run_unified_optimization_loop(Mock(), Mock(), run_id="run", space_id="live",
+@@ -69,19 +74,129 @@ def test_legacy_loop_refuses_unproven_target_before_work():
+                                       max_attempts=1, target_accuracy=90)
+ 
+ 
+-@pytest.mark.parametrize("entry", ["config", "description", "patch_set", "rollback"])
+-def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry):
+-    from genie_space_optimizer.common.genie_client import patch_space_config, update_space_description
+-    from genie_space_optimizer.optimization.applier import apply_patch_set, rollback
++@pytest.mark.parametrize("entry", ["jobs", "benchmark_push", "enrichment", "loop_enrichment"])
++def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session(entry, monkeypatch):
++    from genie_space_optimizer.integration import version_control
++    from genie_space_optimizer.optimization import (
++        preflight,
++        space_quality_enrichment,
++        unified_loop,
++    )
++
++    client = MagicMock()
++    spark = MagicMock()
++    if entry == "jobs":
++        jobs = Path(version_control.__file__).parents[1] / "jobs"
++        guarded = []
++        for name in ("run_intake_and_snapshot", "run_benchmark_qc_and_repair",
++                     "run_optimize", "run_publish_and_audit"):
++            tree = ast.parse((jobs / f"{name}.py").read_text())
++            for node in ast.walk(tree):
++                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
++                    assert node.func.id not in {"patch_space_config", "update_space_description"}
++                    if node.func.id not in {"preflight_push_benchmarks_to_space", "run_unified_optimization_loop"}:
++                        continue
++                    enclosing = [block for block in ast.walk(tree) if isinstance(block, ast.Try)
++                                 and any(node in ast.walk(statement) for statement in block.body)]
++                    assert any(isinstance(block.body[0], ast.Expr)
++                               and isinstance(block.body[0].value, ast.Call)
++                               and isinstance(block.body[0].value.func, ast.Name)
++                               and block.body[0].value.func.id == "require_candidate_session_for_job"
++                               for block in enclosing), f"{name}: {node.func.id} lacks explicit isolation refusal"
++                    guarded.append(node.func.id)
++        assert sorted(guarded) == ["preflight_push_benchmarks_to_space", "run_unified_optimization_loop"]
++        with pytest.raises(PermissionError, match="M10 deployment blocker.*CandidateSession"):
++            version_control.require_candidate_session_for_job()
++    elif entry == "benchmark_push":
++        with pytest.raises(PermissionError):
++            preflight.preflight_push_benchmarks_to_space(
++                client, spark, "run", "live", "cat", "sch",
++                [{"id": "q1", "question": "Count?", "expected_sql": "SELECT 1", "validation_status": "valid"}],
++            )
++    elif entry == "enrichment":
++        with pytest.raises(PermissionError):
++            space_quality_enrichment.run_space_quality_enrichment(
++                client, spark, run_id="run", space_id="live", raw_config={}, catalog="cat", schema="sch",
++            )
++    else:
++        session = version_control.CandidateSession(
++            EvaluationBinding("workspace", "candidate", "run"), IsolationRegistry(), client, writes_enabled=True,
++        )
++        monkeypatch.setattr(unified_loop, "fetch_space_config", Mock(return_value={}))
++        monkeypatch.setattr(unified_loop, "run_space_quality_enrichment",
++                            Mock(side_effect=PermissionError("enrichment isolation refused")))
++        evaluate = Mock()
++        monkeypatch.setattr(unified_loop, "_native_eval", evaluate)
++        with pytest.raises(PermissionError, match="enrichment isolation refused"):
++            unified_loop.run_unified_optimization_loop(
++                client, spark, run_id="run", space_id="candidate", benchmarks=[], catalog="cat", schema="sch",
++                levers=[], max_attempts=1, target_accuracy=90, candidate_session=session,
++            )
++        evaluate.assert_not_called()
++    assert client.mock_calls == []
++    assert spark.mock_calls == []
+ 
+-    client = Mock()
+-    with pytest.raises(PermissionError):
++
++@pytest.mark.parametrize("write", ["description", "instructions", "prompt_matching"])
++def test_enrichment_never_swallows_candidate_write_refusal(write, monkeypatch):
++    from genie_space_optimizer.integration.version_control import CandidateSession
++    from genie_space_optimizer.optimization import (
++        space_quality_enrichment as enrichment,
++    )
++
++    client = MagicMock()
++    session = CandidateSession(EvaluationBinding("workspace", "candidate", "run"),
++                               IsolationRegistry(), client, writes_enabled=True)
++    scan = {"checks": [{"passed": write != "description"}, {}, {}, {"passed": write != "instructions"}]}
++    monkeypatch.setattr(enrichment, "calculate_score", Mock(return_value=scan))
++    stages = Mock()
++    monkeypatch.setattr(enrichment, "write_stage", stages)
++    monkeypatch.setattr(enrichment, "write_artifact", Mock())
++    monkeypatch.setattr(enrichment, "validate_instruction_text", Mock(return_value=(True, [])))
++    monkeypatch.setattr("genie_space_optimizer.optimization.optimizer_utils._generate_space_description",
++                        Mock(return_value="Candidate description"))
++    target = {"description": "update_space_description", "instructions": "patch_space_config",
++              "prompt_matching": "auto_apply_prompt_matching"}[write]
++    denied = Mock(side_effect=PermissionError("candidate ownership revoked"))
++    monkeypatch.setattr(enrichment, target, denied)
++    with pytest.raises(PermissionError, match="candidate ownership revoked"):
++        enrichment.run_space_quality_enrichment(
++            session.client, MagicMock(), run_id="run", space_id="candidate",
++            raw_config={"_parsed_space": {"data_sources": {"tables": [{"identifier": "cat.sch.table"}]},
++                                           "instructions": {}}},
++            catalog="cat", schema="sch", prompt_matching_context={"version": 1},
++        )
++    denied.assert_called_once()
++    assert all(call.args[3] != "COMPLETE" for call in stages.call_args_list)
++    assert client.mock_calls == []
++
++
++@pytest.mark.parametrize("client_kind", ["raw", "none"])
++@pytest.mark.parametrize("entry", ["config", "description", "patch_set", "patch_set_both", "rollback",
++                                   "auto_apply_prompt_matching", "auto_apply_prompt_matching_legacy", "legacy_em"])
++def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry, client_kind, monkeypatch):
++    from genie_space_optimizer.common.genie_client import (
++        patch_space_config,
++        update_space_description,
++    )
++    from genie_space_optimizer.optimization import applier
++
++    client = cast(Any, Mock() if client_kind == "raw" else None)
++    message = "shared UC" if entry == "patch_set_both" else None
++    with pytest.raises(PermissionError, match=message):
+         if entry == "config":
+             patch_space_config(client, "live", {})
+         elif entry == "description":
+             update_space_description(client, "live", "changed")
+-        elif entry == "patch_set":
+-            apply_patch_set(client, "live", [], {}, apply_mode="both")
++        elif entry in {"patch_set", "patch_set_both"}:
++            applier.apply_patch_set(client, "live", [], {},
++                                    apply_mode="both" if entry == "patch_set_both" else "genie_config")
++        elif entry == "rollback":
++            applier.rollback({"pre_snapshot": {}}, client, "live")
++        elif entry == "legacy_em":
++            applier._legacy_apply_em(client, "live", {})
+         else:
+-            rollback({"pre_snapshot": {}}, client, "live")
+-    assert client.mock_calls == []
++            monkeypatch.setattr(applier, "ENABLE_SMARTER_SCORING", entry == "auto_apply_prompt_matching")
++            applier.auto_apply_prompt_matching(client, "live", {})
++    if client is not None:
++        assert client.mock_calls == []
+diff --git a/packages/genie-space-optimizer/tests/unit/test_applier_rls_entity_matching.py b/packages/genie-space-optimizer/tests/unit/test_applier_rls_entity_matching.py
+index 3b6040c..3ec13c7 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_applier_rls_entity_matching.py
++++ b/packages/genie-space-optimizer/tests/unit/test_applier_rls_entity_matching.py
+@@ -8,7 +8,8 @@ per-space slots.
+ 
+ from __future__ import annotations
+ 
+-from unittest.mock import MagicMock, patch
++from typing import Any, cast
++from unittest.mock import patch
+ 
+ import pytest
+ 
+@@ -100,28 +101,42 @@ def _stub_outputs():
+ 
+ 
+ class TestAutoApplyEntityMatchingRlsRegression:
+-    def test_plain_table_enables_entity_matching(self, _stub_outputs):
++    def test_plain_table_enables_entity_matching(
++        self, _stub_outputs, candidate_client_factory,
++    ):
+         config = _space_with_string_col()
+-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
++        auto_apply_prompt_matching(
++            candidate_client_factory("space-1", "run"), "space-1", config,
++        )
+         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
+         assert cc.get("enable_entity_matching") is True
+         assert cc.get("enable_format_assistance") is True
+ 
+-    def test_table_with_rls_skips_entity_matching(self, _stub_outputs):
++    def test_table_with_rls_skips_entity_matching(
++        self, _stub_outputs, candidate_client_factory,
++    ):
+         config = _space_with_string_col(table_rls=True)
+-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
++        auto_apply_prompt_matching(
++            candidate_client_factory("space-1", "run"), "space-1", config,
++        )
+         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
+         # Format assistance is still safe; entity matching must be skipped.
+         assert cc.get("enable_entity_matching") is not True
+         assert cc.get("enable_format_assistance") is True
+ 
+-    def test_column_with_mask_skips_entity_matching(self, _stub_outputs):
++    def test_column_with_mask_skips_entity_matching(
++        self, _stub_outputs, candidate_client_factory,
++    ):
+         config = _space_with_string_col(column_rls=True)
+-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
++        auto_apply_prompt_matching(
++            candidate_client_factory("space-1", "run"), "space-1", config,
++        )
+         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
+         assert cc.get("enable_entity_matching") is not True
+ 
+-    def test_metric_view_with_rls_skips_entity_matching(self, _stub_outputs):
++    def test_metric_view_with_rls_skips_entity_matching(
++        self, _stub_outputs, candidate_client_factory,
++    ):
+         config = {
+             "_parsed_space": {
+                 "data_sources": {
+@@ -141,11 +156,13 @@ class TestAutoApplyEntityMatchingRlsRegression:
+                 {"table_name": "orders_mv", "column_name": "category", "data_type": "STRING"}
+             ],
+         }
+-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
++        auto_apply_prompt_matching(
++            candidate_client_factory("space-1", "run"), "space-1", config,
++        )
+         cc = config["_parsed_space"]["data_sources"]["metric_views"][0]["column_configs"][0]
+         assert cc.get("enable_entity_matching") is not True
+ 
+-    def test_mixed_rls_and_plain_only_skips_rls(self, _stub_outputs):
++    def test_mixed_rls_and_plain_only_skips_rls(self, _stub_outputs, candidate_client_factory):
+         config = {
+             "_parsed_space": {
+                 "data_sources": {
+@@ -170,8 +187,10 @@ class TestAutoApplyEntityMatchingRlsRegression:
+                 {"table_name": "plain_tbl", "column_name": "category", "data_type": "STRING"},
+             ],
+         }
+-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
+-        tables = config["_parsed_space"]["data_sources"]["tables"]
++        auto_apply_prompt_matching(
++            candidate_client_factory("space-1", "run"), "space-1", config,
++        )
++        tables = cast(list[dict[str, Any]], config["_parsed_space"]["data_sources"]["tables"])
+         rls_cc = tables[0]["column_configs"][0]
+         plain_cc = tables[1]["column_configs"][0]
+         assert rls_cc.get("enable_entity_matching") is not True
+diff --git a/packages/genie-space-optimizer/tests/unit/test_entity_matching_scoring.py b/packages/genie-space-optimizer/tests/unit/test_entity_matching_scoring.py
+index 155b097..4dc6ac4 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_entity_matching_scoring.py
++++ b/packages/genie-space-optimizer/tests/unit/test_entity_matching_scoring.py
+@@ -20,7 +20,7 @@ Covers the Phase 3 work in ``optimization/applier.py`` and
+ 
+ from __future__ import annotations
+ 
+-from unittest.mock import MagicMock, patch
++from unittest.mock import patch
+ 
+ import pandas as pd
+ import pytest
+@@ -39,7 +39,6 @@ from genie_space_optimizer.optimization.applier import (
+     auto_apply_prompt_matching,
+ )
+ 
+-
+ # ───────────────────────────────────────────────────────────────────────
+ # _entity_matching_score — hard disqualifiers (12 cases)
+ # ───────────────────────────────────────────────────────────────────────
+@@ -547,7 +546,7 @@ def _make_config(
+     enabled_em = enabled_em or {}
+ 
+     def _cc(tbl: str, col: str) -> dict:
+-        entry = {"column_name": col}
++        entry: dict = {"column_name": col}
+         if col in enabled_em.get(tbl, set()):
+             entry["enable_entity_matching"] = True
+             entry["enable_format_assistance"] = True
+@@ -579,9 +578,9 @@ def _make_config(
+     }
+ 
+ 
+-def _run_apply(config: dict) -> dict:
++def _run_apply(config: dict, candidate_client_factory) -> dict:
+     """Invoke auto_apply_prompt_matching with patch_space_config stubbed."""
+-    w = MagicMock()
++    w = candidate_client_factory("sp-1")
+     with patch(
+         "genie_space_optimizer.optimization.applier.patch_space_config",
+     ):
+@@ -616,12 +615,12 @@ _NEUTRAL_COLUMNS: list[tuple[str, str]] = [
+ class TestIdempotency:
+     """Same inputs → same top-120 → empty diff on re-run."""
+ 
+-    def test_second_run_produces_empty_diff(self, monkeypatch):
++    def test_second_run_produces_empty_diff(self, monkeypatch, candidate_client_factory):
+         _pin_smarter_scoring(monkeypatch, True)
+         config = _make_config({"cat.sch.orders": list(_NEUTRAL_COLUMNS)})
+ 
+         # First run: every column passes the scorer, so they all get enabled.
+-        first = _run_apply(config)
++        first = _run_apply(config, candidate_client_factory)
+         enabled_first = [
+             c for c in first["applied"] if c["type"] == "enable_value_dictionary"
+         ]
+@@ -636,7 +635,7 @@ class TestIdempotency:
+                     cc["enable_entity_matching"] = True
+                     cc["enable_format_assistance"] = True
+ 
+-        second = _run_apply(config)
++        second = _run_apply(config, candidate_client_factory)
+         em_changes = [
+             c
+             for c in second["applied"]
+@@ -645,7 +644,7 @@ class TestIdempotency:
+         ]
+         assert em_changes == [], f"second run should be a no-op for EM, got {em_changes}"
+ 
+-    def test_deterministic_tie_breaking(self, monkeypatch):
++    def test_deterministic_tie_breaking(self, monkeypatch, candidate_client_factory):
+         """Two candidates with identical scores + descriptions — stable
+         sort on ``(-score, table, col)`` must pick the same winner across
+         invocations regardless of column_configs insertion order."""
+@@ -657,8 +656,8 @@ class TestIdempotency:
+         cfg_a = _make_config({"cat.sch.t": cols_a})
+         cfg_b = _make_config({"cat.sch.t": cols_b})
+ 
+-        a = _run_apply(cfg_a)
+-        b = _run_apply(cfg_b)
++        a = _run_apply(cfg_a, candidate_client_factory)
++        b = _run_apply(cfg_b, candidate_client_factory)
+ 
+         enables_a = sorted(
+             c["column"] for c in a["applied"]
+@@ -676,7 +675,9 @@ class TestIdempotency:
+ class TestDiffApplication:
+     """Diff semantics: displacement, PII disable, RLS disable."""
+ 
+-    def test_unknown_type_preserves_existing_entity_matching(self, monkeypatch):
++    def test_unknown_type_preserves_existing_entity_matching(
++        self, monkeypatch, candidate_client_factory,
++    ):
+         """A partial UC metadata fetch must not reclaim an untyped slot."""
+         _pin_smarter_scoring(monkeypatch, True)
+         config = _make_config(
+@@ -685,7 +686,7 @@ class TestDiffApplication:
+         )
+         config["_uc_columns"] = []
+ 
+-        result = _run_apply(config)
++        result = _run_apply(config, candidate_client_factory)
+ 
+         assert not any(
+             change["type"] == "disable_value_dictionary"
+@@ -694,7 +695,9 @@ class TestDiffApplication:
+         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
+         assert cc["enable_entity_matching"] is True
+ 
+-    def test_new_high_score_column_displaces_low_score(self, monkeypatch):
++    def test_new_high_score_column_displaces_low_score(
++        self, monkeypatch, candidate_client_factory,
++    ):
+         """When the space is at the 120-slot cap with low-score fillers,
+         a new high-score candidate should displace exactly one low slot."""
+         _pin_smarter_scoring(monkeypatch, True)
+@@ -714,7 +717,7 @@ class TestDiffApplication:
+             {"cat.sch.t": cols},
+             enabled_em={"cat.sch.t": {"login_ip", "session_host"}},
+         )
+-        result = _run_apply(config)
++        result = _run_apply(config, candidate_client_factory)
+         enables = [
+             c["column"] for c in result["applied"]
+             if c["type"] == "enable_value_dictionary"
+@@ -728,7 +731,9 @@ class TestDiffApplication:
+         assert len(disables) == 1
+         assert disables[0] in {"login_ip", "session_host"}
+ 
+-    def test_pii_column_enabled_previously_gets_disabled(self, monkeypatch):
++    def test_pii_column_enabled_previously_gets_disabled(
++        self, monkeypatch, candidate_client_factory,
++    ):
+         """Prior-run space had customer_email enabled (legacy scorer). New
+         scorer hard-rejects PII → column falls out of top-120 → disable."""
+         _pin_smarter_scoring(monkeypatch, True)
+@@ -740,7 +745,7 @@ class TestDiffApplication:
+             {"cat.sch.orders": cols},
+             enabled_em={"cat.sch.orders": {"customer_email"}},
+         )
+-        result = _run_apply(config)
++        result = _run_apply(config, candidate_client_factory)
+         disables = [
+             c["column"] for c in result["applied"]
+             if c["type"] == "disable_value_dictionary"
+@@ -749,7 +754,7 @@ class TestDiffApplication:
+         # pii rejection reflected in aggregate tally too.
+         assert result["rejected_by_reason"].get("pii_name", 0) >= 1
+ 
+-    def test_rls_tainted_slot_gets_disabled(self, monkeypatch):
++    def test_rls_tainted_slot_gets_disabled(self, monkeypatch, candidate_client_factory):
+         """Existing EM slot on a table whose RLS audit verdict is
+         'tainted' — scorer rejects → column falls out → disable."""
+         _pin_smarter_scoring(monkeypatch, True)
+@@ -765,7 +770,7 @@ class TestDiffApplication:
+             enabled_em={"cat.sch.secret": {"region_code"}},
+             rls_audit=rls_audit,
+         )
+-        result = _run_apply(config)
++        result = _run_apply(config, candidate_client_factory)
+         disables = [
+             c["column"] for c in result["applied"]
+             if c["type"] == "disable_value_dictionary"
+@@ -773,7 +778,9 @@ class TestDiffApplication:
+         assert "region_code" in disables
+         assert result["rejected_by_reason"].get("rls_tainted", 0) >= 1
+ 
+-    def test_schema_unchanged_has_no_slots_disabled(self, monkeypatch):
++    def test_schema_unchanged_has_no_slots_disabled(
++        self, monkeypatch, candidate_client_factory,
++    ):
+         """Steady state: scores unchanged, slots under cap → zero diff
+         after the first-time enablement lands."""
+         _pin_smarter_scoring(monkeypatch, True)
+@@ -786,7 +793,7 @@ class TestDiffApplication:
+             {"cat.sch.t": cols},
+             enabled_em={"cat.sch.t": {"region_code", "country_code"}},
+         )
+-        result = _run_apply(config)
++        result = _run_apply(config, candidate_client_factory)
+         em_changes = [
+             c for c in result["applied"]
+             if c["type"] in ("enable_value_dictionary", "disable_value_dictionary")
+@@ -794,7 +801,9 @@ class TestDiffApplication:
+         assert em_changes == []
+ 
+     @pytest.mark.parametrize("smarter_scoring", [True, False])
+-    def test_small_space_with_pii_column(self, smarter_scoring, monkeypatch):
++    def test_small_space_with_pii_column(
++        self, smarter_scoring, monkeypatch, candidate_client_factory,
++    ):
+         """Regression pin: under smarter_scoring=True the new scorer filters
+         PII out of the pool; under smarter_scoring=False the legacy shim
+         preserves today's silent-leak behaviour — so tests detect any
+@@ -813,7 +822,7 @@ class TestDiffApplication:
+             ("department", "STRING"),
+         ]
+         config = _make_config({"cat.sch.orders": cols})
+-        result = _run_apply(config)
++        result = _run_apply(config, candidate_client_factory)
+         enabled_em = {
+             c["column"] for c in result["applied"]
+             if c["type"] == "enable_value_dictionary"
+@@ -832,7 +841,7 @@ class TestDiffApplication:
+ class TestDryRun:
+     """DRY_RUN_ENTITY_MATCHING: logs the diff but mutates nothing."""
+ 
+-    def test_dry_run_logs_but_no_changes(self, monkeypatch):
++    def test_dry_run_logs_but_no_changes(self, monkeypatch, candidate_client_factory):
+         _pin_smarter_scoring(monkeypatch, True)
+         monkeypatch.setattr(cfg, "DRY_RUN_ENTITY_MATCHING", True)
+         monkeypatch.setattr(
+@@ -847,7 +856,7 @@ class TestDryRun:
+             {"cat.sch.orders": cols},
+             enabled_em={"cat.sch.orders": {"customer_email"}},
+         )
+-        result = _run_apply(config)
++        result = _run_apply(config, candidate_client_factory)
+         em_changes = [
+             c for c in result["applied"]
+             if c["type"] in ("enable_value_dictionary", "disable_value_dictionary")
+@@ -882,7 +891,9 @@ class TestLegacyScorer:
+         assert _entity_matching_score_legacy("login_ip") == 1
+ 
+ 
+-def test_prompt_matching_uses_semantic_metric_view_split(monkeypatch) -> None:
++def test_prompt_matching_uses_semantic_metric_view_split(
++    monkeypatch, candidate_client_factory,
++) -> None:
+     from genie_space_optimizer.common.asset_semantics import (
+         KIND_METRIC_VIEW,
+         stamp_asset_semantics,
+@@ -926,7 +937,7 @@ def test_prompt_matching_uses_semantic_metric_view_split(monkeypatch) -> None:
+         },
+     })
+ 
+-    result = _run_apply(config)
++    result = _run_apply(config, candidate_client_factory)
+ 
+     enabled = {
+         (entry["table"], entry["column"])
+@@ -937,7 +948,9 @@ def test_prompt_matching_uses_semantic_metric_view_split(monkeypatch) -> None:
+     assert all(table != "cat.sch.mv_sales" or col != "total_sales" for table, col in enabled)
+ 
+ 
+-def test_prompt_matching_does_not_treat_mv_named_view_as_metric_view(monkeypatch) -> None:
++def test_prompt_matching_does_not_treat_mv_named_view_as_metric_view(
++    monkeypatch, candidate_client_factory,
++) -> None:
+     from genie_space_optimizer.common.asset_semantics import (
+         KIND_VIEW,
+         stamp_asset_semantics,
+@@ -958,7 +971,7 @@ def test_prompt_matching_does_not_treat_mv_named_view_as_metric_view(monkeypatch
+         },
+     })
+ 
+-    result = _run_apply(config)
++    result = _run_apply(config, candidate_client_factory)
+ 
+     enabled = {
+         (entry["table"], entry["column"])
+diff --git a/packages/genie-space-optimizer/tests/unit/test_preflight_benchmark_push.py b/packages/genie-space-optimizer/tests/unit/test_preflight_benchmark_push.py
+index 5890ba1..22b4b61 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_preflight_benchmark_push.py
++++ b/packages/genie-space-optimizer/tests/unit/test_preflight_benchmark_push.py
+@@ -1,6 +1,10 @@
+ """GSO Optimizer v2 — Phase 2 benchmark-lifecycle preflight wiring.
+ 
+-Covers the runner-independent preflight push:
++Covers the runner-independent preflight push on an authorized candidate.
++Unproven clients must fail before publication, telemetry, or input mutation.
++The deployed Job remains disabled until its candidate lifecycle is installed.
++
++Retained candidate-local behavior:
+ * the 30–40 window recommendation (D8) — computed over the POST-MERGE live
+   set, never a silent auto-delete;
+ * the prune-invalid-before-publish backstop (eval-validity);
+@@ -14,6 +18,7 @@ Covers the runner-independent preflight push:
+ 
+ from __future__ import annotations
+ 
++from typing import Any, cast
+ from unittest.mock import MagicMock, patch
+ 
+ import pytest
+@@ -586,7 +591,9 @@ def captured_publish():
+         yield captured
+ 
+ 
+-def test_push_excludes_invalid_and_sqlless_rows_before_publish(captured_publish):
++def test_push_excludes_invalid_and_sqlless_rows_before_publish(
++    captured_publish, candidate_client_factory,
++):
+     benchmarks = [
+         _bench("v1", "valid question one", "SELECT 1"),
+         _bench("v2", "valid question two", "SELECT 2"),
+@@ -600,7 +607,8 @@ def test_push_excludes_invalid_and_sqlless_rows_before_publish(captured_publish)
+         return_value=0,
+     ):
+         out = preflight_push_benchmarks_to_space(
+-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
+             benchmarks,
+         )
+ 
+@@ -612,7 +620,9 @@ def test_push_excludes_invalid_and_sqlless_rows_before_publish(captured_publish)
+     assert out["push_ok"] is True
+ 
+ 
+-def test_push_authorizes_only_recorded_question_warning_repairs(captured_publish):
++def test_push_authorizes_only_recorded_question_warning_repairs(
++    captured_publish, candidate_client_factory,
++):
+     benchmark = _bench(
+         "native-q1",
+         "Show recognized revenue",
+@@ -635,7 +645,7 @@ def test_push_authorizes_only_recorded_question_warning_repairs(captured_publish
+         return_value=0,
+     ):
+         preflight_push_benchmarks_to_space(
+-            MagicMock(),
++            candidate_client_factory("space-1", "run-1"),
+             MagicMock(),
+             "run-1",
+             "space-1",
+@@ -648,7 +658,7 @@ def test_push_authorizes_only_recorded_question_warning_repairs(captured_publish
+     assert captured_publish["question_update_ids"] == {"native-q1"}
+ 
+ 
+-def test_push_attaches_exact_live_question_id_for_delta_handoff():
++def test_push_attaches_exact_live_question_id_for_delta_handoff(candidate_client_factory):
+     native_id = "a" * 32
+     benchmark = _bench("internal-q1", "How many tickets were created?", "SELECT 1")
+     report = BenchmarkPushReport(
+@@ -675,7 +685,8 @@ def test_push_attaches_exact_live_question_id_for_delta_handoff():
+         return_value=0,
+     ):
+         out = preflight_push_benchmarks_to_space(
+-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
+             [benchmark],
+         )
+ 
+@@ -684,7 +695,9 @@ def test_push_attaches_exact_live_question_id_for_delta_handoff():
+     assert out["push_ok"] is True
+ 
+ 
+-def test_push_fails_when_publisher_does_not_return_exact_question_mapping():
++def test_push_fails_when_publisher_does_not_return_exact_question_mapping(
++    candidate_client_factory,
++):
+     benchmark = _bench("internal-q1", "How many tickets were created?", "SELECT 1")
+     report = BenchmarkPushReport(
+         added_count=1,
+@@ -706,12 +719,12 @@ def test_push_fails_when_publisher_does_not_return_exact_question_mapping():
+         return_value={"benchmark_mutation_count": 4},
+     ), patch(
+         "genie_space_optimizer.optimization.preflight._update_run_status",
+-    ) as update_run_status:
+-        with pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
+-            preflight_push_benchmarks_to_space(
+-                MagicMock(), spark, "run-1", "space-1", "cat", "sch",
+-                [benchmark],
+-            )
++    ) as update_run_status, pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
++        preflight_push_benchmarks_to_space(
++            candidate_client_factory("space-1", "run-1"),
++            spark, "run-1", "space-1", "cat", "sch",
++            [benchmark],
++        )
+ 
+     assert "space_question_id" not in benchmark
+     update_run_status.assert_called_once_with(
+@@ -723,7 +736,7 @@ def test_push_fails_when_publisher_does_not_return_exact_question_mapping():
+     )
+ 
+ 
+-def test_push_fails_when_exact_question_mapping_is_ambiguous():
++def test_push_fails_when_exact_question_mapping_is_ambiguous(candidate_client_factory):
+     benchmark = _bench("internal-q1", "How many tickets were created?", "SELECT 1")
+     merged = [
+         {"id": "a" * 32, "question": benchmark["question"], "sql": "SELECT 1"},
+@@ -741,17 +754,19 @@ def test_push_fails_when_exact_question_mapping_is_ambiguous():
+     ), patch(
+         "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
+         return_value=0,
+-    ):
+-        with pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
+-            preflight_push_benchmarks_to_space(
+-                MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+-                [benchmark],
+-            )
++    ), pytest.raises(BenchmarkPushError, match="unresolved_after_publish"):
++        preflight_push_benchmarks_to_space(
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
++            [benchmark],
++        )
+ 
+     assert "space_question_id" not in benchmark
+ 
+ 
+-def test_push_writes_added_excluded_changed_ledger_rows(captured_publish):
++def test_push_writes_added_excluded_changed_ledger_rows(
++    captured_publish, candidate_client_factory,
++):
+     benchmarks = [
+         _bench("v1", "valid question one", "SELECT 1"),
+         _bench(
+@@ -799,7 +814,8 @@ def test_push_writes_added_excluded_changed_ledger_rows(captured_publish):
+         side_effect=_capture,
+     ):
+         out = preflight_push_benchmarks_to_space(
+-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
+             benchmarks,
+             rejected_benchmarks=rejected,
+             changed_benchmarks=changed,
+@@ -835,7 +851,7 @@ def test_push_writes_added_excluded_changed_ledger_rows(captured_publish):
+     assert out["pruned_at_push"] == 2
+ 
+ 
+-def test_push_ledgers_native_sql_repair_as_changed() -> None:
++def test_push_ledgers_native_sql_repair_as_changed(candidate_client_factory) -> None:
+     updated = [{
+         "id": "native-q1",
+         "question": "How many tickets were created?",
+@@ -868,7 +884,7 @@ def test_push_ledgers_native_sql_repair_as_changed() -> None:
+         side_effect=_capture,
+     ):
+         out = preflight_push_benchmarks_to_space(
+-            MagicMock(),
++            candidate_client_factory("space-1", "run-1"),
+             MagicMock(),
+             "run-1",
+             "space-1",
+@@ -886,7 +902,9 @@ def test_push_ledgers_native_sql_repair_as_changed() -> None:
+     assert out["benchmark_mutation_count"] == 1
+ 
+ 
+-def test_push_preserves_warning_repair_reason_for_sql_only_update() -> None:
++def test_push_preserves_warning_repair_reason_for_sql_only_update(
++    candidate_client_factory,
++) -> None:
+     question = "Show recognized revenue"
+     updated = [{
+         "id": "native-q1",
+@@ -930,7 +948,7 @@ def test_push_preserves_warning_repair_reason_for_sql_only_update() -> None:
+         side_effect=_capture,
+     ):
+         preflight_push_benchmarks_to_space(
+-            MagicMock(),
++            candidate_client_factory("space-1", "run-1"),
+             MagicMock(),
+             "run-1",
+             "space-1",
+@@ -945,7 +963,7 @@ def test_push_preserves_warning_repair_reason_for_sql_only_update() -> None:
+     assert changed[0]["reason"] == "benchmark_quality_warning_repair"
+ 
+ 
+-def test_push_records_over_window_prune_recommendations_in_ledger():
++def test_push_records_over_window_prune_recommendations_in_ledger(candidate_client_factory):
+     """Over-window prune RECOMMENDATIONS are recorded as non-mutating
+     advisory ledger rows (op=prune_recommended), and the net-new push set is
+     recorded as added rows — contract 5 stays satisfied with no truncation."""
+@@ -971,7 +989,8 @@ def test_push_records_over_window_prune_recommendations_in_ledger():
+         _FETCH_PATH, return_value={"_parsed_space": _parsed_space(existing=[])},
+     ), patch(_PATCH_PATH, side_effect=_capture_patch):
+         out = preflight_push_benchmarks_to_space(
+-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
+             benchmarks,
+         )
+ 
+@@ -986,7 +1005,9 @@ def test_push_records_over_window_prune_recommendations_in_ledger():
+                for r in by_op["prune_recommended"])
+ 
+ 
+-def test_push_skips_when_publishing_disabled(monkeypatch, captured_publish):
++def test_push_skips_when_publishing_disabled(
++    monkeypatch, captured_publish, candidate_client_factory,
++):
+     monkeypatch.setattr(
+         "genie_space_optimizer.optimization.preflight.PUBLISH_BENCHMARKS_TO_SPACE",
+         False,
+@@ -998,7 +1019,8 @@ def test_push_skips_when_publishing_disabled(monkeypatch, captured_publish):
+         return_value=0,
+     ):
+         out = preflight_push_benchmarks_to_space(
+-            MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
+             [_bench("v1", "valid question one", "SELECT 1")],
+         )
+     assert "benchmarks" not in captured_publish  # publisher never called
+@@ -1006,7 +1028,7 @@ def test_push_skips_when_publishing_disabled(monkeypatch, captured_publish):
+     assert out["push_ok"] is True  # disabled push is not a failure
+ 
+ 
+-def test_push_failure_is_fatal_when_publishing_enabled():
++def test_push_failure_is_fatal_when_publishing_enabled(candidate_client_factory):
+     """Blocking 4: a required push that raises must FAIL the preflight job so
+     baseline eval never runs against the stale live benchmark set."""
+     def _boom(*a, **k):
+@@ -1017,15 +1039,15 @@ def test_push_failure_is_fatal_when_publishing_enabled():
+     ), patch(
+         "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
+         return_value=0,
+-    ):
+-        with pytest.raises(BenchmarkPushError):
+-            preflight_push_benchmarks_to_space(
+-                MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+-                [_bench("v1", "valid question one", "SELECT 1")],
+-            )
++    ), pytest.raises(BenchmarkPushError):
++        preflight_push_benchmarks_to_space(
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
++            [_bench("v1", "valid question one", "SELECT 1")],
++        )
+ 
+ 
+-def test_push_over_cap_is_fatal_when_publishing_enabled():
++def test_push_over_cap_is_fatal_when_publishing_enabled(candidate_client_factory):
+     """A required push that the publisher refuses (over hard cap, no mutation)
+     is also fatal — eval must not run against the stale set."""
+     over_cap_report = BenchmarkPushReport(
+@@ -1037,9 +1059,47 @@ def test_push_over_cap_is_fatal_when_publishing_enabled():
+     ), patch(
+         "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
+         return_value=0,
+-    ):
+-        with pytest.raises(BenchmarkPushError):
+-            preflight_push_benchmarks_to_space(
+-                MagicMock(), MagicMock(), "run-1", "space-1", "cat", "sch",
+-                [_bench("v1", "valid question one", "SELECT 1")],
+-            )
++    ), pytest.raises(BenchmarkPushError):
++        preflight_push_benchmarks_to_space(
++            candidate_client_factory("space-1", "run-1"),
++            MagicMock(), "run-1", "space-1", "cat", "sch",
++            [_bench("v1", "valid question one", "SELECT 1")],
++        )
++
++
++@pytest.mark.parametrize("publishing_enabled", [True, False])
++@pytest.mark.parametrize("client_kind", ["raw", "none", "wrong_candidate"])
++def test_push_refuses_unproven_target_before_any_work(
++    monkeypatch, candidate_client_factory, publishing_enabled, client_kind,
++):
++    """Even disabled publication cannot report success for an unproven target."""
++    from copy import deepcopy
++
++    monkeypatch.setattr(
++        "genie_space_optimizer.optimization.preflight.PUBLISH_BENCHMARKS_TO_SPACE",
++        publishing_enabled,
++    )
++    raw_client = MagicMock()
++    client = cast(Any, {
++        "raw": raw_client,
++        "none": None,
++        "wrong_candidate": candidate_client_factory("other-space", "run-1"),
++    }[client_kind])
++    spark = MagicMock()
++    benchmarks = [_bench("v1", "valid question", "SELECT 1")]
++    before = deepcopy(benchmarks)
++    with patch(_PUBLISH_PATH) as publish, patch(
++        "genie_space_optimizer.optimization.preflight.write_stage",
++    ) as stage, patch(
++        "genie_space_optimizer.optimization.preflight.write_benchmark_mutations",
++    ) as ledger, pytest.raises(PermissionError):
++        preflight_push_benchmarks_to_space(
++            client, spark, "run-1", "space-1", "cat", "sch", benchmarks,
++        )
++
++    publish.assert_not_called()
++    stage.assert_not_called()
++    ledger.assert_not_called()
++    assert raw_client.mock_calls == []
++    assert spark.mock_calls == []
++    assert benchmarks == before
+diff --git a/packages/genie-space-optimizer/tests/unit/test_space_quality_enrichment.py b/packages/genie-space-optimizer/tests/unit/test_space_quality_enrichment.py
+index d0309b5..030a633 100644
+--- a/packages/genie-space-optimizer/tests/unit/test_space_quality_enrichment.py
++++ b/packages/genie-space-optimizer/tests/unit/test_space_quality_enrichment.py
+@@ -54,7 +54,9 @@ def _stub_state(monkeypatch):
+     return stages, patches
+ 
+ 
+-def test_missing_description_uses_top_level_space_patch(monkeypatch) -> None:
++def test_missing_description_uses_top_level_space_patch(
++    monkeypatch, candidate_client_factory,
++) -> None:
+     stages, patches = _stub_state(monkeypatch)
+     artifacts: list[tuple[str, dict]] = []
+     monkeypatch.setattr(
+@@ -92,7 +94,7 @@ def test_missing_description_uses_top_level_space_patch(monkeypatch) -> None:
+     monkeypatch.setattr(sqe, "fetch_space_config", lambda _w, _sid: raw)
+ 
+     result = sqe.run_space_quality_enrichment(
+-        MagicMock(),
++        candidate_client_factory("space", "run"),
+         MagicMock(),
+         run_id="run",
+         space_id="space",
+@@ -120,7 +122,9 @@ def test_missing_description_uses_top_level_space_patch(monkeypatch) -> None:
+     )]
+ 
+ 
+-def test_thin_instructions_seed_full_serialized_space(monkeypatch) -> None:
++def test_thin_instructions_seed_full_serialized_space(
++    monkeypatch, candidate_client_factory,
++) -> None:
+     _stages, patches = _stub_state(monkeypatch)
+     raw = _raw_space(description="Sales analytics space for regional order reporting.")
+     patched_configs: list[dict] = []
+@@ -136,7 +140,7 @@ def test_thin_instructions_seed_full_serialized_space(monkeypatch) -> None:
+     )
+ 
+     result = sqe.run_space_quality_enrichment(
+-        MagicMock(),
++        candidate_client_factory("space", "run"),
+         MagicMock(),
+         run_id="run",
+         space_id="space",
+@@ -384,7 +388,9 @@ def test_prompt_matching_context_excludes_governed_sensitive_column_values() ->
+     assert context["proposal_data_profile"] == {}
+ 
+ 
+-def test_active_enrichment_applies_and_audits_prompt_matching(monkeypatch) -> None:
++def test_active_enrichment_applies_and_audits_prompt_matching(
++    monkeypatch, candidate_client_factory,
++) -> None:
+     stages, patches = _stub_state(monkeypatch)
+     raw = _raw_space(
+         description="Sales analytics space for regional order reporting.",
+@@ -426,7 +432,7 @@ def test_active_enrichment_applies_and_audits_prompt_matching(monkeypatch) -> No
+     monkeypatch.setattr(sqe, "write_artifact", lambda *_args, **_kwargs: None)
+ 
+     result = sqe.run_space_quality_enrichment(
+-        MagicMock(),
++        candidate_client_factory("space", "run"),
+         MagicMock(),
+         run_id="run",
+         space_id="space",
+@@ -456,6 +462,7 @@ def test_active_enrichment_applies_and_audits_prompt_matching(monkeypatch) -> No
+     assert patches[1]["rollback"]["enable_entity_matching"] is False
+     assert patches[1]["provenance"]["iq_check_id"] == 8
+     assert waits == [sqe.PROPAGATION_WAIT_ENTITY_MATCHING_SECONDS]
++    assert result.scan_after is not None
+     entity_check = next(
+         check
+         for check in result.scan_after["checks"]
