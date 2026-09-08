@@ -201,21 +201,21 @@
       "conv": "3773493063976871",
       "worktree": "backlog-integ-gate",
       "items": "A floor-tracks-actual-count, B AnnAssign+class-body pytestmark, C recursive glob; test_vc_provisioning.py only",
-      "status": "fix done+verified (37 gate, 1244 offline, integ=15, synthetic-fixtures intact); A/B/C committed 102955e; in review conv 3773493063976893",
+      "status": "review APPROVE+1 follow-up (A/B/C correct, ratchet non-tautological confirmed; but dropped monotonic landed-baseline invariant). follow-up dispatched pi/Astra conv 3773493063976871",
       "branch": "vc/backlog-integ-gate"
     },
     "m05_f3": {
       "conv": "3773493063976872",
       "worktree": "backlog-m05f3",
       "item": "fail-closed when approved_targets absent",
-      "status": "fix done+verified (111 M05, 1250 offline, mutation-confirmed); e3c0ffc; in review conv 3773493063976880",
+      "status": "review BLOCK finding-D (fixture weakened a pre-existing assertion; production fix APPROVED+complete). D-fix dispatched pi/Astra conv 3773493063976872",
       "branch": "vc/backlog-m05f3"
     },
     "m07_nb": {
       "conv": "3773493063976873",
       "worktree": "backlog-m07nb",
       "items": "nb1 composite-key joins promotable, nb2 snippet positive-grammar DDL, nb3 ReleaseCatalog exception precision",
-      "status": "fix done+verified (211 M07, 1312 offline, nb1+nb2 mutation-confirmed); 383b6dd; in review conv 3773493063976881",
+      "status": "in review conv 3773493063976881 (running)",
       "branch": "vc/backlog-m07nb"
     }
   }
