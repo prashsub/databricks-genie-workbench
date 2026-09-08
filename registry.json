@@ -194,5 +194,23 @@
     "frontend_vitest": "251 passed (25 files)",
     "integration_collection": "15 (honest deployment blockers, never run - no live platform)",
     "write_switches": "default-OFF (master gate)"
+  },
+  "backlog_cleanup": {
+    "status": "3 tasks dispatched pi/Astra from trunk 22411f0",
+    "integ_gate": {
+      "conv": "3773493063976871",
+      "worktree": "backlog-integ-gate",
+      "items": "A floor-tracks-actual-count, B AnnAssign+class-body pytestmark, C recursive glob; test_vc_provisioning.py only"
+    },
+    "m05_f3": {
+      "conv": "3773493063976872",
+      "worktree": "backlog-m05f3",
+      "item": "fail-closed when approved_targets absent"
+    },
+    "m07_nb": {
+      "conv": "3773493063976873",
+      "worktree": "backlog-m07nb",
+      "items": "nb1 composite-key joins promotable, nb2 snippet positive-grammar DDL, nb3 ReleaseCatalog exception precision"
+    }
   }
 }
