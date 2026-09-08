@@ -1,6 +1,7 @@
 """Target operation polling and native Job retry tests."""
 
 from dataclasses import replace
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -158,3 +159,68 @@ def test_release_validation_and_promotion_require_target_approval(promotion_rig)
     rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
     with pytest.raises(PermissionError):
         commands.promote(uid(4), uid(4), 'promote-once', actor)
+
+
+def test_pending_projection_admits_only_admission_referenced_local_promotion_facts(promotion_rig):
+    from backend.services.version_control.promotion.dispatch import PendingOperations
+    from backend.services.version_control.promotion.releases import ADMISSION_REFERENCE, ReleaseCommands
+    rig = promotion_rig
+    approve(rig)
+    commands = ReleaseCommands(promotion=rig.service, request_writer=Mock(),
+                               authorize_history=lambda actor, binding: True)
+    actor = vc.ActorContext('target-human', 'target', 'human')
+    commands.validate(uid(4), 'promote-once', actor)
+    validated = rig.rows[-1]
+    commands.promote(uid(4), uid(4), 'promote-once', actor)
+    admitted = rig.rows[-1]
+    assert validated.approval_reference is None
+    assert admitted.approval_reference == ADMISSION_REFERENCE
+    assert validated.fact_kind == admitted.fact_kind == vc.FactKind.OPERATION
+    assert validated.status == admitted.status == vc.FactStatus.REQUESTED
+    facts = (admitted, validated, replace(admitted, binding=rig.source),
+             replace(admitted, operation_type='restore'),
+             replace(admitted, fact_kind=vc.FactKind.RELEASE),
+             replace(admitted, status=vc.FactStatus.CONFIRMED))
+    calls = []
+    def read_page(workspace_id, cursor):
+        calls.append((workspace_id, cursor))
+        return SimpleNamespace(items=facts, next_cursor='next-page')
+    page = PendingOperations(read_page).scan('target', 'current-page')
+    assert page.items == (vc.OperationHandle(uid(4), vc.OperationStatus.REQUESTED, None),)
+    assert page.next_cursor == 'next-page'
+    assert calls == [('target', 'current-page')]
+
+
+@pytest.mark.parametrize('case', ['conflict', 'none', 'duplicate', 'wrong_operation', 'wrong_kind', 'wrong_evidence'])
+def test_release_catalog_rejects_conflicting_release_facts(promotion_rig, case):
+    from backend.services.version_control.promotion.releases import ReleaseCatalog, fact_for
+    rig = promotion_rig
+    manifest = vc.from_wire(vc.PackageManifest, json.loads(rig.store.read(rig.reference.manifest_uri)))
+    fact = fact_for(rig.request, vc.ActorContext('target-human', 'target', 'human'), vc.FactKind.RELEASE, manifest)
+    facts = [fact, fact]
+    if case == 'conflict':
+        facts[1] = replace(fact, evidence=replace(manifest, package_digest='f' * 64))
+    elif case == 'none':
+        facts = []
+    elif case == 'wrong_operation':
+        facts = [replace(fact, operation_id=uid(7))]
+    elif case == 'wrong_kind':
+        facts = [replace(fact, fact_kind=vc.FactKind.OPERATION)]
+    elif case == 'wrong_evidence':
+        facts = [replace(fact, evidence=vc.StageEvidence('VC/1.0', vc.PatchStage.CONFIG_PENDING,
+                         fact.recorded_at, 'a' * 64, None))]
+    calls = []
+    def read_release_facts(operation_id):
+        calls.append(operation_id)
+        return facts
+    catalog = ReleaseCatalog(read_release_facts, rig.service.outbound_volume, rig.executor.host)
+    if case == 'duplicate':
+        result = catalog.get(uid(4))
+        assert result.release_id == uid(4)
+        assert result.package == rig.reference
+        assert result.target_binding == rig.target
+        assert result.target_host == rig.executor.host
+    else:
+        with pytest.raises(LookupError if case == 'none' else ValueError):
+            catalog.get(uid(4))
+    assert calls == [uid(4)]
