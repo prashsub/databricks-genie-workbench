@@ -138,19 +138,33 @@ def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session():
     assert "except PermissionError:\n        raise\n    except Exception:" in loop_source
 
 
-@pytest.mark.parametrize("entry", ["config", "description", "patch_set", "rollback"])
-def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry):
+@pytest.mark.parametrize(
+    "entry",
+    ["config", "description", "patch_set", "rollback", "prompt_matching", "shared_uc"],
+)
+@pytest.mark.parametrize("client_kind", ["mock", "none"])
+def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry, client_kind):
     from genie_space_optimizer.common.genie_client import patch_space_config, update_space_description
-    from genie_space_optimizer.optimization.applier import apply_patch_set, rollback
+    from genie_space_optimizer.optimization.applier import (
+        apply_patch_set,
+        auto_apply_prompt_matching,
+        rollback,
+    )
 
-    client = Mock()
-    with pytest.raises(PermissionError):
+    client = Mock() if client_kind == "mock" else None
+    expected = "shared UC" if entry == "shared_uc" else "candidate proof"
+    with pytest.raises(PermissionError, match=expected):
         if entry == "config":
             patch_space_config(client, "live", {})
         elif entry == "description":
             update_space_description(client, "live", "changed")
         elif entry == "patch_set":
-            apply_patch_set(client, "live", [], {}, apply_mode="both")
-        else:
+            apply_patch_set(client, "live", [], {}, apply_mode="genie_config")
+        elif entry == "rollback":
             rollback({"pre_snapshot": {}}, client, "live")
-    assert client.mock_calls == []
+        elif entry == "prompt_matching":
+            auto_apply_prompt_matching(client, "live", {})
+        else:
+            apply_patch_set(client, "live", [], {}, apply_mode="both")
+    if client is not None:
+        assert client.mock_calls == []
