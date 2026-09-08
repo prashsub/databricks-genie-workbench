@@ -131,11 +131,14 @@ def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session():
     preflight_start = preflight_source.index("def preflight_push_benchmarks_to_space")
     publisher_start = client_source.index("def publish_benchmarks_to_genie_space_with_report")
     enrichment_start = enrichment_source.index("def run_space_quality_enrichment")
+    loop_enrichment_start = loop_source.index("enrichment_result = run_space_quality_enrichment")
     assert client_source.index("assert_candidate_write", publisher_start) < client_source.index(
         "config = fetch_space_config", publisher_start)
     assert "except PermissionError:\n            raise" in preflight_source[preflight_start:]
     assert "except PermissionError:\n        raise" in enrichment_source[enrichment_start:]
-    assert "except PermissionError:\n        raise\n    except Exception:" in loop_source
+    assert "except PermissionError:\n        raise\n    except Exception:" in loop_source[
+        loop_enrichment_start:
+    ]
 
 
 @pytest.mark.parametrize(

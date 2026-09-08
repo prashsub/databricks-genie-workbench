@@ -204,8 +204,6 @@ def _read_observed_config_after_evaluation(
                 iteration,
             )
             return observed
-    except PermissionError:
-        raise
     except Exception:
         logger.warning(
             "Could not capture settled Genie config for run %s iteration %d; "
@@ -2852,6 +2850,8 @@ def run_unified_optimization_loop(
             benchmarks=benchmarks,
         )
         current_config = enrichment_result.current_config
+    except PermissionError:
+        raise
     except Exception:
         logger.warning(
             "Space quality enrichment failed before baseline eval; continuing",
