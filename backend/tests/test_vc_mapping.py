@@ -154,3 +154,17 @@ def test_nested_environment_bindings_cannot_bypass_render(package_rig, key):
     artifact = {'serialized_space': {'config': {'nested': [{key: 'source-binding'}]}}}
     with pytest.raises(ValueError, match='Environment bindings'):
         MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+
+
+@pytest.mark.parametrize(('mappings', 'sql'), [
+    ({'dev': 'prod'}, 'SELECT * FROM dev.internal.pii_raw'),
+    ({'dev': 'prod'}, 'SELECT * FROM prod.internal.pii_raw'),
+    ({'dev.sales': 'prod.reporting'}, 'SELECT * FROM dev.sales.customers_UNREVIEWED'),
+    ({'dev.sales': 'prod.reporting'}, 'SELECT * FROM prod.reporting.customers_UNREVIEWED'),
+    ({'dev.sales.orders': 'prod.sales.orders'}, 'SELECT * FROM dev.sales.orders.unreviewed'),
+])
+def test_sql_prefix_mapping_requires_exact_or_three_part_source(package_rig, mappings, sql):
+    mapping = replace(package_rig.mapping, mappings=mappings)
+    artifact = {'serialized_space': {'instructions': {'example_question_sqls': [{'sql': [sql]}]}}}
+    with pytest.raises(ValueError, match='Unresolved relation'):
+        MappingTransformer().render(artifact, mapping, package_rig.target)

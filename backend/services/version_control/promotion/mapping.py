@@ -90,11 +90,13 @@ def map_sql(sql, mappings, *, fragment=False):
         if any('.' in part.strip('`') for part in parts):
             raise ValueError('Ambiguous quoted qualified identifier')
         mapped_prefix = next((source for source in sorted(identifier_mappings, key=len, reverse=True)
-                              if identifier == source or identifier.startswith(source + '.')), None)
+                              if identifier == source
+                              or (len(source.split('.')) == 3 and identifier.startswith(source + '.'))), None)
         target_prefix = next((target for target in target_identifiers
-                              if identifier == target or identifier.startswith(target + '.')), None)
+                              if identifier == target
+                              or (len(target.split('.')) == 3 and identifier.startswith(target + '.'))), None)
         if relation_pending:
-            if len(parts) < 3 or (mapped_prefix is None and target_prefix is None):
+            if len(parts) != 3 or (mapped_prefix is None and target_prefix is None):
                 raise ValueError('Unresolved relation requires an exact reviewed mapping')
             relation_pending = False
         if (len(parts) > 1 and parts[0].strip('`') in source_catalogs
