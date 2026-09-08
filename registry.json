@@ -163,5 +163,21 @@
   "backlog": [
     "XMOD NB-2 (verify): confirm router maps CoordinationError/_RejectionReleased (recovery-closed pre-send history on retry) to HTTP 409 file-new-request, not 500. Fail-closed+correct per C5.5; only the surfacing changed.",
     "XMOD NB-3 done inline (coupling comment). NB-1 done inline (arm-coverage tests)."
-  ]
+  ],
+  "compliance_note": "M07-blocker-fix (conv 6345) and M10-blocker-fix (conv 6415) ran on non-Astra gpt-5-6-sol (platform fallback during rate-limit churn). Per directive, discarded and redoing on Astra. Non-Astra work backed up to vc/m07-nonastra-ref (1491eac, incl F1/F2) and vc/m10-nonastra-ref (c52cc62) for reference/diff. Worktrees reset to compliant Astra bases: m07=d1163a3, m10=8bafb8f.",
+  "m10_redo": {
+    "status": "dispatched_astra",
+    "conv": "3773493063976449",
+    "model": "databricks-gpt-6-astra",
+    "base": "8bafb8f",
+    "spec": ".polly/m10_fixspec.md"
+  },
+  "m07_redo": {
+    "status": "queued_astra",
+    "base": "d1163a3",
+    "specs": [
+      ".polly/m07_fixspec.md (B1-B4)",
+      ".polly/m07_fix2_spec.md (F1/F2)"
+    ]
+  }
 }
