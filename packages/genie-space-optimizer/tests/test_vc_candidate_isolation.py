@@ -130,19 +130,29 @@ def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session(entry, 
     assert spark.mock_calls == []
 
 
-@pytest.mark.parametrize("entry", ["config", "description", "patch_set", "rollback"])
-def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry):
+@pytest.mark.parametrize("client_kind", ["raw", "none"])
+@pytest.mark.parametrize("entry", ["config", "description", "patch_set", "patch_set_both", "rollback",
+                                   "auto_apply_prompt_matching", "auto_apply_prompt_matching_legacy", "legacy_em"])
+def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry, client_kind, monkeypatch):
     from genie_space_optimizer.common.genie_client import patch_space_config, update_space_description
-    from genie_space_optimizer.optimization.applier import apply_patch_set, rollback
+    from genie_space_optimizer.optimization import applier
 
-    client = Mock()
-    with pytest.raises(PermissionError):
+    client = Mock() if client_kind == "raw" else None
+    message = "shared UC" if entry == "patch_set_both" else None
+    with pytest.raises(PermissionError, match=message):
         if entry == "config":
             patch_space_config(client, "live", {})
         elif entry == "description":
             update_space_description(client, "live", "changed")
-        elif entry == "patch_set":
-            apply_patch_set(client, "live", [], {}, apply_mode="both")
+        elif entry in {"patch_set", "patch_set_both"}:
+            applier.apply_patch_set(client, "live", [], {},
+                                    apply_mode="both" if entry == "patch_set_both" else "genie_config")
+        elif entry == "rollback":
+            applier.rollback({"pre_snapshot": {}}, client, "live")
+        elif entry == "legacy_em":
+            applier._legacy_apply_em(client, "live", {})
         else:
-            rollback({"pre_snapshot": {}}, client, "live")
-    assert client.mock_calls == []
+            monkeypatch.setattr(applier, "ENABLE_SMARTER_SCORING", entry == "auto_apply_prompt_matching")
+            applier.auto_apply_prompt_matching(client, "live", {})
+    if client is not None:
+        assert client.mock_calls == []
