@@ -92,9 +92,7 @@ class OptimizerChampionAdapter:
         if not source.requester_id:
             raise PermissionError("Requester must be durably bound to the source")
         if source.approval_id is None:
-            if (binding.environment != "dev"
-                    or self.identity.can_edit(source.requester_id, binding) is not True):
-                raise PermissionError("Requester edit right or approved release policy is required")
+            raise PermissionError("Optimizer champion apply requires a durable approval")
         key = vc.canonical_json_hash("vc-optimizer-run/1", {
             "run_id": run_id, "binding_id": binding.binding_id,
             "binding_revision": binding.binding_revision, "workspace_id": binding.workspace_id,

@@ -3,17 +3,19 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 
 from backend.services.version_control import contracts as vc
 from backend.services.version_control.optimizer_adapter import (
-    ChampionArtifact, OptimizerChampionAdapter, source_digest,
+    ChampionArtifact, ChampionMutationRequest, OptimizerChampionAdapter, source_digest,
 )
 from backend.services.version_control.governance.approvals import request_digest
+from backend.services.version_control.governance.facts import DurableOperationFacts, fact_key
 from backend.services.version_control.platform.feature_flags import FeatureFlags
-from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
+from backend.tests.vc_fakes.fixtures import FakeIdentityProvider, binding_fixture, executor_fixture
+from backend.tests.vc_fakes.stores import FakeFactStore, ManualClock
 
 
 @pytest.fixture
@@ -24,7 +26,7 @@ def rig():
     fingerprints = vc.Fingerprints("a" * 64, "b" * 64, "c" * 64, "vc-c14n/1")
     source = ChampionArtifact("run", "champion", binding, fingerprints.state_digest,
                               str(uuid4()), payload, "description",
-                              source_digest(payload, "description"), "requester", None)
+                              source_digest(payload, "description"), "requester", str(uuid4()))
     sources = Mock()
     sources.load.return_value = source
     gate = Mock(spec=vc.MutationGate)
@@ -74,6 +76,131 @@ def test_champion_request_digest_satisfies_m06_binding(rig):
     assert request.source_payload_digest == source_digest(
         source.serialized_space, source.description)
     assert request.identity.request_digest != request.source_payload_digest
+
+
+def test_champion_apply_authorizes_through_real_approval_service(rig):
+    from backend.services.version_control.governance.approvals import ApprovalService
+
+    def build_adapter(*, approval_id=True, authorization_fault=None):
+        adapter, source, executor, gate, requests, _ = rig
+        gate.reset_mock()
+        clock = ManualClock(datetime.now(timezone.utc))
+        store = FakeFactStore(clock)
+        durable_facts = DurableOperationFacts(
+            lambda: tuple(row.payload for row in store.state.rows), store.append,
+            writes_enabled=True)
+
+        class ChampionFacts:
+            def __init__(self):
+                self.requests = {}
+
+            def __getattr__(self, name):
+                return getattr(durable_facts, name)
+
+            def record_request(self, request, fact):
+                self.requests[request.identity.operation_id] = request
+                durable_request = vc.MutationRequest(
+                    request.identity, request.binding, request.operation_type,
+                    request.source_version_id, request.expected_base,
+                    request.serialized_space, request.description, request.approval_id)
+                return durable_facts.record_request(durable_request, fact)
+
+            def get_request(self, operation_id):
+                approved = durable_facts.get_request(operation_id)
+                request = self.requests.get(operation_id, approved.request)
+                return replace(approved, request=request)
+
+        facts = ChampionFacts()
+        identity = FakeIdentityProvider()
+        target_identity = FakeIdentityProvider()
+        identity.run_as[executor.execution_ref] = executor.principal_id
+        target_identity.run_as[executor.execution_ref] = executor.principal_id
+        requester = vc.ActorContext("requester", source.binding.workspace_id, "human")
+        identity.actors[requester.subject_id] = requester
+        identity.edit_rights.add((requester.subject_id, source.binding.workspace_id,
+                                  source.binding.binding_id, source.binding.binding_revision))
+        for approver in ("human-1", "human-2"):
+            identity.actors[approver] = vc.ActorContext(
+                approver, source.binding.workspace_id, "human")
+            identity.memberships[(approver, source.binding.workspace_id)] = frozenset({"approvers"})
+            target_identity.memberships[(approver, source.binding.workspace_id)] = frozenset(
+                {"target-approvers"})
+        registry = Mock()
+        registry.resolve.return_value = source.binding
+        approvals = ApprovalService(
+            facts, identity, registry, clock.now,
+            target_identity=lambda selected: target_identity, writes_enabled=True)
+
+        key = vc.canonical_json_hash("vc-optimizer-run/1", {
+            "run_id": source.run_id, "binding_id": source.binding.binding_id,
+            "binding_revision": source.binding.binding_revision,
+            "workspace_id": source.binding.workspace_id,
+        })
+        operation_id = str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key))
+        source = replace(source, approval_id=operation_id if approval_id else None)
+        adapter.sources.load.return_value = source
+        adapter.facts = facts
+        adapter.identity = identity
+        adapter.approvals = approvals
+
+        def prepare(request, requester_id):
+            preflight_digest = "d" * 64
+            evidence = vc.StageEvidence(
+                "VC/1.0", vc.PatchStage.CONFIG_PENDING, clock.now(), preflight_digest, None)
+            provisional = vc.OperationFact(
+                operation_id, vc.FactKind.OPERATION, operation_id, 0, "", request.binding,
+                request.identity, request.operation_type, requester_id, requester,
+                vc.FactStatus.REQUESTED, evidence, clock.now())
+            event_key = fact_key(provisional)
+            fact = replace(provisional, event_key=event_key,
+                           event_id=str(uuid5(NAMESPACE_URL, event_key)))
+            facts.record_request(request, fact)
+            if request.approval_id is None:
+                return request
+            fingerprints = vc.Fingerprints(
+                "a" * 64, "b" * 64, "c" * 64, "vc-c14n/1")
+            inputs = vc.ApprovalInputs(
+                "VC/1.0", request.identity.operation_id, request.operation_type,
+                request.source_version_id, request.source_payload_digest, fingerprints,
+                None, None,
+                vc.canonical_json_hash("vc-rendered-target/1", {
+                    "serialized_space": request.serialized_space,
+                    "description": request.description,
+                }),
+                None, "vc-c14n/1", request.binding, fingerprints, None,
+                "e" * 64, "f" * 64, preflight_digest, {"minimum": 2}, requester_id,
+                {"verify_only": True}, clock.now() + timedelta(hours=1))
+            approval = approvals.request(inputs, requester)
+            for approver in ("human-1", "human-2"):
+                approvals.vote(approval.approval_id, "approve", identity.actors[approver])
+            if authorization_fault == "expired":
+                clock.advance(timedelta(hours=2))
+            elif authorization_fault == "revoked-group":
+                identity.memberships.clear()
+            return request
+
+        requests.prepare.side_effect = prepare
+        return adapter, source, executor, gate
+
+    adapter, source, executor, gate = build_adapter()
+    assert adapter.apply(source.run_id, source.champion_id, source.binding,
+                         source.expected_base, executor) is gate.execute.return_value
+    assert isinstance(adapter.approvals.authorize(
+        gate.execute.call_args.args[0], executor), vc.AuthorizationGrant)
+    gate.execute.assert_called_once()
+
+    adapter, source, executor, gate = build_adapter(approval_id=False)
+    with pytest.raises(PermissionError):
+        adapter.apply(source.run_id, source.champion_id, source.binding,
+                      source.expected_base, executor)
+    gate.execute.assert_not_called()
+
+    for fault in ("expired", "revoked-group"):
+        adapter, source, executor, gate = build_adapter(authorization_fault=fault)
+        with pytest.raises(PermissionError):
+            adapter.apply(source.run_id, source.champion_id, source.binding,
+                          source.expected_base, executor)
+        gate.execute.assert_not_called()
 
 
 def test_champion_apply_rejects_app_executor_or_tampered_source(rig):
@@ -158,12 +285,14 @@ def test_telemetry_memory_fallback_never_authorizes_champion_apply(rig):
 
 def test_job_executor_verifies_requester_edit_or_release_policy(rig):
     adapter, source, executor, gate, _, _ = rig
+    source = replace(source, approval_id=None)
+    adapter.sources.load.return_value = source
     adapter.identity = Mock(spec=vc.IdentityProvider)
     adapter.identity.can_edit.side_effect = lambda subject, binding: subject == executor.principal_id
     adapter.approvals = Mock(spec=vc.ApprovalService)
-    with pytest.raises(PermissionError, match="Requester"):
+    with pytest.raises(PermissionError, match="approval"):
         adapter.apply("run", "champion", source.binding, source.expected_base, executor)
-    adapter.identity.can_edit.assert_called_once_with("requester", source.binding)
+    adapter.identity.can_edit.assert_not_called()
     gate.execute.assert_not_called()
 
 
