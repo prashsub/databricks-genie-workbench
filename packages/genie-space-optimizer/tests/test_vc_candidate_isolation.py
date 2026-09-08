@@ -130,6 +130,38 @@ def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session(entry, 
     assert spark.mock_calls == []
 
 
+@pytest.mark.parametrize("write", ["description", "instructions", "prompt_matching"])
+def test_enrichment_never_swallows_candidate_write_refusal(write, monkeypatch):
+    from genie_space_optimizer.integration.version_control import CandidateSession
+    from genie_space_optimizer.optimization import space_quality_enrichment as enrichment
+
+    client = MagicMock()
+    session = CandidateSession(EvaluationBinding("workspace", "candidate", "run"),
+                               IsolationRegistry(), client, writes_enabled=True)
+    scan = {"checks": [{"passed": write != "description"}, {}, {}, {"passed": write != "instructions"}]}
+    monkeypatch.setattr(enrichment, "calculate_score", Mock(return_value=scan))
+    stages = Mock()
+    monkeypatch.setattr(enrichment, "write_stage", stages)
+    monkeypatch.setattr(enrichment, "write_artifact", Mock())
+    monkeypatch.setattr(enrichment, "validate_instruction_text", Mock(return_value=(True, [])))
+    monkeypatch.setattr("genie_space_optimizer.optimization.optimizer_utils._generate_space_description",
+                        Mock(return_value="Candidate description"))
+    target = {"description": "update_space_description", "instructions": "patch_space_config",
+              "prompt_matching": "auto_apply_prompt_matching"}[write]
+    denied = Mock(side_effect=PermissionError("candidate ownership revoked"))
+    monkeypatch.setattr(enrichment, target, denied)
+    with pytest.raises(PermissionError, match="candidate ownership revoked"):
+        enrichment.run_space_quality_enrichment(
+            session.client, MagicMock(), run_id="run", space_id="candidate",
+            raw_config={"_parsed_space": {"data_sources": {"tables": [{"identifier": "cat.sch.table"}]},
+                                           "instructions": {}}},
+            catalog="cat", schema="sch", prompt_matching_context={"version": 1},
+        )
+    denied.assert_called_once()
+    assert all(call.args[3] != "COMPLETE" for call in stages.call_args_list)
+    assert client.mock_calls == []
+
+
 @pytest.mark.parametrize("client_kind", ["raw", "none"])
 @pytest.mark.parametrize("entry", ["config", "description", "patch_set", "patch_set_both", "rollback",
                                    "auto_apply_prompt_matching", "auto_apply_prompt_matching_legacy", "legacy_em"])

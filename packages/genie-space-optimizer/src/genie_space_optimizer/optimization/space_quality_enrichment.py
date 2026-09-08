@@ -550,6 +550,9 @@ def run_space_quality_enrichment(
         )
         return result
 
+    except PermissionError:
+        # Candidate-write refusals must abort, never record a completed stage.
+        raise
     except Exception as exc:  # pragma: no cover - defensive non-fatal boundary
         _record_error("unexpected", exc)
         write_stage(
@@ -600,6 +603,8 @@ def _maybe_apply_prompt_matching(
             runtime_config,
             benchmarks=benchmarks,
         )
+    except PermissionError:
+        raise
     except Exception as exc:
         on_error("prompt_matching", exc)
         return patch_index
