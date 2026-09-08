@@ -1,0 +1,162 @@
+diff --git a/backend/services/version_control/promotion/mapping.py b/backend/services/version_control/promotion/mapping.py
+index 095ea9a..c236588 100644
+--- a/backend/services/version_control/promotion/mapping.py
++++ b/backend/services/version_control/promotion/mapping.py
+@@ -15,6 +15,8 @@ class RenderedPayload:
+ 
+ TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*|\s+|.")
+ IDENTIFIER = re.compile(r'(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*)\Z')
++JOIN_COLUMN = r'`(?:``|[^`])+`\.`(?:``|[^`])+`'
++JOIN_CONDITION = re.compile(rf'\s*{JOIN_COLUMN}\s*=\s*{JOIN_COLUMN}\s*')
+ 
+ 
+ ENVIRONMENT_KEYS = frozenset({'workspace_id', 'space_id', 'warehouse_id', 'sample_warehouse_id',
+@@ -62,7 +64,8 @@ def map_sql(sql, mappings, *, fragment=False):
+     code = [token for token in tokens if not token.isspace() and not token.startswith(('--', '/*', "'"))]
+     if (not code or (not fragment and code[0].upper() != 'SELECT')
+             or any(token.upper() in {'IDENTIFIER', 'EXECUTE', 'IMMEDIATE', 'WITH', 'UNION', 'PIVOT',
+-                                     'LATERAL', 'TABLE', 'USE', 'INSERT', 'UPDATE', 'DELETE', 'DROP'} for token in code)
++                                     'LATERAL', 'TABLE', 'USE', 'INSERT', 'UPDATE', 'DELETE', 'DROP',
++                                     'GRANT', 'REVOKE', 'CREATE', 'ALTER', 'REPLACE', 'MERGE', 'COPY'} for token in code)
+             or any(token in {';', '"', "'", '`', '$', '\\', '{', '}'} for token in code)
+             or '/*' in ''.join(code) or code.count('(') != code.count(')')):
+         raise ValueError('Unsupported SQL; supply a reviewed exact SQL override')
+@@ -138,19 +141,27 @@ def map_executable_fields(value, mappings, path=()):
+                                       or not all(isinstance(item, str) for item in child)):
+                     raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
+                 if isinstance(child, list):
+-                    rendered = []
+-                    for index, fragment_sql in enumerate(child):
+-                        if join_fragment and index > 0:
+-                            if not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--', fragment_sql):
+-                                raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
+-                            rendered.append(fragment_sql)
+-                        else:
+-                            rendered.append(map_sql(fragment_sql, mappings,
+-                                                    fragment=fragment_mode or index > 0))
+-                    # Validate statement-wide guards across clause-array boundaries too.
+-                    if not fragment_mode:
+-                        map_sql(''.join(rendered), mappings)
+-                    value[key] = rendered
++                    if join_fragment and (not JOIN_CONDITION.fullmatch(child[0])
++                                          or not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--', child[1])):
++                        raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
++                    # Genie concatenates arrays without separators. Parse and map that
++                    # exact SQL once, so split tokens cannot evade guards or mapping.
++                    rendered_sql = map_sql(''.join(child), mappings, fragment=fragment_mode)
++                    if join_fragment:
++                        # The annotation is a schema element, not an arbitrary SQL boundary.
++                        if (not rendered_sql.endswith(child[1])
++                                or not JOIN_CONDITION.fullmatch(rendered_sql[:-len(child[1])])):
++                            raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
++                        value[key] = [rendered_sql[:-len(child[1])], child[1]]
++                    else:
++                        rendered = []
++                        offset = 0
++                        for fragment_sql in child[:-1]:
++                            end = offset + len(fragment_sql)
++                            rendered.append(rendered_sql[offset:end])
++                            offset = end
++                        rendered.append(rendered_sql[offset:])
++                        value[key] = rendered
+                 else:
+                     value[key] = map_sql(child, mappings, fragment=fragment_mode)
+             else:
+diff --git a/backend/tests/test_vc_mapping.py b/backend/tests/test_vc_mapping.py
+index e3b30f4..593fe06 100644
+--- a/backend/tests/test_vc_mapping.py
++++ b/backend/tests/test_vc_mapping.py
+@@ -121,7 +121,7 @@ def test_join_specs_and_sql_function_identifiers_map_exactly_or_fail_closed(pack
+ @pytest.mark.parametrize('override', [False, True])
+ def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(package_rig, override):
+     rig = package_rig
+-    condition = '`dev`.`sales`.`orders`.`customer_id` = `customers`.`customer_id`'
++    condition = '`orders`.`customer_id` = `customers`.`customer_id`'
+     annotation = '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'
+     measure = 'SUM(dev.sales.orders.amount)'
+     mappings = {**dict(rig.mapping.mappings), 'dev.sales.customers': 'prod.sales.customers'}
+@@ -179,7 +179,7 @@ def test_sql_prefix_mapping_requires_exact_or_three_part_source(package_rig, map
+     ['--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--\n'],
+ ])
+ def test_join_spec_sql_trailing_elements_are_validated_not_passthrough(package_rig, trailing):
+-    condition = '`dev`.`sales`.`orders`.`customer_id` = `customers`.`customer_id`'
++    condition = '`orders`.`customer_id` = `customers`.`customer_id`'
+     artifact = {'serialized_space': {'instructions': {'join_specs': [{
+         'left': {'identifier': 'dev.sales.orders'}, 'right': {'identifier': 'dev.sales.orders'},
+         'sql': [condition, *trailing]}]}}}
+@@ -192,3 +192,75 @@ def test_join_spec_sql_requires_two_element_array(package_rig, sql):
+     artifact = {'serialized_space': {'instructions': {'join_specs': [{'sql': sql}]}}}
+     with pytest.raises(ValueError, match='join_specs.sql requires'):
+         MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
++
++
++@pytest.mark.parametrize(('elements', 'expected'), [
++    (['de', 'v.internal.pii_raw.amount'], None),
++    (['de', 'v.sales.orders.amount'], 'prod.sales.orders.amount'),
++    (['1 UNI', 'ON SELECT 1'], None),
++    (['1 DR', 'OP TAB', 'LE prod.sales.orders'], None),
++])
++def test_snippet_sql_arrays_are_validated_after_concatenation(package_rig, elements, expected):
++    artifact = {'serialized_space': {'instructions': {'sql_snippets': {
++        'measures': [{'sql': list(elements)}]}}}}
++    if expected is None:
++        with pytest.raises(ValueError):
++            MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
++        return
++    rendered = MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
++    sql = rendered.serialized_space['instructions']['sql_snippets']['measures'][0]['sql']
++    assert ''.join(sql) == expected
++    assert len(sql) == len(elements)
++    assert sql[0] == expected[:len(elements[0])]
++    assert artifact['serialized_space']['instructions']['sql_snippets']['measures'][0]['sql'] == elements
++
++
++@pytest.mark.parametrize('condition', [
++    'GRANT SELECT ON prod.sales.orders TO evil',
++    'CREATE VIEW leak AS SELECT 1',
++    '`hive`.`internal`.`pii_raw`.`c` = `o`.`c`',
++])
++def test_join_condition_element_is_statement_class_guarded(package_rig, condition):
++    artifact = {'serialized_space': {'instructions': {'join_specs': [{
++        'left': {'identifier': 'dev.sales.orders'}, 'right': {'identifier': 'dev.sales.orders'},
++        'sql': [condition, '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--']}]}}}
++    with pytest.raises(ValueError):
++        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
++
++
++@pytest.mark.parametrize('sql', [
++    'GRANT SELECT ON prod.sales.orders TO evil',
++    'REVOKE SELECT ON prod.sales.orders FROM evil',
++    'CREATE VIEW leak AS SELECT 1',
++    'ALTER VIEW leak AS SELECT 1',
++    'REPLACE VIEW leak AS SELECT 1',
++    'MERGE INTO prod.sales.orders',
++    'COPY INTO prod.sales.orders',
++])
++@pytest.mark.parametrize('array', [False, True])
++def test_snippet_fragments_reject_ddl_and_dcl(package_rig, sql, array):
++    artifact = {'serialized_space': {'instructions': {'sql_snippets': {
++        'measures': [{'sql': [sql] if array else sql}]}}}}
++    with pytest.raises(ValueError, match='Unsupported SQL'):
++        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
++
++
++@pytest.mark.parametrize('condition', [
++    'orders.id = customers.id',
++    '`orders`.`id` > `customers`.`id`',
++    '`orders`.`id` = `customers`.`id` OR 1 = 1',
++    '`orders`.`id` = `customers`.`id` --comment',
++    '`dev`.`sales`.`orders`.`id` = `customers`.`id`',
++])
++@pytest.mark.parametrize('override', [False, True])
++def test_join_condition_requires_alias_equality_even_after_override(package_rig, condition, override):
++    annotation = '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'
++    original = '`orders`.`id` = `customers`.`id`' if override else condition
++    mapping = package_rig.mapping
++    if override:
++        mapping = replace(mapping, mappings={**dict(mapping.mappings),
++            'sql:' + original + annotation: condition + annotation})
++    artifact = {'serialized_space': {'instructions': {'join_specs': [{
++        'sql': [original, annotation]}]}}}
++    with pytest.raises(ValueError, match='join_specs.sql requires'):
++        MappingTransformer().render(artifact, mapping, package_rig.target)

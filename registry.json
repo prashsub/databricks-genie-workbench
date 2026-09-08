@@ -174,7 +174,7 @@
     "review_conv": "3773493063976495 (claude_code)"
   },
   "m07_redo": {
-    "status": "rereview BLOCK (G1+G2 new/incomplete source-leaks); G1G2-fix running on pi/Astra conv 3773493063976821",
+    "status": "INTEGRATED+PUSHED at 22411f0 (G1/G2 re-review APPROVE)",
     "conv": "3773493063976496 (pi/system.ai.gpt-6-astra, done)",
     "head": "d1a489e",
     "branch": "vc/m07-astra (pushed)",
@@ -185,6 +185,14 @@
     "rereview_verdict": "B1/B3/B4/F1 RESOLVED (RED-verified). G1=B2 fragment_mode skips post-concat recheck (split-identifier/keyword leak, mapping.py:150-152). G2=F2 element0 unguarded (GRANT/CREATE/foreign-catalog smuggle, mapping.py:142-149). Both mapping.py, fixspec .polly/m07_g1g2_fixspec.md"
   },
   "infra_note": "codex Native terminal failed to start x3 (control-plane httpx.ReadTimeout in session-mirroring, NOT missing CLI, NOT Astra). Workaround: route Astra implement work to pi (headless, system.ai.gpt-6-astra) - still Astra-compliant. Both Astra endpoints also intermittently 429.",
-  "integrated_head": "47d9107",
-  "integration_note_m10": "M10 integrated using FULL delta 6c5ae3a..vc/m10 (28 files, all owned-paths, databricks.yml untouched). Earlier 9-failure scare was wrong diff base (8bafb8f had tasks1-13; correct base is merge-base 6c5ae3a). Result: GSO 918 pass/6 deselected, backend 1101 pass, write switches default-off, integration collection 14."
+  "integrated_head": "22411f0",
+  "integration_note_m10": "M10 integrated using FULL delta 6c5ae3a..vc/m10 (28 files, all owned-paths, databricks.yml untouched). Earlier 9-failure scare was wrong diff base (8bafb8f had tasks1-13; correct base is merge-base 6c5ae3a). Result: GSO 918 pass/6 deselected, backend 1101 pass, write switches default-off, integration collection 14.",
+  "status": "ALL 10 MODULES INTEGRATED + PUSHED to version-control-cicd @ 22411f0",
+  "final_gates": {
+    "backend_offline": "1239 passed / 15 deselected",
+    "gso_package": "918 passed / 6 deselected",
+    "frontend_vitest": "251 passed (25 files)",
+    "integration_collection": "15 (honest deployment blockers, never run - no live platform)",
+    "write_switches": "default-OFF (master gate)"
+  }
 }
