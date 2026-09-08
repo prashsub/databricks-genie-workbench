@@ -98,6 +98,32 @@ def test_reviewed_exact_sql_override_is_bound_in_mapping(package_rig):
     assert rendered.serialized_space['instructions']['example_question_sqls'][0]['sql'] == ['SELECT * FROM prod.sales.orders']
 
 
+def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(package_rig):
+    join_condition = '`dev`.`sales`.`orders`.`customer_id` = `dev`.`sales`.`customers`.`customer_id`'
+    relationship = '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'
+    snippet = "IDENTIFIER('dev.sales.orders').amount"
+    reviewed_snippet = 'prod.sales.orders.amount'
+    mapping = replace(package_rig.mapping, mappings={
+        **dict(package_rig.mapping.mappings),
+        'dev.sales.customers': 'prod.sales.customers',
+        'fragment:' + snippet: reviewed_snippet,
+    })
+    artifact = {'serialized_space': {'instructions': {
+        'join_specs': [{'left': {'identifier': 'dev.sales.orders'},
+                        'right': {'identifier': 'dev.sales.customers'},
+                        'sql': [join_condition, relationship]}],
+        'sql_snippets': {'measures': [{'sql': [snippet]}]},
+    }}}
+
+    rendered = MappingTransformer().render(artifact, mapping, package_rig.target).serialized_space
+
+    sql = rendered['instructions']['join_specs'][0]['sql']
+    assert sql[0] == '`prod`.`sales`.`orders`.`customer_id` = `prod`.`sales`.`customers`.`customer_id`'
+    assert len(sql) == 2
+    assert sql[1] == relationship
+    assert rendered['instructions']['sql_snippets']['measures'][0]['sql'] == [reviewed_snippet]
+
+
 @pytest.mark.parametrize('case', ['target', 'wrong_binding', 'injected_environment'])
 def test_warehouse_folder_binding_and_principals_remain_target_local(package_rig, case):
     rig = package_rig

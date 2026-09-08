@@ -49,15 +49,17 @@ def identifier_resources(value):
     return [(kind, parent[key]) for kind, parent, key in identifier_fields(value)]
 
 
-def map_sql(sql, mappings):
-    override = mappings.get('sql:' + sql)
+def map_sql(sql, mappings, fragment=False):
+    override_prefix = 'fragment:' if fragment else 'sql:'
+    override = mappings.get(override_prefix + sql)
     if override is not None:
-        return map_sql(override, {key: value for key, value in mappings.items() if not key.startswith('sql:')})
+        return map_sql(override, {key: value for key, value in mappings.items()
+                                  if not key.startswith(('sql:', 'fragment:'))}, fragment=fragment)
     tokens = TOKEN.findall(sql)
     if any(token in {"'", '`'} for token in tokens):
         raise ValueError('Unterminated quoted SQL token')
     code = [token for token in tokens if not token.isspace() and not token.startswith(('--', '/*', "'"))]
-    if (not code or code[0].upper() != 'SELECT'
+    if (not code or (not fragment and code[0].upper() != 'SELECT')
             or any(token.upper() in {'IDENTIFIER', 'EXECUTE', 'IMMEDIATE', 'WITH', 'UNION', 'PIVOT',
                                      'LATERAL', 'TABLE', 'USE', 'INSERT', 'UPDATE', 'DELETE', 'DROP'} for token in code)
             or any(token in {';', '"', "'", '`', '$', '\\', '{', '}'} for token in code)
@@ -67,8 +69,10 @@ def map_sql(sql, mappings):
     position = 0
     relation_pending = False
     relation_section = False
-    source_catalogs = {key.split('.')[0] for key in mappings if not key.startswith('sql:')}
-    target_identifiers = set(mappings.values())
+    identifier_mappings = {key: value for key, value in mappings.items()
+                           if not key.startswith(('sql:', 'fragment:', 'target:'))}
+    source_catalogs = {key.split('.')[0] for key in identifier_mappings}
+    target_identifiers = set(identifier_mappings.values())
     while position < len(tokens):
         token = tokens[position]
         if token.isspace() or token.startswith(('--', '/*', "'")):
@@ -84,12 +88,16 @@ def map_sql(sql, mappings):
         identifier = '.'.join(part.strip('`').replace('``', '`') for part in parts)
         if any('.' in part.strip('`') for part in parts):
             raise ValueError('Ambiguous quoted qualified identifier')
+        mapped_prefix = next((source for source in sorted(identifier_mappings, key=len, reverse=True)
+                              if identifier == source or identifier.startswith(source + '.')), None)
+        target_prefix = next((target for target in sorted(target_identifiers, key=len, reverse=True)
+                              if identifier == target or identifier.startswith(target + '.')), None)
         if relation_pending:
-            if len(parts) != 3 or (identifier not in mappings and identifier not in target_identifiers):
+            if len(parts) < 3 or (mapped_prefix is None and target_prefix is None):
                 raise ValueError('Unresolved relation requires an exact reviewed mapping')
             relation_pending = False
         if (len(parts) > 1 and parts[0].strip('`') in source_catalogs
-                and identifier not in mappings and identifier not in target_identifiers):
+                and mapped_prefix is None and target_prefix is None):
             raise ValueError('Unresolved source identifier')
         if token.upper() in {'FROM', 'JOIN'}:
             relation_pending = True
@@ -98,8 +106,8 @@ def map_sql(sql, mappings):
             relation_section = False
         if token == ',' and relation_section:
             raise ValueError('Comma relations require reviewed explicit JOIN syntax')
-        if len(parts) > 1 and identifier in mappings:
-            target = mappings[identifier].split('.')
+        if len(parts) > 1 and mapped_prefix is not None:
+            target = identifier_mappings[mapped_prefix].split('.') + identifier.split('.')[len(mapped_prefix.split('.')):]
             output.append('.'.join(f'`{part}`' for part in target) if any(part.startswith('`') for part in parts)
                           else '.'.join(target))
         else:
@@ -110,22 +118,35 @@ def map_sql(sql, mappings):
     return ''.join(output)
 
 
-def map_executable_fields(value, mappings):
+def map_executable_fields(value, mappings, path=()):
     if isinstance(value, dict):
         for key, child in value.items():
+            child_path = path + (key,)
             if key in {'warehouse_id', 'workspace_id', 'space_id', 'parent_path', 'permissions', 'principals'}:
                 raise ValueError('Environment bindings cannot appear in portable content')
             if key in {'expression', 'sql_expression', 'query', 'function_name'}:
                 raise ValueError('Unsupported executable field requires schema review')
             if key == 'sql' or (key == 'content' and value.get('format') == 'SQL'):
-                fragments = isinstance(child, list)
-                rendered = map_sql(''.join(child) if fragments else child, mappings)
-                value[key] = [rendered] if fragments else rendered
+                join_fragment = child_path == ('instructions', 'join_specs', '*', 'sql')
+                snippet_fragment = (len(child_path) == 5 and child_path[:2] == ('instructions', 'sql_snippets')
+                                    and child_path[2] in {'filters', 'expressions', 'measures'}
+                                    and child_path[3:] == ('*', 'sql'))
+                if isinstance(child, list):
+                    rendered = []
+                    for index, fragment_sql in enumerate(child):
+                        if join_fragment and index > 0:
+                            rendered.append(fragment_sql)
+                        else:
+                            rendered.append(map_sql(fragment_sql, mappings,
+                                                    fragment=join_fragment or snippet_fragment or index > 0))
+                    value[key] = rendered
+                else:
+                    value[key] = map_sql(child, mappings, fragment=join_fragment or snippet_fragment)
             else:
-                map_executable_fields(child, mappings)
+                map_executable_fields(child, mappings, child_path)
     elif isinstance(value, list):
         for child in value:
-            map_executable_fields(child, mappings)
+            map_executable_fields(child, mappings, path + ('*',))
 
 
 class MappingTransformer:
