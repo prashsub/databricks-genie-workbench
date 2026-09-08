@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control.governance.approvals import request_digest
 from backend.services.version_control.optimizer_adapter import (
     ChampionArtifact, OptimizerChampionAdapter, source_digest,
 )
@@ -62,6 +63,15 @@ def test_final_champion_applies_once_through_shared_gate(rig):
     assert request.serialized_space == source.serialized_space
     requests.prepare.assert_called_once_with(request, "requester")
     gate.execute.assert_called_once()
+
+
+def test_champion_request_digest_satisfies_m06_binding(rig):
+    adapter, source, executor, gate, _, _ = rig
+    adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+    request = gate.execute.call_args.args[0]
+    assert request.identity.request_digest == request_digest(request)
+    assert request.source_payload_digest == source_digest(source.serialized_space, source.description)
+    assert request.identity.request_digest != request.source_payload_digest
 
 
 def test_champion_apply_rejects_app_executor_or_tampered_source(rig):

@@ -1,11 +1,12 @@
 """Target-local M10 seam. Composition supplies durable VC/1.0 implementations."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control.governance.approvals import request_digest
 
 
 def source_digest(serialized_space, description):
@@ -94,17 +95,17 @@ class OptimizerChampionAdapter:
             if (binding.environment != "dev"
                     or self.identity.can_edit(source.requester_id, binding) is not True):
                 raise PermissionError("Requester edit right or approved release policy is required")
-        digest = vc.canonical_json_hash("vc-optimizer-request/1", vc.to_wire(source))
         key = vc.canonical_json_hash("vc-optimizer-run/1", {
             "run_id": run_id, "binding_id": binding.binding_id,
             "binding_revision": binding.binding_revision, "workspace_id": binding.workspace_id,
         })
         request = ChampionMutationRequest(
-            vc.RequestIdentity(str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key)), key, digest),
+            vc.RequestIdentity(str(uuid5(NAMESPACE_URL, "vc-optimizer-run/1:" + key)), key, "0" * 64),
             binding, "optimizer_apply",
             source.source_version_id, expected_base, source.serialized_space, source.description,
             source.approval_id, vc.Origin.OPTIMIZER, run_id, champion_id, source.payload_digest,
         )
+        request = replace(request, identity=replace(request.identity, request_digest=request_digest(request)))
         persisted = self.requests.prepare(request, source.requester_id)
         if persisted != request:
             raise ValueError("Run already has a different champion/digest")
