@@ -59,13 +59,13 @@ class PlatformIdentityProvider:
         if selection.profile is None:
             factory = self._obo_executors.get(selection.execution_ref)
             allowed_auth = {"pat"}
-            actor_kind = "user"
+            actor_kind = "human"
         else:
             if not selection.profile.strip() or selection.profile.upper() == "DEFAULT":
                 raise PermissionError("Default profile is not an explicit VC identity")
             factory = self._profiles.get(selection.profile)
             allowed_auth = {"oauth-m2m"}
-            actor_kind = "service_principal"
+            actor_kind = "service"
         if factory is None:
             raise PermissionError("No explicitly bound executor credentials")
         client = factory()

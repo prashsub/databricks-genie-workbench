@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from backend.services.version_control import contracts as vc
+from backend.services.version_control import platform
 from backend.services.version_control.coordination import CoordinationService
 from backend.services.version_control.mutation_gate import MutationGate
 from backend.tests.vc_fakes.fixtures import FakeCanonicalizer, binding_fixture, executor_fixture
@@ -96,6 +97,181 @@ def test_gate_has_no_transport_write_before_reserve_evidence_and_admit(rig):
     rig.gate.execute(rig.request, rig.executor)
     assert rig.trace[:6] == ["reserve", "get", "commit:preimage", "verify_commit", "authorize", "admit"]
     assert rig.trace.index("admit") < rig.trace.index("patch_config")
+
+
+def test_requested_only_history_proceeds_to_first_execution(rig):
+    now = datetime.now(timezone.utc)
+    inputs = vc.ApprovalInputs(
+        "VC/1.0", rig.identity.operation_id, rig.request.operation_type,
+        rig.request.source_version_id, rig.before.raw_state_digest, rig.before.fingerprints,
+        None, None, rig.desired.state_digest, None,
+        rig.before.fingerprints.canonicalizer_version, rig.binding, rig.before.fingerprints,
+        None, "a" * 64, "b" * 64, "c" * 64, {}, "requester", {},
+        now + timedelta(minutes=5),
+    )
+    approval_request = vc.ApprovalRequest(uid(), inputs, now)
+    record = vc.ApprovalRecord(approval_request, (), vc.FactStatus.REQUESTED, None)
+    requested = vc.OperationFact(
+        uid(), vc.FactKind.APPROVAL_REQUEST, rig.identity.operation_id, 0,
+        "approval-request", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("requester", rig.binding.workspace_id, "human"),
+        vc.FactStatus.REQUESTED, record, now, approval_id=approval_request.approval_id,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((requested,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.CONFIRMED
+    rig.coordination.reserve.assert_called_once()
+    rig.coordination.admit.assert_called_once()
+    rig.transport.patch_config_once.assert_called_once()
+    rig.transport.patch_description_once.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [
+    vc.FactStatus.APPLIED_UNVERIFIED,
+    vc.FactStatus.APPLIED_PARTIAL,
+    vc.FactStatus.CONFIRMED,
+    vc.FactStatus.CONFLICTED,
+])
+def test_execution_outcome_history_routes_to_verify_only_without_second_patch(rig, status):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "execution-outcome", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        status, vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+                                 datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=rig.fence.attempt_id,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    rig.coordination.reserve.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+
+
+def test_presend_cas_loss_conflicted_does_not_block_first_execution(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "presend-cas-loss", rig.binding, rig.identity, "coordination",
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.CONFLICTED,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_PENDING,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=None,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.CONFIRMED
+    rig.coordination.reserve.assert_called_once()
+    rig.coordination.admit.assert_called_once()
+    rig.transport.patch_config_once.assert_called_once()
+
+
+def test_presend_cas_loss_conflicted_with_inflight_stage_does_not_block(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "presend-cas-loss-inflight", rig.binding, rig.identity, "coordination",
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.CONFLICTED,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_IN_FLIGHT,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=None,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.CONFIRMED
+    rig.coordination.reserve.assert_called_once()
+    rig.coordination.admit.assert_called_once()
+    rig.transport.patch_config_once.assert_called_once()
+
+
+def test_presend_quarantined_with_config_pending_does_not_block(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "presend-quarantined", rig.binding, rig.identity, "coordination",
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.QUARANTINED,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_PENDING,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=rig.fence.attempt_id,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.CONFIRMED
+    rig.coordination.reserve.assert_called_once()
+    rig.coordination.admit.assert_called_once()
+    rig.transport.patch_config_once.assert_called_once()
+
+
+def test_completed_noop_history_routes_to_verify_only(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "completed-noop", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.NOOP,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=rig.fence.attempt_id,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    rig.coordination.reserve.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+
+
+def test_postsend_conflicted_still_routes_to_verify_only(rig):
+    fact = vc.OperationFact(
+        uid(), vc.FactKind.OPERATION, rig.identity.operation_id, 0,
+        "postsend-conflicted", rig.binding, rig.identity, rig.request.operation_type,
+        "requester", vc.ActorContext("target-service", rig.binding.workspace_id, "service"),
+        vc.FactStatus.CONFLICTED,
+        vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+                         datetime.now(timezone.utc), rig.identity.request_digest, None),
+        datetime.now(timezone.utc), attempt_id=rig.fence.attempt_id,
+    )
+    rig.facts.lookup_request.return_value = vc.RequestHistory((fact,), False)
+    rig.facts.get_request.return_value = vc.ApprovedOperation(rig.request, None)
+
+    result = rig.gate.execute(rig.request, rig.executor)
+
+    assert result.status == vc.OperationStatus.APPLIED_UNVERIFIED
+    rig.coordination.reserve.assert_not_called()
+    rig.transport.patch_config_once.assert_not_called()
+    rig.transport.patch_description_once.assert_not_called()
+
+
+def test_m08_service_executor_passes_m04_governed_write_identity_check(rig):
+    client = Mock()
+    client.config.host = "https://example.invalid"
+    client.config.auth_type = "oauth-m2m"
+    client.get_workspace_id.return_value = "123"
+    client.current_user.me.return_value = SimpleNamespace(application_id="target-service", id="scim-id")
+    client.api_client.do.return_value = {
+        "userName": "target-service",
+        "id": "scim-id",
+        "X-Databricks-Org-Id": "123",
+    }
+    provider = platform.PlatformIdentityProvider(profiles={"target-test": lambda: client})
+    executor = provider.executor(vc.ExplicitExecutorSelection(
+        "123", "https://example.invalid", "target-service", "job/456", "target-test"))
+    rig.gate._enabled(rig.binding, executor, "promotion")
 
 
 @pytest.mark.parametrize("failure", ["reserve", "append_observation", "verify_committed", "authorize", "admit"])

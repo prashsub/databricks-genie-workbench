@@ -96,6 +96,7 @@ def test_explicit_profile_host_workspace_mismatch_is_rejected():
     selection = ExplicitExecutorSelection("target", "https://target.example", "target-sp", "42", "target-test")
     context = provider.executor(selection)
     assert context.principal_id == "target-sp"
+    assert context.actor_kind == "service"
     assert context.credential_handle is client
     assert "credential_handle" not in repr(context)
     assert provider.sql_client(context) is client.statement_execution
@@ -120,7 +121,7 @@ def test_production_viewer_capture_uses_trusted_reader_without_elevation():
     capture_type = getattr(platform, "TrustedSnapshotReader", None)
     assert callable(capture_type), "Viewer policy and full-config reader must remain separate"
     from backend.services.version_control.contracts import ActorContext, AuthenticatedRequest
-    actor = ActorContext("viewer", "target", "user")
+    actor = ActorContext("viewer", "target", "human")
     resolve_actor = Mock(return_value=actor)
     groups = Mock(return_value=frozenset({"history-readers"}))
     edit = Mock(return_value=False)
@@ -163,7 +164,7 @@ def test_obo_executor_is_request_bound_and_never_falls_back():
     client.api_client.do.return_value = {"id": "viewer", "X-Databricks-Org-Id": "target"}
     provider = platform.PlatformIdentityProvider(obo_executors={"session": lambda: client})
     selection = ExplicitExecutorSelection("target", "https://target.example", "viewer", "session", None)
-    assert provider.executor(selection).actor_kind == "user"
+    assert provider.executor(selection).actor_kind == "human"
     from dataclasses import replace
     with pytest.raises(PermissionError):
         provider.executor(replace(selection, execution_ref="other-session"))

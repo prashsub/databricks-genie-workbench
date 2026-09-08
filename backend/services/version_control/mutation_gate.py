@@ -24,7 +24,7 @@ class MutationGate:
         history = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
         if history.ambiguous or any(fact.request != request.identity for fact in history.facts):
             raise RuntimeError("Ambiguous or reused request identity")
-        if history.facts:
+        if any(self._requires_verify_only(fact) for fact in history.facts):
             return self.verify_only(request.identity.operation_id, executor)
         reservation = self.coordination.reserve(request.binding, request.identity, executor)
         snapshot = self.canonicalizer.observe(self.transport.get(request.binding, executor))
@@ -32,7 +32,7 @@ class MutationGate:
         if snapshot.state_digest != request.expected_base:
             if getattr(self.coordination, "facts", None) is not self.facts:
                 self._record(request, executor, reservation.fence, vc.OperationStatus.CONFLICTED,
-                             preimage=preimage)
+                             preimage=preimage, stage=vc.PatchStage.CONFIG_PENDING)
             self.coordination.reject_reservation(reservation, "Reviewed base changed before admission")
             return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.CONFLICTED,
                                       preimage, None, False, (preimage.version_id,))
@@ -181,9 +181,28 @@ class MutationGate:
         self.coordination.finish(claim, result)
         return result
 
-    def _record(self, request, executor, claim, status, postimage=None, *, preimage=None):
+    @staticmethod
+    def _requires_verify_only(fact):
+        if fact.fact_kind != vc.FactKind.OPERATION:
+            return False
+        if fact.status in {
+            vc.FactStatus.APPLIED_UNVERIFIED,
+            vc.FactStatus.APPLIED_PARTIAL,
+            vc.FactStatus.CONFIRMED,
+            vc.FactStatus.NOOP,
+        }:
+            return True
+        if fact.status not in {vc.FactStatus.CONFLICTED, vc.FactStatus.QUARANTINED}:
+            return False
+        # Pre-send CAS losers inherit the winner's stage; attempt_id=None marks never-admitted, so both checks are required.
+        return (fact.attempt_id is not None
+                and isinstance(fact.evidence, vc.StageEvidence)
+                and fact.evidence.stage != vc.PatchStage.CONFIG_PENDING)
+
+    def _record(self, request, executor, claim, status, postimage=None, *, preimage=None,
+                stage=vc.PatchStage.CONFIG_OBSERVED):
         preimage = claim.preimage if preimage is None else preimage
-        evidence = vc.StageEvidence("VC/1.0", vc.PatchStage.CONFIG_OBSERVED,
+        evidence = vc.StageEvidence("VC/1.0", stage,
                                     datetime.now(timezone.utc),
                                     postimage.state_digest if postimage else request.identity.request_digest,
                                     postimage)
