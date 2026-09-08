@@ -15,6 +15,8 @@ from backend.services.version_control import platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# Deliberate monotonic ratchet: raise only when new integration tests land, never lower.
+LANDED_INTEGRATION_BASELINE = 15
 
 
 @pytest.mark.parametrize("scenario", ["clear", "dual_authority", "unknown", "missing_yaml"])
@@ -484,6 +486,23 @@ def test_integration_gate_command_collects_every_integration_test():
     assert "pytest.skip" not in conftest, "live_platform must not silently skip deployment blockers"
 
 
+def test_integration_suite_never_shrinks_below_landed_baseline():
+    # Real-tree gate only: synthetic layouts reuse the equality gate above, not
+    # this landed baseline. Resolve from this file rather than monkeypatchable ROOT.
+    real_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "backend/tests/integration",
+         "-m", "integration", "--collect-only", "-q"],
+        cwd=str(real_root), capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(real_root)))
+    assert result.returncode == 0, (
+        f"Integration collection errored:\n{result.stdout}\n{result.stderr}")
+    collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
+    assert len(collected) >= LANDED_INTEGRATION_BASELINE, (
+        f"{len(collected)} collected cases is below landed integration baseline "
+        f"{LANDED_INTEGRATION_BASELINE}; never lower the baseline")
+
+
 def test_integration_gate_rejects_partial_collection(monkeypatch):
     run = subprocess.run
 
@@ -513,6 +532,30 @@ def test_integration_gate_rejects_removed_real_module_mark(tmp_path, monkeypatch
     module.write_text(source.replace("pytestmark = pytest.mark.integration", replacement))
     with pytest.raises(AssertionError, match="integration directory contains .* cases, but only .* are declared"):
         test_integration_gate_command_collects_every_integration_test()
+
+
+def test_integration_gate_rejects_deleted_real_integration_file(tmp_path):
+    shutil.copytree(ROOT / "backend", tmp_path / "backend",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copyfile(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    command = [
+        sys.executable, "-m", "pytest", "backend/tests/test_vc_provisioning.py", "-q",
+        "-k", "test_integration_gate_command_collects_every_integration_test or "
+              "test_integration_suite_never_shrinks_below_landed_baseline",
+    ]
+    options = dict(cwd=str(tmp_path), capture_output=True, text=True,
+                   env=dict(os.environ, PYTHONPATH=str(tmp_path)))
+    intact = subprocess.run(command, **options)
+    assert intact.returncode == 0, intact.stdout + intact.stderr
+
+    (tmp_path / "backend/tests/integration/test_vc_delta_cas.py").unlink()
+    deleted = subprocess.run(command, **options)
+    assert deleted.returncode == 1, (
+        f"Deleting a landed integration file must fail the real-tree gate:\n"
+        f"{deleted.stdout}\n{deleted.stderr}")
+    assert "below landed integration baseline" in deleted.stdout
+    # Declaration/collection/recount equality still passes; only the baseline fails.
+    assert "1 failed, 1 passed" in deleted.stdout
 
 
 @pytest.fixture
