@@ -73,7 +73,7 @@ class OptimizerChampionAdapter:
 
     def apply(self, run_id, champion_id, binding, expected_base, executor):
         if self.flags is None or any(self.flags.enabled(name) is not True for name in (
-            "vc_writes_enabled", "vc_optimizer_apply_enabled", "vc_optimizer_contract_ready",
+            "vc_writes_enabled", "vc_optimizer_apply_enabled",
         )):
             raise PermissionError("Optimizer champion writes are disabled")
         if (executor.workspace_id != binding.workspace_id or executor.actor_kind != "service"

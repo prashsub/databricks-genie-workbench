@@ -12,6 +12,7 @@ from backend.services.version_control.optimizer_adapter import (
     ChampionArtifact, OptimizerChampionAdapter, source_digest,
 )
 from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
+from backend.services.version_control.platform.feature_flags import FeatureFlags
 
 
 @pytest.fixture
@@ -80,6 +81,24 @@ def test_optimizer_write_switches_default_off(rig):
     with pytest.raises(PermissionError):
         adapter.apply("run", "champion", source.binding, source.expected_base, executor)
     gate.execute.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_adapter_uses_only_m08_declared_switches(rig, enabled):
+    adapter, source, executor, gate, _, _ = rig
+    flags = FeatureFlags(vc_writes_enabled=enabled, vc_optimizer_apply_enabled=enabled)
+    adapter.flags = Mock(wraps=flags)
+    try:
+        if enabled:
+            assert adapter.apply("run", "champion", source.binding, source.expected_base,
+                                 executor) is gate.execute.return_value
+            gate.execute.assert_called_once()
+        else:
+            with pytest.raises(PermissionError):
+                adapter.apply("run", "champion", source.binding, source.expected_base, executor)
+            gate.execute.assert_not_called()
+    finally:
+        assert {call.args[0] for call in adapter.flags.enabled.call_args_list} <= flags.registry.keys()
 
 
 def test_retry_or_second_champion_in_same_run_cannot_append_second_optimizer_version(rig):
