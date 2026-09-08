@@ -124,6 +124,17 @@ def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(
     assert rendered['instructions']['sql_snippets']['measures'][0]['sql'] == [reviewed_snippet]
 
 
+def test_sql_prefix_mapping_requires_exact_or_three_part_source(package_rig):
+    # F1: a one-token catalog mapping {'dev':'prod'} must NOT authorize an unbounded
+    # subtree via longest-prefix matching. 'dev.internal.pii_raw' was never reviewed;
+    # promoting it to 'prod.internal.pii_raw' leaks a never-reviewed source table.
+    mapping = replace(package_rig.mapping, mappings={'dev': 'prod'})
+    artifact = {'serialized_space': {'instructions': {
+        'example_question_sqls': [{'sql': ['SELECT * FROM dev.internal.pii_raw']}]}}}
+    with pytest.raises(ValueError):
+        MappingTransformer().render(artifact, mapping, package_rig.target)
+
+
 @pytest.mark.parametrize('case', ['target', 'wrong_binding', 'injected_environment'])
 def test_warehouse_folder_binding_and_principals_remain_target_local(package_rig, case):
     rig = package_rig
