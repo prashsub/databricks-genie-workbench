@@ -185,7 +185,7 @@
     "rereview_verdict": "B1/B3/B4/F1 RESOLVED (RED-verified). G1=B2 fragment_mode skips post-concat recheck (split-identifier/keyword leak, mapping.py:150-152). G2=F2 element0 unguarded (GRANT/CREATE/foreign-catalog smuggle, mapping.py:142-149). Both mapping.py, fixspec .polly/m07_g1g2_fixspec.md"
   },
   "infra_note": "codex Native terminal failed to start x3 (control-plane httpx.ReadTimeout in session-mirroring, NOT missing CLI, NOT Astra). Workaround: route Astra implement work to pi (headless, system.ai.gpt-6-astra) - still Astra-compliant. Both Astra endpoints also intermittently 429.",
-  "integrated_head": "22411f0",
+  "integrated_head": "5c091f2",
   "integration_note_m10": "M10 integrated using FULL delta 6c5ae3a..vc/m10 (28 files, all owned-paths, databricks.yml untouched). Earlier 9-failure scare was wrong diff base (8bafb8f had tasks1-13; correct base is merge-base 6c5ae3a). Result: GSO 918 pass/6 deselected, backend 1101 pass, write switches default-off, integration collection 14.",
   "status": "ALL 10 MODULES INTEGRATED + PUSHED to version-control-cicd @ 22411f0",
   "final_gates": {
@@ -201,21 +201,21 @@
       "conv": "3773493063976871",
       "worktree": "backlog-integ-gate",
       "items": "A floor-tracks-actual-count, B AnnAssign+class-body pytestmark, C recursive glob; test_vc_provisioning.py only",
-      "status": "D-fix done+verified; re-review conv 3773493063977013 (prior review ReadTimeout-idle)",
+      "status": "D-fix done+verified (deletion-regression RED mutation-confirmed by me); final re-review conv 3773493063977093 running; NOT yet integrated",
       "branch": "vc/backlog-integ-gate"
     },
     "m05_f3": {
       "conv": "3773493063976872",
       "worktree": "backlog-m05f3",
       "item": "fail-closed when approved_targets absent",
-      "status": "D-fix done+verified; re-review conv 3773493063977005 (prior review died mid-mutation-test)",
+      "status": "APPROVED (D re-review conv 3773493063976954: MUT1/2/7 mutation-confirmed, MUT-A4 resolved as covered elsewhere) + INTEGRATED at 5c091f2",
       "branch": "vc/backlog-m05f3"
     },
     "m07_nb": {
       "conv": "3773493063976873",
       "worktree": "backlog-m07nb",
       "items": "nb1 composite-key joins promotable, nb2 snippet positive-grammar DDL, nb3 ReleaseCatalog exception precision",
-      "status": "APPROVED (claude_code conv 3773493063976881: 24-case bypass battery, relations mapped, fullmatch-anchored, owned-paths clean, 1312 pass). Integrate from origin/vc/backlog-m07nb @ 383b6dd (worktree had a benign corrupt-index artifact; remote is clean source of truth).",
+      "status": "APPROVED + INTEGRATED at 5c091f2",
       "branch": "vc/backlog-m07nb"
     }
   }
