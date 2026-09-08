@@ -121,7 +121,7 @@ def test_join_specs_and_sql_function_identifiers_map_exactly_or_fail_closed(pack
 @pytest.mark.parametrize('override', [False, True])
 def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(package_rig, override):
     rig = package_rig
-    condition = '`dev`.`sales`.`orders`.`customer_id` = `customers`.`customer_id`'
+    condition = '`orders`.`customer_id` = `customers`.`customer_id`'
     annotation = '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'
     measure = 'SUM(dev.sales.orders.amount)'
     mappings = {**dict(rig.mapping.mappings), 'dev.sales.customers': 'prod.sales.customers'}
@@ -179,7 +179,7 @@ def test_sql_prefix_mapping_requires_exact_or_three_part_source(package_rig, map
     ['--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--\n'],
 ])
 def test_join_spec_sql_trailing_elements_are_validated_not_passthrough(package_rig, trailing):
-    condition = '`dev`.`sales`.`orders`.`customer_id` = `customers`.`customer_id`'
+    condition = '`orders`.`customer_id` = `customers`.`customer_id`'
     artifact = {'serialized_space': {'instructions': {'join_specs': [{
         'left': {'identifier': 'dev.sales.orders'}, 'right': {'identifier': 'dev.sales.orders'},
         'sql': [condition, *trailing]}]}}}
@@ -213,3 +213,54 @@ def test_snippet_sql_arrays_are_validated_after_concatenation(package_rig, eleme
     assert len(sql) == len(elements)
     assert sql[0] == expected[:len(elements[0])]
     assert artifact['serialized_space']['instructions']['sql_snippets']['measures'][0]['sql'] == elements
+
+
+@pytest.mark.parametrize('condition', [
+    'GRANT SELECT ON prod.sales.orders TO evil',
+    'CREATE VIEW leak AS SELECT 1',
+    '`hive`.`internal`.`pii_raw`.`c` = `o`.`c`',
+])
+def test_join_condition_element_is_statement_class_guarded(package_rig, condition):
+    artifact = {'serialized_space': {'instructions': {'join_specs': [{
+        'left': {'identifier': 'dev.sales.orders'}, 'right': {'identifier': 'dev.sales.orders'},
+        'sql': [condition, '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--']}]}}}
+    with pytest.raises(ValueError):
+        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+
+
+@pytest.mark.parametrize('sql', [
+    'GRANT SELECT ON prod.sales.orders TO evil',
+    'REVOKE SELECT ON prod.sales.orders FROM evil',
+    'CREATE VIEW leak AS SELECT 1',
+    'ALTER VIEW leak AS SELECT 1',
+    'REPLACE VIEW leak AS SELECT 1',
+    'MERGE INTO prod.sales.orders',
+    'COPY INTO prod.sales.orders',
+])
+@pytest.mark.parametrize('array', [False, True])
+def test_snippet_fragments_reject_ddl_and_dcl(package_rig, sql, array):
+    artifact = {'serialized_space': {'instructions': {'sql_snippets': {
+        'measures': [{'sql': [sql] if array else sql}]}}}}
+    with pytest.raises(ValueError, match='Unsupported SQL'):
+        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+
+
+@pytest.mark.parametrize('condition', [
+    'orders.id = customers.id',
+    '`orders`.`id` > `customers`.`id`',
+    '`orders`.`id` = `customers`.`id` OR 1 = 1',
+    '`orders`.`id` = `customers`.`id` --comment',
+    '`dev`.`sales`.`orders`.`id` = `customers`.`id`',
+])
+@pytest.mark.parametrize('override', [False, True])
+def test_join_condition_requires_alias_equality_even_after_override(package_rig, condition, override):
+    annotation = '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'
+    original = '`orders`.`id` = `customers`.`id`' if override else condition
+    mapping = package_rig.mapping
+    if override:
+        mapping = replace(mapping, mappings={**dict(mapping.mappings),
+            'sql:' + original + annotation: condition + annotation})
+    artifact = {'serialized_space': {'instructions': {'join_specs': [{
+        'sql': [original, annotation]}]}}}
+    with pytest.raises(ValueError, match='join_specs.sql requires'):
+        MappingTransformer().render(artifact, mapping, package_rig.target)

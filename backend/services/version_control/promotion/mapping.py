@@ -15,6 +15,8 @@ class RenderedPayload:
 
 TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*|\s+|.")
 IDENTIFIER = re.compile(r'(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*)\Z')
+JOIN_COLUMN = r'`(?:``|[^`])+`\.`(?:``|[^`])+`'
+JOIN_CONDITION = re.compile(rf'\s*{JOIN_COLUMN}\s*=\s*{JOIN_COLUMN}\s*')
 
 
 ENVIRONMENT_KEYS = frozenset({'workspace_id', 'space_id', 'warehouse_id', 'sample_warehouse_id',
@@ -62,7 +64,8 @@ def map_sql(sql, mappings, *, fragment=False):
     code = [token for token in tokens if not token.isspace() and not token.startswith(('--', '/*', "'"))]
     if (not code or (not fragment and code[0].upper() != 'SELECT')
             or any(token.upper() in {'IDENTIFIER', 'EXECUTE', 'IMMEDIATE', 'WITH', 'UNION', 'PIVOT',
-                                     'LATERAL', 'TABLE', 'USE', 'INSERT', 'UPDATE', 'DELETE', 'DROP'} for token in code)
+                                     'LATERAL', 'TABLE', 'USE', 'INSERT', 'UPDATE', 'DELETE', 'DROP',
+                                     'GRANT', 'REVOKE', 'CREATE', 'ALTER', 'REPLACE', 'MERGE', 'COPY'} for token in code)
             or any(token in {';', '"', "'", '`', '$', '\\', '{', '}'} for token in code)
             or '/*' in ''.join(code) or code.count('(') != code.count(')')):
         raise ValueError('Unsupported SQL; supply a reviewed exact SQL override')
@@ -138,14 +141,16 @@ def map_executable_fields(value, mappings, path=()):
                                       or not all(isinstance(item, str) for item in child)):
                     raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
                 if isinstance(child, list):
-                    if join_fragment and not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--', child[1]):
+                    if join_fragment and (not JOIN_CONDITION.fullmatch(child[0])
+                                          or not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--', child[1])):
                         raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
                     # Genie concatenates arrays without separators. Parse and map that
                     # exact SQL once, so split tokens cannot evade guards or mapping.
                     rendered_sql = map_sql(''.join(child), mappings, fragment=fragment_mode)
                     if join_fragment:
                         # The annotation is a schema element, not an arbitrary SQL boundary.
-                        if not rendered_sql.endswith(child[1]):
+                        if (not rendered_sql.endswith(child[1])
+                                or not JOIN_CONDITION.fullmatch(rendered_sql[:-len(child[1])])):
                             raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
                         value[key] = [rendered_sql[:-len(child[1])], child[1]]
                     else:
