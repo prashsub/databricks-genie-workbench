@@ -373,12 +373,16 @@ def test_unverified_cross_metastore_artifact_transport_disables_topology():
     assert verify(proof) is False
 
 
-def _has_module_integration_mark(module):
-    for statement in module.body:
-        if not isinstance(statement, ast.Assign):
+def _has_scope_integration_mark(scope):
+    for statement in scope.body:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+        else:
             continue
         if not any(isinstance(target, ast.Name) and target.id == "pytestmark"
-                   for target in statement.targets):
+                   for target in targets):
             continue
         marks = (statement.value.elts if isinstance(statement.value, (ast.List, ast.Tuple))
                  else [statement.value])
@@ -406,7 +410,7 @@ def test_integration_gate_command_collects_every_integration_test():
     declared_count = 0
     for path in (ROOT / "backend" / "tests" / "integration").glob("*.py"):
         module = ast.parse(path.read_text(), filename=str(path))
-        module_integration_mark = _has_module_integration_mark(module)
+        module_integration_mark = _has_scope_integration_mark(module)
         for node in ast.walk(module):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -456,7 +460,9 @@ def test_integration_gate_command_collects_every_integration_test():
         source = path.read_text()
         assert not marker_decorator.search(source), (
             f"{path} carries an integration test outside backend/tests/integration/")
-        assert not _has_module_integration_mark(ast.parse(source, filename=str(path))), (
+        module = ast.parse(source, filename=str(path))
+        assert not any(_has_scope_integration_mark(scope) for scope in ast.walk(module)
+                       if isinstance(scope, (ast.Module, ast.ClassDef))), (
             f"{path} carries an integration test outside backend/tests/integration/")
 
     assert (tests_dir / "integration" / "__init__.py").exists(), (
@@ -559,8 +565,19 @@ def test_integration_gate_rejects_marks_outside_layout(integration_gate_layout, 
 
 
 @pytest.mark.parametrize("source", [
-    "def helper():\n    pytestmark = pytest.mark.integration\n",
+    "pytestmark: list = [pytest.mark.integration]\n",
     "class Helper:\n    pytestmark = pytest.mark.integration\n",
+    "class TestOutside:\n    pytestmark: list = [pytest.mark.integration]\n"
+    "    def test_outside(self): pass\n",
+])
+def test_integration_gate_rejects_annotated_and_class_marks_outside_layout(integration_gate_layout, source):
+    (integration_gate_layout / "test_outside.py").write_text("import pytest\n" + source)
+    with pytest.raises(AssertionError, match="carries an integration test outside"):
+        test_integration_gate_command_collects_every_integration_test()
+
+
+@pytest.mark.parametrize("source", [
+    "def helper():\n    pytestmark = pytest.mark.integration\n",
     "pytestmark = [pytest.mark.other]\n",
     "example = 'pytestmark = pytest.mark.integration'\n",
 ])
