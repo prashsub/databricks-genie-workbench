@@ -430,9 +430,21 @@ def test_integration_gate_command_collects_every_integration_test():
             declared_count += case_count
     assert len(collected) == declared_count, (
         f"Expected all {declared_count} declared integration cases collected, saw {len(collected)}:\n{result.stdout}")
-    # Cumulative baseline: M08's 5 + M06's 5; raise as future modules add integration tests.
-    assert len(collected) >= 10, (
-        f"Expected at least 10 baseline integration tests collected, saw {len(collected)}:\n{result.stdout}")
+    # Independently enumerate every case in the gated directory, without filtering
+    # by marks. Losing a module's pytestmark must not silently shrink both the AST
+    # declaration count and the marked collection. Use the same (possibly fake) ROOT.
+    # Explicitly override the project's default -m 'not integration' selection.
+    all_result = subprocess.run(
+        [sys.executable, "-m", "pytest", "backend/tests/integration",
+         "-m", "", "--collect-only", "-q"],
+        cwd=str(ROOT), capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(ROOT)))
+    assert all_result.returncode == 0, (
+        f"Unfiltered integration collection errored:\n{all_result.stdout}\n{all_result.stderr}")
+    all_cases = re.findall(r"^(backend/tests/integration/\S+::\S+)$", all_result.stdout, re.MULTILINE)
+    assert declared_count == len(all_cases), (
+        f"integration directory contains {len(all_cases)} cases, but only {declared_count} are declared "
+        f"integration cases:\n{all_result.stdout}")
 
     # Pin the layout: no integration-marked test may drift back out of the gated
     # directory. Match the decorator only where it is actually applied (a line whose
@@ -479,6 +491,22 @@ def test_integration_gate_rejects_partial_collection(monkeypatch):
     declared, collected = map(int, re.search(r"Expected all (\d+).*saw (\d+)", str(error.value)).groups())
     assert collected == declared - 1
     assert collected >= 5
+
+
+@pytest.mark.parametrize("replacement", ["", "# pytestmark = pytest.mark.integration"])
+def test_integration_gate_rejects_removed_real_module_mark(tmp_path, monkeypatch, replacement):
+    shutil.copytree(ROOT / "backend", tmp_path / "backend",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copyfile(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    test_integration_gate_command_collects_every_integration_test()
+
+    module = tmp_path / "backend/tests/integration/test_vc_delta_cas.py"
+    source = module.read_text()
+    assert "pytestmark = pytest.mark.integration\n" in source
+    module.write_text(source.replace("pytestmark = pytest.mark.integration", replacement))
+    with pytest.raises(AssertionError, match="integration directory contains .* cases, but only .* are declared"):
+        test_integration_gate_command_collects_every_integration_test()
 
 
 @pytest.fixture
