@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
 from backend.services.version_control.governance.approvals import request_digest
+from backend.services.version_control.governance.facts import DurableOperationFacts
 
 
 def source_digest(serialized_space, description):
@@ -35,6 +36,27 @@ class ChampionMutationRequest(vc.MutationRequest):
     optimizer_run_id: str
     champion_id: str
     source_payload_digest: vc.Digest
+
+
+class ChampionOperationFacts(DurableOperationFacts):
+    """Target-local durable facts with the M10 champion request wire extension."""
+
+    def get_request(self, operation_id):
+        rows = self._read()
+        base_fields = vc.MutationRequest.__dataclass_fields__
+        base_rows = [dict(row, operation_request={key: value for key, value in row["operation_request"].items()
+                                                 if key in base_fields})
+                     if ("operation_request" in row
+                         and row["operation_request"].get("operation_type") == "optimizer_apply")
+                     else row for row in rows]
+        projected = DurableOperationFacts(lambda: base_rows, self._insert).get_request(operation_id)
+        if projected.request.operation_type != "optimizer_apply":
+            return projected
+        requests = [vc.from_wire(ChampionMutationRequest, row["operation_request"])
+                    for row in rows if row["operation_id"] == operation_id and "operation_request" in row]
+        if any(request != requests[0] for request in requests):
+            raise ValueError("Ambiguous durable champion request")
+        return vc.ApprovedOperation(requests[0], projected.approval)
 
 
 class ChampionSources(Protocol):
@@ -92,9 +114,7 @@ class OptimizerChampionAdapter:
         if not source.requester_id:
             raise PermissionError("Requester must be durably bound to the source")
         if source.approval_id is None:
-            if (binding.environment != "dev"
-                    or self.identity.can_edit(source.requester_id, binding) is not True):
-                raise PermissionError("Requester edit right or approved release policy is required")
+            raise PermissionError("Requester must supply an M06 approval for optimizer champion apply")
         key = vc.canonical_json_hash("vc-optimizer-run/1", {
             "run_id": run_id, "binding_id": binding.binding_id,
             "binding_revision": binding.binding_revision, "workspace_id": binding.workspace_id,
