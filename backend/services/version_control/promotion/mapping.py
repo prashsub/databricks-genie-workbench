@@ -141,6 +141,10 @@ def map_executable_fields(value, mappings, path=()):
                     rendered = []
                     for index, fragment_sql in enumerate(child):
                         if join_fragment and index > 0:
+                            if index > 1 or not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--',
+                                                             fragment_sql):
+                                raise ValueError('join_specs.sql requires condition plus reviewed '
+                                                 '--rt-- annotation')
                             rendered.append(fragment_sql)
                         else:
                             rendered.append(map_sql(fragment_sql, mappings,

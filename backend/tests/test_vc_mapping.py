@@ -124,6 +124,29 @@ def test_join_spec_and_snippet_sql_fragments_map_identifiers_and_preserve_arity(
     assert rendered['instructions']['sql_snippets']['measures'][0]['sql'] == [reviewed_snippet]
 
 
+@pytest.mark.parametrize('trailing', [
+    ['SELECT * FROM dev.internal.pii_raw'],
+    ['DROP TABLE prod.sales.orders'],
+    ['--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--\nUNION SELECT 1'],
+    ['--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--', 'SELECT * FROM dev.internal.pii_raw'],
+])
+def test_join_spec_sql_trailing_elements_are_validated_not_passthrough(package_rig, trailing):
+    # F2: join_specs.sql elements after index 0 must NOT be verbatim passthroughs.
+    # The trailing element(s) must be exactly the reviewed --rt-- annotation and there
+    # must be no element index > 1; anything else fails closed.
+    join_condition = '`dev`.`sales`.`orders`.`customer_id` = `dev`.`sales`.`customers`.`customer_id`'
+    mapping = replace(package_rig.mapping, mappings={
+        **dict(package_rig.mapping.mappings),
+        'dev.sales.customers': 'prod.sales.customers',
+    })
+    artifact = {'serialized_space': {'instructions': {
+        'join_specs': [{'left': {'identifier': 'dev.sales.orders'},
+                        'right': {'identifier': 'dev.sales.customers'},
+                        'sql': [join_condition, *trailing]}]}}}
+    with pytest.raises(ValueError):
+        MappingTransformer().render(artifact, mapping, package_rig.target)
+
+
 def test_sql_prefix_mapping_requires_exact_or_three_part_source(package_rig):
     # F1: a one-token catalog mapping {'dev':'prod'} must NOT authorize an unbounded
     # subtree via longest-prefix matching. 'dev.internal.pii_raw' was never reviewed;
