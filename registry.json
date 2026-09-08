@@ -201,21 +201,21 @@
       "conv": "3773493063976871",
       "worktree": "backlog-integ-gate",
       "items": "A floor-tracks-actual-count, B AnnAssign+class-body pytestmark, C recursive glob; test_vc_provisioning.py only",
-      "status": "A/B/C + D follow-up (537269f, restored monotonic landed-baseline ratchet, deletion RED-first) done+verified 1246 offline/39 provisioning; D re-review conv 3773493063976955",
+      "status": "D-fix done+verified; re-review conv 3773493063977013 (prior review ReadTimeout-idle)",
       "branch": "vc/backlog-integ-gate"
     },
     "m05_f3": {
       "conv": "3773493063976872",
       "worktree": "backlog-m05f3",
       "item": "fail-closed when approved_targets absent",
-      "status": "F3 fix + D follow-up (d74fa05, restored/tightened assertions, mutation-confirmed non-vacuous) done+verified 1250 offline; D re-review conv 3773493063976954",
+      "status": "D-fix done+verified; re-review conv 3773493063977005 (prior review died mid-mutation-test)",
       "branch": "vc/backlog-m05f3"
     },
     "m07_nb": {
       "conv": "3773493063976873",
       "worktree": "backlog-m07nb",
       "items": "nb1 composite-key joins promotable, nb2 snippet positive-grammar DDL, nb3 ReleaseCatalog exception precision",
-      "status": "in review conv 3773493063976881 (running)",
+      "status": "APPROVED (claude_code conv 3773493063976881: 24-case bypass battery, relations mapped, fullmatch-anchored, owned-paths clean, 1312 pass). Integrate from origin/vc/backlog-m07nb @ 383b6dd (worktree had a benign corrupt-index artifact; remote is clean source of truth).",
       "branch": "vc/backlog-m07nb"
     }
   }
