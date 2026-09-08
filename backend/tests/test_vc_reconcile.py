@@ -42,17 +42,29 @@ def test_capture_advances_observed_but_drift_remains_until_policy_resolution():
     captured = service.prepare_choice(binding_fixture())
     observer.capture.assert_called_once_with(binding_fixture(), "reconcile", executor_fixture())
     assert captured.status.heads == vc.Heads(version_id(2), version_id(1), version_id(1))
+    assert captured.status.drift == vc.DriftState.EXTERNAL_AHEAD
+    service.approved_targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
+    service.approved_targets.resolve.reset_mock()
+    service.canonicalizer = Mock(wraps=FakeCanonicalizer())
     result = service.classify(captured.status.heads,
                              lookup({version_id(1): snapshot("policy"),
                                      version_id(2): snapshot("external")}), "reachable",
                              target_binding=binding_fixture())
     assert result.state == vc.DriftState.EXTERNAL_AHEAD
+    service.approved_targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
+    rendered = service.approved_targets.resolve.side_effect(binding_fixture(), version_id(1)).rendered
+    service.canonicalizer.compare.assert_any_call(snapshot("external"), rendered)
     assert captured.captured_version.version_id == version_id(2)
 
 
 @pytest.mark.parametrize("failure", ["busy", "stale", "unresolved", "quarantined", "wrong_binding"])
 def test_capture_failure_never_offers_reconciliation(failure):
-    service, observer = setup_service()
+    from backend.services.version_control.drift.errors import ReconcileError
+
+    service, observer = setup_service(ledger=ledger_fixture())
+    # Establish a valid rendered-approval path before injecting the capture failure.
+    assert service.prepare_choice(binding_fixture()).status.drift == vc.DriftState.EXTERNAL_AHEAD
+    service.approved_targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
     captured = observed_result()
     if failure == "busy":
         captured = replace(captured, busy=True)
@@ -61,8 +73,13 @@ def test_capture_failure_never_offers_reconciliation(failure):
                    "quarantined": {"quarantined": True}, "wrong_binding": {"binding_id": version_id(99)}}
         captured = replace(captured, status=replace(captured.status, **changes[failure]))
     observer.capture.return_value = captured
-    with pytest.raises(RuntimeError):
-        service.prepare_choice(binding_fixture())
+    if failure in ("quarantined", "unresolved"):
+        with pytest.raises(ReconcileError, match="Quarantine or unresolved operation") as caught:
+            service.prepare_choice(binding_fixture())
+        assert caught.value.http_status == 423
+    else:
+        with pytest.raises(RuntimeError, match="Fresh durable observation unavailable or binding blocked"):
+            service.prepare_choice(binding_fixture())
 
 
 def reconcile_request(action="adopt", **changes):
