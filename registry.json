@@ -128,10 +128,11 @@
     {
       "id": "M10",
       "desc": "Optimizer champion integration",
-      "status": "COMPLETE+VERIFIED impl; review BLOCK (conv 3773493063976241). Architecture GOOD (candidate isolation positive-proof seam, real revert.py gutted, legacy apply/discard rollback dead). B1 CONFIRMED: adapter checks nonexistent flag vc_optimizer_contract_ready -> KeyError when writes enabled (not fail-closed PermissionError; makes feature unenablable; no test exercises real M08 FeatureFlags). B2-B5 pending full fixspec (writing to .polly/m10_fixspec.md conv 3773493063976241). Findings 1-3 make champion-apply non-functional in composition (fail-closed, not live-write hazard), 4-5 leave bypasses open.",
+      "status": "review BLOCK (5 findings, full fixspec .polly/m10_fixspec.md 52KB). Architecture GOOD. B1 invented flag KeyError; B2 request_digest wrong domain -> M06 rejects 100%% champion applies; B3 both M06 grant branches dead for optimizer_apply (take Option1: require real approval_id, M10-only); B4 candidate-isolation guard added but NO isolated resource created + mandatory candidate_session param has unmodified prod callers (take Option2: fail-closed+loud+documented blocker); B5 guard opt-out-able via w is not None. ALL 5 fixable in M10 owned-paths. BLOCKER-FIX RUNNING codex/Astra conv 3773493063976415. Owned-paths+integration-honesty PASS. Reviewer caveat: B4/B5 source-read only (sandbox denied scratch clone); B1/B2/B3 execution-proved.",
       "conversation_id": "3773493063976023",
       "worktree": "worktrees/m10",
-      "review_conversation_id": "3773493063976241"
+      "review_conversation_id": "3773493063976241",
+      "fix_conversation_id": "3773493063976415"
     },
     {
       "id": "XMOD-ACTOR-RETRY",
