@@ -1,6 +1,7 @@
 import ast
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -63,7 +64,9 @@ def test_candidate_writes_default_off():
 
 
 def test_legacy_loop_refuses_unproven_target_before_work():
-    from genie_space_optimizer.optimization.unified_loop import run_unified_optimization_loop
+    from genie_space_optimizer.optimization.unified_loop import (
+        run_unified_optimization_loop,
+    )
 
     with pytest.raises(PermissionError):
         run_unified_optimization_loop(Mock(), Mock(), run_id="run", space_id="live",
@@ -74,7 +77,11 @@ def test_legacy_loop_refuses_unproven_target_before_work():
 @pytest.mark.parametrize("entry", ["jobs", "benchmark_push", "enrichment", "loop_enrichment"])
 def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session(entry, monkeypatch):
     from genie_space_optimizer.integration import version_control
-    from genie_space_optimizer.optimization import preflight, space_quality_enrichment, unified_loop
+    from genie_space_optimizer.optimization import (
+        preflight,
+        space_quality_enrichment,
+        unified_loop,
+    )
 
     client = MagicMock()
     spark = MagicMock()
@@ -133,7 +140,9 @@ def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session(entry, 
 @pytest.mark.parametrize("write", ["description", "instructions", "prompt_matching"])
 def test_enrichment_never_swallows_candidate_write_refusal(write, monkeypatch):
     from genie_space_optimizer.integration.version_control import CandidateSession
-    from genie_space_optimizer.optimization import space_quality_enrichment as enrichment
+    from genie_space_optimizer.optimization import (
+        space_quality_enrichment as enrichment,
+    )
 
     client = MagicMock()
     session = CandidateSession(EvaluationBinding("workspace", "candidate", "run"),
@@ -166,10 +175,13 @@ def test_enrichment_never_swallows_candidate_write_refusal(write, monkeypatch):
 @pytest.mark.parametrize("entry", ["config", "description", "patch_set", "patch_set_both", "rollback",
                                    "auto_apply_prompt_matching", "auto_apply_prompt_matching_legacy", "legacy_em"])
 def test_all_legacy_mutation_entrypoints_deny_unproven_clients(entry, client_kind, monkeypatch):
-    from genie_space_optimizer.common.genie_client import patch_space_config, update_space_description
+    from genie_space_optimizer.common.genie_client import (
+        patch_space_config,
+        update_space_description,
+    )
     from genie_space_optimizer.optimization import applier
 
-    client = Mock() if client_kind == "raw" else None
+    client = cast(Any, Mock() if client_kind == "raw" else None)
     message = "shared UC" if entry == "patch_set_both" else None
     with pytest.raises(PermissionError, match=message):
         if entry == "config":

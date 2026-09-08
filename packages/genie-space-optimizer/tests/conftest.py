@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -280,3 +280,39 @@ def sample_clusters():
             "asi_counterfactual_fixes": [],
         },
     ]
+
+
+@pytest.fixture
+def candidate_client_factory():
+    """Real candidate guard over in-memory ownership and mock I/O.
+
+    Unit-test identities only: not evidence of a deployed platform lifecycle.
+    Only the exact workspace/resource/run tuple receives ownership proof.
+    """
+    from genie_space_optimizer.integration.version_control import (
+        CandidateSession,
+        EvaluationBinding,
+    )
+
+    def make_client(space_id: str, run_id: str = "run"):
+        transport = MagicMock()
+        resource = EvaluationBinding("unit-workspace", space_id, run_id)
+
+        class Registry:
+            def resolve_physical(self, workspace_id, space_id):
+                return None
+
+            def optimizer_owner(self, workspace_id, space_id):
+                if (workspace_id, space_id) == (resource.workspace_id, resource.space_id):
+                    return run_id
+                return None
+
+            def workspace_id_for(self, client):
+                assert client is transport
+                return resource.workspace_id
+
+        return CandidateSession(
+            resource, Registry(), transport, writes_enabled=True,
+        ).client
+
+    return make_client

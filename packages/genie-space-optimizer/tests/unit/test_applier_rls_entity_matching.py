@@ -8,7 +8,8 @@ per-space slots.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -100,28 +101,42 @@ def _stub_outputs():
 
 
 class TestAutoApplyEntityMatchingRlsRegression:
-    def test_plain_table_enables_entity_matching(self, _stub_outputs):
+    def test_plain_table_enables_entity_matching(
+        self, _stub_outputs, candidate_client_factory,
+    ):
         config = _space_with_string_col()
-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
+        auto_apply_prompt_matching(
+            candidate_client_factory("space-1", "run"), "space-1", config,
+        )
         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
         assert cc.get("enable_entity_matching") is True
         assert cc.get("enable_format_assistance") is True
 
-    def test_table_with_rls_skips_entity_matching(self, _stub_outputs):
+    def test_table_with_rls_skips_entity_matching(
+        self, _stub_outputs, candidate_client_factory,
+    ):
         config = _space_with_string_col(table_rls=True)
-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
+        auto_apply_prompt_matching(
+            candidate_client_factory("space-1", "run"), "space-1", config,
+        )
         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
         # Format assistance is still safe; entity matching must be skipped.
         assert cc.get("enable_entity_matching") is not True
         assert cc.get("enable_format_assistance") is True
 
-    def test_column_with_mask_skips_entity_matching(self, _stub_outputs):
+    def test_column_with_mask_skips_entity_matching(
+        self, _stub_outputs, candidate_client_factory,
+    ):
         config = _space_with_string_col(column_rls=True)
-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
+        auto_apply_prompt_matching(
+            candidate_client_factory("space-1", "run"), "space-1", config,
+        )
         cc = config["_parsed_space"]["data_sources"]["tables"][0]["column_configs"][0]
         assert cc.get("enable_entity_matching") is not True
 
-    def test_metric_view_with_rls_skips_entity_matching(self, _stub_outputs):
+    def test_metric_view_with_rls_skips_entity_matching(
+        self, _stub_outputs, candidate_client_factory,
+    ):
         config = {
             "_parsed_space": {
                 "data_sources": {
@@ -141,11 +156,13 @@ class TestAutoApplyEntityMatchingRlsRegression:
                 {"table_name": "orders_mv", "column_name": "category", "data_type": "STRING"}
             ],
         }
-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
+        auto_apply_prompt_matching(
+            candidate_client_factory("space-1", "run"), "space-1", config,
+        )
         cc = config["_parsed_space"]["data_sources"]["metric_views"][0]["column_configs"][0]
         assert cc.get("enable_entity_matching") is not True
 
-    def test_mixed_rls_and_plain_only_skips_rls(self, _stub_outputs):
+    def test_mixed_rls_and_plain_only_skips_rls(self, _stub_outputs, candidate_client_factory):
         config = {
             "_parsed_space": {
                 "data_sources": {
@@ -170,8 +187,10 @@ class TestAutoApplyEntityMatchingRlsRegression:
                 {"table_name": "plain_tbl", "column_name": "category", "data_type": "STRING"},
             ],
         }
-        auto_apply_prompt_matching(MagicMock(), "space-1", config)
-        tables = config["_parsed_space"]["data_sources"]["tables"]
+        auto_apply_prompt_matching(
+            candidate_client_factory("space-1", "run"), "space-1", config,
+        )
+        tables = cast(list[dict[str, Any]], config["_parsed_space"]["data_sources"]["tables"])
         rls_cc = tables[0]["column_configs"][0]
         plain_cc = tables[1]["column_configs"][0]
         assert rls_cc.get("enable_entity_matching") is not True

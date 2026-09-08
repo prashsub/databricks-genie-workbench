@@ -99,3 +99,54 @@ the manifest's service principal. Fixture preparation must establish the
 scenario-specific initial state, approvals, and ambiguous-outcome injection.
 Missing configuration fails explicitly; it is never converted into a skip or
 claimed as a platform pass.
+
+
+## B5 propagation and downstream reconciliation (September 8, 2026)
+
+Task 1 (`e65af6b`) preserves the RED-first refusal test: all three collected
+cases (description, instructions, prompt matching) failed at `f0e1056`.
+Explicit `PermissionError` propagation at the prompt-matching and outer
+boundaries makes them pass without recording COMPLETE or mutating the client
+following refusal. The focused isolation file passed all 30 collected cases.
+
+Task 2 started with `uv run pytest -q`: **32 failed, 880 passed, 6 deselected**.
+Every failure was a retired raw-client invocation, not a regression in the
+underlying candidate-local behavior. All existing behavioral assertions remain:
+
+| Unit file | Previously failing collected cases | Resolution / retained coverage |
+| --- | ---: | --- |
+| `test_preflight_benchmark_push.py` | 12 | Use positively owned candidate clients; retain invalid/SQL-less filtering, recorded warning authorization, exact question ID handoff, missing/ambiguous mapping failures, added/excluded/changed ledgers, SQL repair reasons, prune recommendations, disabled publishing, API failures and hard-cap failures. |
+| `test_applier_rls_entity_matching.py` | 5 | Use candidate clients; retain plain-table enables and table/column/metric-view/mixed RLS exclusions. |
+| `test_entity_matching_scoring.py` | 12 (11 test functions) | Use candidate clients; retain idempotency, deterministic ties, unknown types, displacement, PII and RLS disabling, unchanged slots, both legacy/smarter-scoring PII cases, dry-run behavior and both semantic-view distinctions. |
+| `test_space_quality_enrichment.py` | 3 | Use candidate clients; retain top-level description vs serialized-space separation, instruction seeding, matching audit and propagation waits. Read-only context/scan tests are unchanged. |
+
+The shared fixture constructs real `CandidateSession` wrappers over exact
+in-memory ownership and mock transport. It does not bypass the guard or claim
+platform resource creation. Six additional cases assert raw, absent and
+wrong-candidate clients fail before publication, stage/ledger writes or input
+mutation, with publication both enabled and disabled. Test-only typing/import
+cleanup keeps lint and typecheck green; no existing assertion was removed.
+
+Verification from `packages/genie-space-optimizer`:
+
+```bash
+uv run pytest tests/test_vc_candidate_isolation.py -q
+uv run pytest tests/unit/test_preflight_benchmark_push.py tests/unit/test_applier_rls_entity_matching.py tests/unit/test_entity_matching_scoring.py tests/unit/test_space_quality_enrichment.py -q
+uv run pytest -q
+uv tool run ruff check tests/test_vc_candidate_isolation.py tests/conftest.py tests/unit/test_preflight_benchmark_push.py tests/unit/test_applier_rls_entity_matching.py tests/unit/test_entity_matching_scoring.py tests/unit/test_space_quality_enrichment.py
+uv run ty check tests/test_vc_candidate_isolation.py tests/conftest.py tests/unit/test_preflight_benchmark_push.py tests/unit/test_applier_rls_entity_matching.py tests/unit/test_entity_matching_scoring.py tests/unit/test_space_quality_enrichment.py
+```
+
+Final full suite: **918 passed, 6 integration cases deselected**. No live
+Databricks calls or platform validation were performed. Test-file lint and
+typecheck pass. Targeted production checks were also run:
+
+```bash
+uv tool run ruff check src/genie_space_optimizer/optimization/space_quality_enrichment.py
+uv run ty check src/genie_space_optimizer/optimization/space_quality_enrichment.py
+```
+
+The production file retains 10 pre-existing lint findings and two pre-existing
+`no-matching-overload` type errors at lines 203–204. Both sets were reproduced
+on the file from `f0e1056`; unrelated production cleanup is not part of these
+blocker fixes. The real-platform deployment blocker above remains in force.

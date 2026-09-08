@@ -54,7 +54,9 @@ def _stub_state(monkeypatch):
     return stages, patches
 
 
-def test_missing_description_uses_top_level_space_patch(monkeypatch) -> None:
+def test_missing_description_uses_top_level_space_patch(
+    monkeypatch, candidate_client_factory,
+) -> None:
     stages, patches = _stub_state(monkeypatch)
     artifacts: list[tuple[str, dict]] = []
     monkeypatch.setattr(
@@ -92,7 +94,7 @@ def test_missing_description_uses_top_level_space_patch(monkeypatch) -> None:
     monkeypatch.setattr(sqe, "fetch_space_config", lambda _w, _sid: raw)
 
     result = sqe.run_space_quality_enrichment(
-        MagicMock(),
+        candidate_client_factory("space", "run"),
         MagicMock(),
         run_id="run",
         space_id="space",
@@ -120,7 +122,9 @@ def test_missing_description_uses_top_level_space_patch(monkeypatch) -> None:
     )]
 
 
-def test_thin_instructions_seed_full_serialized_space(monkeypatch) -> None:
+def test_thin_instructions_seed_full_serialized_space(
+    monkeypatch, candidate_client_factory,
+) -> None:
     _stages, patches = _stub_state(monkeypatch)
     raw = _raw_space(description="Sales analytics space for regional order reporting.")
     patched_configs: list[dict] = []
@@ -136,7 +140,7 @@ def test_thin_instructions_seed_full_serialized_space(monkeypatch) -> None:
     )
 
     result = sqe.run_space_quality_enrichment(
-        MagicMock(),
+        candidate_client_factory("space", "run"),
         MagicMock(),
         run_id="run",
         space_id="space",
@@ -384,7 +388,9 @@ def test_prompt_matching_context_excludes_governed_sensitive_column_values() -> 
     assert context["proposal_data_profile"] == {}
 
 
-def test_active_enrichment_applies_and_audits_prompt_matching(monkeypatch) -> None:
+def test_active_enrichment_applies_and_audits_prompt_matching(
+    monkeypatch, candidate_client_factory,
+) -> None:
     stages, patches = _stub_state(monkeypatch)
     raw = _raw_space(
         description="Sales analytics space for regional order reporting.",
@@ -426,7 +432,7 @@ def test_active_enrichment_applies_and_audits_prompt_matching(monkeypatch) -> No
     monkeypatch.setattr(sqe, "write_artifact", lambda *_args, **_kwargs: None)
 
     result = sqe.run_space_quality_enrichment(
-        MagicMock(),
+        candidate_client_factory("space", "run"),
         MagicMock(),
         run_id="run",
         space_id="space",
@@ -456,6 +462,7 @@ def test_active_enrichment_applies_and_audits_prompt_matching(monkeypatch) -> No
     assert patches[1]["rollback"]["enable_entity_matching"] is False
     assert patches[1]["provenance"]["iq_check_id"] == 8
     assert waits == [sqe.PROPAGATION_WAIT_ENTITY_MATCHING_SECONDS]
+    assert result.scan_after is not None
     entity_check = next(
         check
         for check in result.scan_after["checks"]
