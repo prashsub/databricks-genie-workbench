@@ -101,6 +101,9 @@ class DriftService:
     def _projected_status(self, binding, status):
         if status.binding_id != binding.binding_id or status.binding_revision != binding.binding_revision:
             raise PermissionError("Projection binding scope mismatch")
+        if self.approved_targets is None:
+            status = replace(status, drift=vc.DriftState.UNKNOWN, stale=True, allowed_actions=(),
+                             reasons=(*status.reasons, "Target-local rendered approval evidence unavailable or invalid"))
         try:
             self._require_coordination(binding)
         except Exception:
@@ -141,6 +144,10 @@ class DriftService:
                 if self.ledger is None:
                     status = self._observed_status(entry.binding, status)
                     raise RuntimeError("Ledger unavailable; cannot verify observed head")
+                if self.approved_targets is None:
+                    status = replace(status, drift=vc.DriftState.UNKNOWN, allowed_actions=(),
+                                     reasons=(*status.reasons, "Target-local rendered approval evidence unavailable or invalid"))
+                    raise RuntimeError("Approved targets unavailable; cannot verify rendered approval")
                 matches = self.inventory.matches(entry.binding)
                 if len(matches) != 1 or matches[0] != entry.binding:
                     reason = "Ambiguous binding inventory; audited manual identity resolution required"
@@ -407,7 +414,9 @@ class DriftService:
                                             (heads.observed, heads.approved, heads.deployed))
         except (LookupError, PermissionError):
             return Classification(vc.DriftState.UNKNOWN, ("Required history unavailable",))
-        if self.approved_targets is not None:
+        if self.approved_targets is None:
+            return Classification(vc.DriftState.UNKNOWN, ("Target-local rendered approval evidence unavailable or invalid",))
+        else:
             try:
                 if target_binding is None:
                     raise ValueError("Target binding required for rendered approval")

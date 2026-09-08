@@ -8,7 +8,7 @@ from backend.services.version_control import contracts as vc
 from backend.tests.vc_fakes.fixtures import (
     FakeCanonicalizer, actor_fixture, binding_fixture, executor_fixture,
 )
-from backend.tests.test_vc_drift import lookup, snapshot, version_id
+from backend.tests.test_vc_drift import approved_targets_fixture, lookup, snapshot, version_id
 
 
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
@@ -31,6 +31,7 @@ def setup_service(**options):
 
     observer = Mock(spec=vc.Observer)
     observer.capture.return_value = observed_result()
+    options.setdefault("approved_targets", approved_targets_fixture())
     service = DriftService(canonicalizer=FakeCanonicalizer(), observer=observer,
                            executor=executor_fixture(), **options)
     return service, observer
@@ -41,16 +42,29 @@ def test_capture_advances_observed_but_drift_remains_until_policy_resolution():
     captured = service.prepare_choice(binding_fixture())
     observer.capture.assert_called_once_with(binding_fixture(), "reconcile", executor_fixture())
     assert captured.status.heads == vc.Heads(version_id(2), version_id(1), version_id(1))
+    assert captured.status.drift == vc.DriftState.EXTERNAL_AHEAD
+    service.approved_targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
+    service.approved_targets.resolve.reset_mock()
+    service.canonicalizer = Mock(wraps=FakeCanonicalizer())
     result = service.classify(captured.status.heads,
                              lookup({version_id(1): snapshot("policy"),
-                                     version_id(2): snapshot("external")}), "reachable")
+                                     version_id(2): snapshot("external")}), "reachable",
+                             target_binding=binding_fixture())
     assert result.state == vc.DriftState.EXTERNAL_AHEAD
+    service.approved_targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
+    rendered = service.approved_targets.resolve.side_effect(binding_fixture(), version_id(1)).rendered
+    service.canonicalizer.compare.assert_any_call(snapshot("external"), rendered)
     assert captured.captured_version.version_id == version_id(2)
 
 
 @pytest.mark.parametrize("failure", ["busy", "stale", "unresolved", "quarantined", "wrong_binding"])
 def test_capture_failure_never_offers_reconciliation(failure):
-    service, observer = setup_service()
+    from backend.services.version_control.drift.errors import ReconcileError
+
+    service, observer = setup_service(ledger=ledger_fixture())
+    # Establish a valid rendered-approval path before injecting the capture failure.
+    assert service.prepare_choice(binding_fixture()).status.drift == vc.DriftState.EXTERNAL_AHEAD
+    service.approved_targets.resolve.assert_called_once_with(binding_fixture(), version_id(1))
     captured = observed_result()
     if failure == "busy":
         captured = replace(captured, busy=True)
@@ -59,8 +73,13 @@ def test_capture_failure_never_offers_reconciliation(failure):
                    "quarantined": {"quarantined": True}, "wrong_binding": {"binding_id": version_id(99)}}
         captured = replace(captured, status=replace(captured.status, **changes[failure]))
     observer.capture.return_value = captured
-    with pytest.raises(RuntimeError):
-        service.prepare_choice(binding_fixture())
+    if failure in ("quarantined", "unresolved"):
+        with pytest.raises(ReconcileError, match="Quarantine or unresolved operation") as caught:
+            service.prepare_choice(binding_fixture())
+        assert caught.value.http_status == 423
+    else:
+        with pytest.raises(RuntimeError, match="Fresh durable observation unavailable or binding blocked"):
+            service.prepare_choice(binding_fixture())
 
 
 def reconcile_request(action="adopt", **changes):
@@ -613,3 +632,37 @@ def test_reconcile_bundle_join_ignores_unrelated_authority(change):
     assert service.reconcile(binding, reconcile_request(), actor_fixture()).status == vc.OperationStatus.REQUESTED
     bundles.for_binding.assert_called_once_with(binding)
     approvals.request.assert_called_once()
+
+
+@pytest.mark.parametrize("action", ["adopt", "reapply", "acknowledge"])
+def test_reconcile_fails_closed_when_approved_targets_absent(action):
+    from backend.services.version_control.drift.errors import ReconcileError
+
+    dispatcher = Mock(spec=vc.JobDispatcher)
+    facts = Mock(spec=vc.OperationFacts)
+    service, observer, ledger, policy, approvals, identity = reconcile_setup(
+        approved_targets=None, dispatcher=dispatcher, dispatch_enabled=True, facts=facts)
+    policy.authorize_acknowledgement.return_value = True
+    with pytest.raises(ReconcileError) as caught:
+        service.reconcile(binding_fixture(), reconcile_request(
+            action, policy_inputs={"reason": "Accepted temporary divergence"}), actor_fixture())
+    assert caught.value.http_status == 503
+    assert caught.value.error.operation_id == version_id(10)
+    assert caught.value.error.retryable is False
+    policy.inputs.assert_not_called()
+    approvals.request.assert_not_called()
+    facts.append.assert_not_called()
+    dispatcher.submit_local.assert_not_called()
+
+
+@pytest.mark.parametrize("last_full_fetch_at", [NOW, NOW - timedelta(hours=1)])
+def test_scan_fails_closed_when_approved_targets_absent(last_full_fetch_at):
+    entry = scan_entry(last_full_fetch_at=last_full_fetch_at)
+    entry = replace(entry, status=replace(entry.status, drift=vc.DriftState.CLEAN))
+    scanner, observer, inventory, projections = scan_setup([entry], approved_targets=None)
+    observer.capture.return_value = replace(observed_result(entry.binding), status=entry.status)
+    status = scanner.scan("123", None).items[0]
+    assert status.drift == vc.DriftState.UNKNOWN
+    assert status.allowed_actions == ()
+    assert "rendered approval" in " ".join(status.reasons).lower()
+    assert projections.publish.call_args.args[1] == status

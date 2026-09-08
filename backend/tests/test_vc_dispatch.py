@@ -191,7 +191,7 @@ def test_pending_projection_admits_only_admission_referenced_local_promotion_fac
     assert calls == [('target', 'current-page')]
 
 
-@pytest.mark.parametrize('case', ['conflict', 'none', 'duplicate', 'wrong_operation', 'wrong_kind', 'wrong_evidence'])
+@pytest.mark.parametrize('case', ['conflict', 'duplicate', 'wrong_operation', 'wrong_kind', 'wrong_evidence'])
 def test_release_catalog_rejects_conflicting_release_facts(promotion_rig, case):
     from backend.services.version_control.promotion.releases import ReleaseCatalog, fact_for
     rig = promotion_rig
@@ -200,8 +200,6 @@ def test_release_catalog_rejects_conflicting_release_facts(promotion_rig, case):
     facts = [fact, fact]
     if case == 'conflict':
         facts[1] = replace(fact, evidence=replace(manifest, package_digest='f' * 64))
-    elif case == 'none':
-        facts = []
     elif case == 'wrong_operation':
         facts = [replace(fact, operation_id=uid(7))]
     elif case == 'wrong_kind':
@@ -221,6 +219,17 @@ def test_release_catalog_rejects_conflicting_release_facts(promotion_rig, case):
         assert result.target_binding == rig.target
         assert result.target_host == rig.executor.host
     else:
-        with pytest.raises(LookupError if case == 'none' else ValueError):
+        with pytest.raises(ValueError):
             catalog.get(uid(4))
     assert calls == [uid(4)]
+
+
+@pytest.mark.parametrize('facts', [[], ()])
+def test_release_catalog_empty_facts_raise_exact_lookup_error(facts):
+    from backend.services.version_control.promotion.releases import ReleaseCatalog
+    read_release_facts = Mock(return_value=facts)
+    catalog = ReleaseCatalog(read_release_facts, '/Volumes/catalog/control/outbound', 'target-host')
+    with pytest.raises(LookupError, match='^Target-local release not registered$') as error:
+        catalog.get(uid(4))
+    assert error.type is LookupError  # IndexError is a subclass, but not the catalog contract.
+    read_release_facts.assert_called_once_with(uid(4))
