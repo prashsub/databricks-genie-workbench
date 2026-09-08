@@ -166,7 +166,7 @@
   ],
   "compliance_note": "M07-blocker-fix (conv 6345) and M10-blocker-fix (conv 6415) ran on non-Astra gpt-5-6-sol (platform fallback during rate-limit churn). Per directive, discarded and redoing on Astra. Non-Astra work backed up to vc/m07-nonastra-ref (1491eac, incl F1/F2) and vc/m10-nonastra-ref (c52cc62) for reference/diff. Worktrees reset to compliant Astra bases: m07=d1163a3, m10=8bafb8f.",
   "m10_redo": {
-    "status": "fix_complete_verified_in_rereview",
+    "status": "INTEGRATED+PUSHED at 47d9107 (review APPROVE)",
     "conv": "3773493063976484 (pi/system.ai.gpt-6-astra, done)",
     "head": "c93ee73",
     "commits": "B1-B5 + B5-propagation e65af6b + reconcile c93ee73",
@@ -183,5 +183,7 @@
     "review_conv": "3773493063976501 (claude_code)",
     "note": "old origin/vc/m07=1491eac is superseded non-Astra (==vc/m07-nonastra-ref); Astra redo pushed to vc/m07-astra since branch delete blocked by policy"
   },
-  "infra_note": "codex Native terminal failed to start x3 (control-plane httpx.ReadTimeout in session-mirroring, NOT missing CLI, NOT Astra). Workaround: route Astra implement work to pi (headless, system.ai.gpt-6-astra) - still Astra-compliant. Both Astra endpoints also intermittently 429."
+  "infra_note": "codex Native terminal failed to start x3 (control-plane httpx.ReadTimeout in session-mirroring, NOT missing CLI, NOT Astra). Workaround: route Astra implement work to pi (headless, system.ai.gpt-6-astra) - still Astra-compliant. Both Astra endpoints also intermittently 429.",
+  "integrated_head": "47d9107",
+  "integration_note_m10": "M10 integrated using FULL delta 6c5ae3a..vc/m10 (28 files, all owned-paths, databricks.yml untouched). Earlier 9-failure scare was wrong diff base (8bafb8f had tasks1-13; correct base is merge-base 6c5ae3a). Result: GSO 918 pass/6 deselected, backend 1101 pass, write switches default-off, integration collection 14."
 }
