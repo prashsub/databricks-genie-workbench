@@ -168,3 +168,27 @@ def test_sql_prefix_mapping_requires_exact_or_three_part_source(package_rig, map
     artifact = {'serialized_space': {'instructions': {'example_question_sqls': [{'sql': [sql]}]}}}
     with pytest.raises(ValueError, match='Unresolved relation'):
         MappingTransformer().render(artifact, mapping, package_rig.target)
+
+
+@pytest.mark.parametrize('trailing', [
+    ['SELECT * FROM dev.internal.pii_raw'],
+    ['DROP TABLE prod.sales.orders'],
+    ['--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--\nUNION SELECT 1'],
+    ['--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--', 'SELECT * FROM dev.internal.secrets'],
+    [],
+    ['--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--\n'],
+])
+def test_join_spec_sql_trailing_elements_are_validated_not_passthrough(package_rig, trailing):
+    condition = '`dev`.`sales`.`orders`.`customer_id` = `customers`.`customer_id`'
+    artifact = {'serialized_space': {'instructions': {'join_specs': [{
+        'left': {'identifier': 'dev.sales.orders'}, 'right': {'identifier': 'dev.sales.orders'},
+        'sql': [condition, *trailing]}]}}}
+    with pytest.raises(ValueError, match='join_specs.sql requires'):
+        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+
+
+@pytest.mark.parametrize('sql', [[], '`orders`.`id` = `customers`.`id`'])
+def test_join_spec_sql_requires_two_element_array(package_rig, sql):
+    artifact = {'serialized_space': {'instructions': {'join_specs': [{'sql': sql}]}}}
+    with pytest.raises(ValueError, match='join_specs.sql requires'):
+        MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)

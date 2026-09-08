@@ -134,10 +134,15 @@ def map_executable_fields(value, mappings, path=()):
                     ('instructions', 'sql_snippets', kind, '[]')
                     for kind in ('filters', 'expressions', 'measures')}
                 fragment_mode = join_fragment or snippet_fragment
+                if join_fragment and (not isinstance(child, list) or len(child) != 2
+                                      or not all(isinstance(item, str) for item in child)):
+                    raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
                 if isinstance(child, list):
                     rendered = []
                     for index, fragment_sql in enumerate(child):
                         if join_fragment and index > 0:
+                            if not re.fullmatch(r'--rt=FROM_RELATIONSHIP_TYPE_[A-Z_]+--', fragment_sql):
+                                raise ValueError('join_specs.sql requires condition plus reviewed --rt-- annotation')
                             rendered.append(fragment_sql)
                         else:
                             rendered.append(map_sql(fragment_sql, mappings,
