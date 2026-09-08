@@ -68,6 +68,7 @@ from genie_space_optimizer.optimization.unified_loop import (
     run_unified_optimization_loop,
     target_accuracy_percent,
 )
+from genie_space_optimizer.integration.version_control import require_candidate_session_for_job
 
 dbutils = cast(Any, globals().get("dbutils"))
 
@@ -333,6 +334,7 @@ except Exception as exc:
 # COMMAND ----------
 
 try:
+    require_candidate_session_for_job()
     _banner("Running unified native-only optimization loop")
     loop_out = run_unified_optimization_loop(
         w,

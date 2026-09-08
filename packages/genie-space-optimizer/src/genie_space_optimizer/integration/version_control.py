@@ -6,6 +6,13 @@ from typing import Protocol, Any
 from dataclasses import dataclass
 
 
+def require_candidate_session_for_job():
+    raise PermissionError(
+        "M10 deployment blocker: no target-local CandidateSession lifecycle is installed; "
+        "QC benchmark publication and optimization/enrichment writes are disabled"
+    )
+
+
 class IsolationRegistry(Protocol):
     def resolve_physical(self, workspace_id: str, space_id: str) -> Any: ...
     def optimizer_owner(self, workspace_id: str, space_id: str) -> str | None: ...

@@ -397,7 +397,10 @@ def run_space_quality_enrichment(
     prompt_matching_context: dict[str, Any] | None = None,
     benchmarks: list[dict[str, Any]] | None = None,
 ) -> SpaceQualityEnrichmentResult:
-    """Apply narrow, non-fatal quality curation before baseline eval."""
+    """Curate an isolated candidate; authorization failures are always fatal."""
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+
+    assert_candidate_write(w, space_id)
     working_raw = copy.deepcopy(raw_config)
     parsed = parsed_space_from_config(working_raw)
     result = SpaceQualityEnrichmentResult(
@@ -780,6 +783,8 @@ def _maybe_enrich_description(
             schema,
         )
         return patch_index + 1
+    except PermissionError:
+        raise
     except Exception as exc:
         on_error("description", exc)
         return patch_index
@@ -855,6 +860,8 @@ def _maybe_seed_instructions(
             schema,
         )
         return patch_index + 1
+    except PermissionError:
+        raise
     except Exception as exc:
         on_error("instructions", exc)
         return patch_index

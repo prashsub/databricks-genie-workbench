@@ -1,5 +1,7 @@
+import ast
 from dataclasses import dataclass
-from unittest.mock import Mock
+from pathlib import Path
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -67,6 +69,65 @@ def test_legacy_loop_refuses_unproven_target_before_work():
         run_unified_optimization_loop(Mock(), Mock(), run_id="run", space_id="live",
                                       benchmarks=[], catalog="cat", schema="sch", levers=[],
                                       max_attempts=1, target_accuracy=90)
+
+
+@pytest.mark.parametrize("entry", ["jobs", "benchmark_push", "enrichment", "loop_enrichment"])
+def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session(entry, monkeypatch):
+    from genie_space_optimizer.integration import version_control
+    from genie_space_optimizer.optimization import preflight, space_quality_enrichment, unified_loop
+
+    client = MagicMock()
+    spark = MagicMock()
+    if entry == "jobs":
+        jobs = Path(version_control.__file__).parents[1] / "jobs"
+        guarded = []
+        for name in ("run_intake_and_snapshot", "run_benchmark_qc_and_repair",
+                     "run_optimize", "run_publish_and_audit"):
+            tree = ast.parse((jobs / f"{name}.py").read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    assert node.func.id not in {"patch_space_config", "update_space_description"}
+                    if node.func.id not in {"preflight_push_benchmarks_to_space", "run_unified_optimization_loop"}:
+                        continue
+                    enclosing = [block for block in ast.walk(tree) if isinstance(block, ast.Try)
+                                 and any(node in ast.walk(statement) for statement in block.body)]
+                    assert any(isinstance(block.body[0], ast.Expr)
+                               and isinstance(block.body[0].value, ast.Call)
+                               and isinstance(block.body[0].value.func, ast.Name)
+                               and block.body[0].value.func.id == "require_candidate_session_for_job"
+                               for block in enclosing), f"{name}: {node.func.id} lacks explicit isolation refusal"
+                    guarded.append(node.func.id)
+        assert sorted(guarded) == ["preflight_push_benchmarks_to_space", "run_unified_optimization_loop"]
+        with pytest.raises(PermissionError, match="M10 deployment blocker.*CandidateSession"):
+            version_control.require_candidate_session_for_job()
+    elif entry == "benchmark_push":
+        with pytest.raises(PermissionError):
+            preflight.preflight_push_benchmarks_to_space(
+                client, spark, "run", "live", "cat", "sch",
+                [{"id": "q1", "question": "Count?", "expected_sql": "SELECT 1", "validation_status": "valid"}],
+            )
+    elif entry == "enrichment":
+        with pytest.raises(PermissionError):
+            space_quality_enrichment.run_space_quality_enrichment(
+                client, spark, run_id="run", space_id="live", raw_config={}, catalog="cat", schema="sch",
+            )
+    else:
+        session = version_control.CandidateSession(
+            EvaluationBinding("workspace", "candidate", "run"), IsolationRegistry(), client, writes_enabled=True,
+        )
+        monkeypatch.setattr(unified_loop, "fetch_space_config", Mock(return_value={}))
+        monkeypatch.setattr(unified_loop, "run_space_quality_enrichment",
+                            Mock(side_effect=PermissionError("enrichment isolation refused")))
+        evaluate = Mock()
+        monkeypatch.setattr(unified_loop, "_native_eval", evaluate)
+        with pytest.raises(PermissionError, match="enrichment isolation refused"):
+            unified_loop.run_unified_optimization_loop(
+                client, spark, run_id="run", space_id="candidate", benchmarks=[], catalog="cat", schema="sch",
+                levers=[], max_attempts=1, target_accuracy=90, candidate_session=session,
+            )
+        evaluate.assert_not_called()
+    assert client.mock_calls == []
+    assert spark.mock_calls == []
 
 
 @pytest.mark.parametrize("entry", ["config", "description", "patch_set", "rollback"])

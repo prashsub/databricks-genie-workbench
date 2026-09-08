@@ -91,6 +91,7 @@ from genie_space_optimizer.optimization.preflight import (
 from genie_space_optimizer.optimization.space_quality_enrichment import (
     build_prompt_matching_context,
 )
+from genie_space_optimizer.integration.version_control import require_candidate_session_for_job
 from genie_space_optimizer.optimization.state import (
     ensure_optimization_tables,
     load_artifacts,
@@ -1034,6 +1035,7 @@ _window: dict[str, Any] = {}
 _benchmark_mutation_count = 0
 if benchmark_policy == "repair_allowed" and _benchmarks:
     try:
+        require_candidate_session_for_job()
         _banner("Step 01c — Push Benchmarks to Live Space")
         _push = preflight_push_benchmarks_to_space(
             w, spark, run_id, space_id, catalog, schema, _benchmarks,

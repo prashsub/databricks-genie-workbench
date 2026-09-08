@@ -40,6 +40,36 @@ six platform probes, while default selection deselected all six.
 
 ## Real-platform deployment BLOCKER
 
+### Cross-review B4: explicit fail-closed milestone (Option 2)
+
+The four-task DAG is **not deployable for optimization writes** in M10. No
+production `IsolationRegistry` or create/own/tear-down candidate lifecycle is
+installed. The QC benchmark-push block and Optimize loop block now explicitly
+raise `PermissionError` naming this deployment blocker before invoking their
+mutation paths. Their existing failure-stage handlers record the error and
+re-raise; the tasks must not report successful optimization. No bundle parameters
+or task definitions change. Both write switches remain disabled by default.
+
+Benchmark publication and quality enrichment refuse raw clients before any API
+or telemetry I/O. Only positively proven `CandidateSession` clients may enter
+these library paths. Enrichment authorization failures propagate rather than
+being logged and ignored. This is not a claim that isolated platform resources
+exist: M08 target-local composition and real lifecycle validation must land
+before replacing the explicit job refusal with constructed sessions.
+
+### Cross-review B1–B3: provider contracts
+
+Champion applies use only the two declared M08 switches, the M06 canonical
+request digest, and an M06 approval even in development (B3 Option 1). Offline
+tests exercise real `FeatureFlags` and `ApprovalService` against the M02 fake
+fact store, including expiry and approver membership revocation. The M10-owned
+`ChampionOperationFacts` codec preserves the champion request extension while
+delegating approval projection to M06; target-local composition must inject it
+(or an equivalent lossless codec) into both the adapter and approval service.
+The base M06 request decoder alone does not accept M10's extra wire fields.
+
+### Platform validation still required
+
 `tests/integration/test_vc_optimizer_platform.py` is **not platform-validated**.
 Its six Jobs/Genie/Delta probes remain a deployment blocker until M04/M06/M08
 target-local composition and disposable fixtures are deployed and exercised.

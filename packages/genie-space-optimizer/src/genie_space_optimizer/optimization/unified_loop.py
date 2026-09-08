@@ -2850,6 +2850,8 @@ def run_unified_optimization_loop(
             benchmarks=benchmarks,
         )
         current_config = enrichment_result.current_config
+    except PermissionError:
+        raise
     except Exception:
         logger.warning(
             "Space quality enrichment failed before baseline eval; continuing",

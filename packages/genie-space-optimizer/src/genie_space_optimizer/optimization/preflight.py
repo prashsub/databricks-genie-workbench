@@ -2682,6 +2682,9 @@ def preflight_push_benchmarks_to_space(
 
     Returns a summary dict used by the caller and unit tests.
     """
+    from genie_space_optimizer.integration.version_control import assert_candidate_write
+
+    assert_candidate_write(w, space_id)
     rejected_benchmarks = rejected_benchmarks or []
     changed_benchmarks = changed_benchmarks or []
     changed_benchmarks_by_id = {
