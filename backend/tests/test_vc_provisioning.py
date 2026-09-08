@@ -408,7 +408,7 @@ def test_integration_gate_command_collects_every_integration_test():
         f"Integration collection errored:\n{result.stdout}\n{result.stderr}")
     collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
     declared_count = 0
-    for path in (ROOT / "backend" / "tests" / "integration").glob("*.py"):
+    for path in (ROOT / "backend" / "tests" / "integration").rglob("*.py"):
         module = ast.parse(path.read_text(), filename=str(path))
         module_integration_mark = _has_scope_integration_mark(module)
         for node in ast.walk(module):
@@ -530,6 +530,17 @@ def integration_gate_layout(tmp_path, monkeypatch):
         "def test_sample(value): pass\n")
     monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
     return tests_dir
+
+
+def test_integration_gate_counts_nested_integration_file(integration_gate_layout):
+    nested_dir = integration_gate_layout / "integration" / "subdir"
+    nested_dir.mkdir()
+    (nested_dir / "test_nested.py").write_text(
+        "import pytest\n"
+        "pytestmark = pytest.mark.integration\n"
+        "@pytest.mark.parametrize('value', [0, 1])\n"
+        "def test_nested(value): pass\n")
+    test_integration_gate_command_collects_every_integration_test()
 
 
 @pytest.mark.parametrize("mark", [
