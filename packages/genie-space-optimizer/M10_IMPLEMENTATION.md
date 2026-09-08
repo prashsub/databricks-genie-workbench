@@ -31,8 +31,8 @@ From the repository root, also run:
 python -m pytest backend/tests/test_vc_optimizer_adapter.py -q
 ```
 
-Verified September 7, 2026: **893 package offline tests passed**, **7 backend
-adapter tests passed**. A freshly built wheel installed without dependencies
+Verified September 8, 2026: **902 package offline tests passed**, **10 backend
+adapter tests passed**, and the **6 platform probes remained deselected**. A freshly built wheel installed without dependencies
 into a separate temporary environment passed the same isolated entry-point
 discovery and champion-adapter invocation probe. Offline collection contained
 893 tests and no platform probes; explicit integration collection selected all
