@@ -547,6 +547,8 @@ def run_space_quality_enrichment(
         )
         return result
 
+    except PermissionError:
+        raise
     except Exception as exc:  # pragma: no cover - defensive non-fatal boundary
         _record_error("unexpected", exc)
         write_stage(
@@ -597,6 +599,8 @@ def _maybe_apply_prompt_matching(
             runtime_config,
             benchmarks=benchmarks,
         )
+    except PermissionError:
+        raise
     except Exception as exc:
         on_error("prompt_matching", exc)
         return patch_index
@@ -780,6 +784,8 @@ def _maybe_enrich_description(
             schema,
         )
         return patch_index + 1
+    except PermissionError:
+        raise
     except Exception as exc:
         on_error("description", exc)
         return patch_index
@@ -855,6 +861,8 @@ def _maybe_seed_instructions(
             schema,
         )
         return patch_index + 1
+    except PermissionError:
+        raise
     except Exception as exc:
         on_error("instructions", exc)
         return patch_index

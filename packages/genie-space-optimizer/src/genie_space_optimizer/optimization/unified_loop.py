@@ -204,6 +204,8 @@ def _read_observed_config_after_evaluation(
                 iteration,
             )
             return observed
+    except PermissionError:
+        raise
     except Exception:
         logger.warning(
             "Could not capture settled Genie config for run %s iteration %d; "

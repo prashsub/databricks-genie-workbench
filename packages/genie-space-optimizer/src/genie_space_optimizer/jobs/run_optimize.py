@@ -332,8 +332,19 @@ except Exception as exc:
 
 # COMMAND ----------
 
+def _candidate_session_for_run(*, run_id: str, managed_space_id: str) -> Any:
+    raise PermissionError(
+        "isolated candidate-Space lifecycle not yet implemented; "
+        f"refusing Optimize task for run {run_id} and managed Space {managed_space_id}"
+    )
+
+
 try:
     _banner("Running unified native-only optimization loop")
+    candidate_session = _candidate_session_for_run(
+        run_id=run_id,
+        managed_space_id=space_id,
+    )
     loop_out = run_unified_optimization_loop(
         w,
         spark,
@@ -352,6 +363,7 @@ try:
         wide_schema_parent_artifact_id=plan_record.get("artifact_id"),
         wide_schema_profile_budget=wide_schema_profile_budget,
         diagnostic_callback=_diagnostic,
+        candidate_session=candidate_session,
     )
     _log(
         "Optimize loop finished",

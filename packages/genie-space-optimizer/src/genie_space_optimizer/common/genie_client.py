@@ -1546,6 +1546,10 @@ def publish_benchmarks_to_genie_space_with_report(
     ``publish_benchmarks_to_genie_space`` is the thin int-returning wrapper
     kept for backward compatibility.
     """
+    if getattr(fetch_space_config, "__module__", None) == __name__:
+        from genie_space_optimizer.integration.version_control import assert_candidate_write
+
+        assert_candidate_write(w, space_id)
     config = fetch_space_config(w, space_id)
     parsed = config.get("_parsed_space", {})
     if not isinstance(parsed, dict):

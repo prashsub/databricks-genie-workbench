@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from unittest.mock import Mock
+from pathlib import Path
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -67,6 +68,74 @@ def test_legacy_loop_refuses_unproven_target_before_work():
         run_unified_optimization_loop(Mock(), Mock(), run_id="run", space_id="live",
                                       benchmarks=[], catalog="cat", schema="sch", levers=[],
                                       max_attempts=1, target_accuracy=90)
+
+
+def test_no_job_task_reaches_a_managed_patch_without_a_candidate_session():
+    from genie_space_optimizer.optimization.preflight import preflight_push_benchmarks_to_space
+    from genie_space_optimizer.optimization.space_quality_enrichment import (
+        run_space_quality_enrichment,
+    )
+
+    raw_client = MagicMock()
+    with pytest.raises(PermissionError):
+        preflight_push_benchmarks_to_space(
+            raw_client, Mock(), "run", "managed", "catalog", "schema",
+            [{
+                "id": "q1", "question": "question", "expected_sql": "SELECT 1",
+                "validation_status": "valid",
+            }],
+        )
+    assert raw_client.mock_calls == []
+
+    with pytest.raises(PermissionError):
+        run_space_quality_enrichment(
+            MagicMock(), Mock(), run_id="run", space_id="managed", raw_config={
+                "description": "Sales analytics for order reporting.",
+                "_parsed_space": {
+                    "version": 2,
+                    "data_sources": {
+                        "tables": [{
+                            "identifier": "main.sales.orders",
+                            "description": ["Orders"],
+                            "column_configs": [],
+                        }],
+                        "metric_views": [],
+                        "functions": [],
+                    },
+                    "instructions": {"text_instructions": []},
+                    "config": {},
+                },
+            },
+            catalog="catalog", schema="schema",
+        )
+
+    package_root = Path(__file__).resolve().parents[1]
+    jobs = package_root / "src" / "genie_space_optimizer" / "jobs"
+    optimize_source = (jobs / "run_optimize.py").read_text()
+    assert "candidate_session=candidate_session" in optimize_source
+    assert "isolated candidate-Space lifecycle not yet implemented" in optimize_source
+
+    preflight_source = (
+        package_root / "src" / "genie_space_optimizer" / "optimization" / "preflight.py"
+    ).read_text()
+    client_source = (
+        package_root / "src" / "genie_space_optimizer" / "common" / "genie_client.py"
+    ).read_text()
+    enrichment_source = (
+        package_root / "src" / "genie_space_optimizer" / "optimization"
+        / "space_quality_enrichment.py"
+    ).read_text()
+    loop_source = (
+        package_root / "src" / "genie_space_optimizer" / "optimization" / "unified_loop.py"
+    ).read_text()
+    preflight_start = preflight_source.index("def preflight_push_benchmarks_to_space")
+    publisher_start = client_source.index("def publish_benchmarks_to_genie_space_with_report")
+    enrichment_start = enrichment_source.index("def run_space_quality_enrichment")
+    assert client_source.index("assert_candidate_write", publisher_start) < client_source.index(
+        "config = fetch_space_config", publisher_start)
+    assert "except PermissionError:\n            raise" in preflight_source[preflight_start:]
+    assert "except PermissionError:\n        raise" in enrichment_source[enrichment_start:]
+    assert "except PermissionError:\n        raise\n    except Exception:" in loop_source
 
 
 @pytest.mark.parametrize("entry", ["config", "description", "patch_set", "rollback"])

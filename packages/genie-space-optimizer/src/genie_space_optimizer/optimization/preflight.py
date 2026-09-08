@@ -2747,6 +2747,8 @@ def preflight_push_benchmarks_to_space(
                 run_id=run_id,
                 question_update_ids=question_update_ids,
             )
+        except PermissionError:
+            raise
         except Exception as exc:
             push_exc = exc
             push_failure_reason = f"publish_raised:{type(exc).__name__}: {exc}"

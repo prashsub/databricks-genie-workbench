@@ -69,3 +69,11 @@ the manifest's service principal. Fixture preparation must establish the
 scenario-specific initial state, approvals, and ambiguous-outcome injection.
 Missing configuration fails explicitly; it is never converted into a skip or
 claimed as a platform pass.
+
+The isolated candidate-Space lifecycle is not yet implemented. The Optimize
+task therefore refuses before entering the unified loop, the QC benchmark push
+refuses before any managed-Space GET or PATCH, and enrichment candidate writes
+propagate `PermissionError` instead of degrading to a logged no-op. Deployment
+remains BLOCKED until target-local composition can create, register, own, pass,
+and tear down an optimizer-only candidate Space without targeting a managed
+binding. This blocker is intentional; M10 does not fabricate that lifecycle.
