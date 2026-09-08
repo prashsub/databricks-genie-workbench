@@ -311,3 +311,48 @@ def test_composite_join_conditions_reject_ddl_and_foreign_catalog_payloads(packa
         'sql': [condition, annotation]}]}}}
     with pytest.raises(ValueError):
         MappingTransformer().render(artifact, mapping, package_rig.target)
+
+
+@pytest.mark.parametrize('sql', [
+    'VACUUM prod.sales.orders',
+    'OPTIMIZE prod.sales.orders',
+    'TRUNCATE prod.sales.orders',
+    'DENY SELECT ON prod.sales.orders TO evil',
+    'RESTORE prod.sales.orders TO VERSION AS OF 1',
+    'UNDROP prod.sales.orders',
+    'CALL prod.sales.refresh_orders()',
+    'SET spark.sql.shuffle.partitions = 1',
+    'REFRESH prod.sales.orders',
+    "COMMENT ON COLUMN prod.sales.orders.amount IS 'changed'",
+    'CACHE prod.sales.orders',
+    'SYNC prod.sales.orders',
+])
+@pytest.mark.parametrize('array', [False, True])
+@pytest.mark.parametrize('override', [False, True])
+def test_snippet_fragments_reject_maintenance_statements(package_rig, sql, array, override):
+    # Lowercase and leading comments must not disguise a statement, including in overrides.
+    sql = '-- reviewed snippet\n' + sql.lower()
+    original = 'SUM(dev.sales.orders.amount)' if override else sql
+    mapping = package_rig.mapping
+    if override:
+        mapping = replace(mapping, mappings={**dict(mapping.mappings), 'sql:' + original: sql})
+    artifact = {'serialized_space': {'instructions': {'sql_snippets': {
+        'measures': [{'sql': [original] if array else original}]}}}}
+    with pytest.raises(ValueError, match='Unsupported SQL'):
+        MappingTransformer().render(artifact, mapping, package_rig.target)
+
+
+@pytest.mark.parametrize('sql', [
+    'SUM(col)',
+    'CASE WHEN dev.sales.orders.amount > 0 THEN dev.sales.orders.amount ELSE 0 END',
+    'SELECT SUM(amount) FROM dev.sales.orders',
+    "CASE WHEN `vacuum` = 'OPTIMIZE' THEN 'CALL SET COMMENT REFRESH' ELSE `truncate` END",
+])
+@pytest.mark.parametrize('array', [False, True])
+def test_snippet_expressions_and_select_remain_promotable(package_rig, sql, array):
+    artifact = {'serialized_space': {'instructions': {'sql_snippets': {
+        'expressions': [{'sql': [sql] if array else sql}]}}}}
+    rendered = MappingTransformer().render(artifact, package_rig.mapping, package_rig.target)
+    expected = sql.replace('dev.sales.orders', 'prod.sales.orders')
+    assert rendered.serialized_space['instructions']['sql_snippets']['expressions'][0]['sql'] == (
+        [expected] if array else expected)

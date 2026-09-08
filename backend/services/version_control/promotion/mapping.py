@@ -66,7 +66,9 @@ def map_sql(sql, mappings, *, fragment=False):
     if (not code or (not fragment and code[0].upper() != 'SELECT')
             or any(token.upper() in {'IDENTIFIER', 'EXECUTE', 'IMMEDIATE', 'WITH', 'UNION', 'PIVOT',
                                      'LATERAL', 'TABLE', 'USE', 'INSERT', 'UPDATE', 'DELETE', 'DROP',
-                                     'GRANT', 'REVOKE', 'CREATE', 'ALTER', 'REPLACE', 'MERGE', 'COPY'} for token in code)
+                                     'GRANT', 'REVOKE', 'CREATE', 'ALTER', 'REPLACE', 'MERGE', 'COPY',
+                                     'VACUUM', 'OPTIMIZE', 'TRUNCATE', 'DENY', 'RESTORE', 'UNDROP',
+                                     'CALL', 'SET', 'REFRESH', 'COMMENT', 'CACHE', 'SYNC'} for token in code)
             or any(token in {';', '"', "'", '`', '$', '\\', '{', '}'} for token in code)
             or '/*' in ''.join(code) or code.count('(') != code.count(')')):
         raise ValueError('Unsupported SQL; supply a reviewed exact SQL override')
