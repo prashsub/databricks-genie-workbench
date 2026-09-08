@@ -265,3 +265,40 @@ def test_rendered_target_requires_bound_approved_evidence(failure):
                               "reachable", target_binding=None if failure == "no_target" else binding_fixture())
     assert result.state == vc.DriftState.UNKNOWN
     assert result.allowed_actions == ()
+
+
+@pytest.mark.parametrize("explicit_none", [False, True])
+@pytest.mark.parametrize("observed", [1, 2])
+def test_classification_fails_closed_when_approved_targets_absent(explicit_none, observed):
+    from backend.services.version_control.drift import DriftService
+    from backend.tests.vc_fakes.fixtures import binding_fixture
+
+    canonicalizer = Mock(wraps=FakeCanonicalizer())
+    service = DriftService(canonicalizer=canonicalizer, **({"approved_targets": None} if explicit_none else {}))
+    versions = lookup({version_id(1): snapshot("policy"), version_id(2): snapshot("external")})
+    result = service.classify(vc.Heads(version_id(observed), version_id(1), version_id(1)),
+                              versions, "reachable", target_binding=binding_fixture())
+    assert result.state == vc.DriftState.UNKNOWN
+    assert result.allowed_actions == ()
+    assert "rendered approval" in " ".join(result.reasons).lower()
+    canonicalizer.compare.assert_not_called()
+
+
+@pytest.mark.parametrize("view", ["status", "overview"])
+def test_projected_badge_fails_closed_when_approved_targets_absent(view):
+    from backend.tests.vc_fakes.fixtures import actor_fixture, binding_fixture
+
+    service, projections, observer, registry, authorize = projection_setup()
+    service.approved_targets = None
+    service.reconcile_enabled = True
+    service.dispatch_enabled = True
+    clean = replace(projections.get.return_value, drift=vc.DriftState.CLEAN)
+    projections.get.return_value = clean
+    projections.page.return_value = vc.OverviewPage((clean,), None)
+    status = (service.status(binding_fixture(), actor_fixture()) if view == "status"
+              else service.overview(actor_fixture()).items[0])
+    assert status.drift == vc.DriftState.UNKNOWN
+    assert status.allowed_actions == ()
+    assert status.heads == clean.heads
+    assert "rendered approval" in " ".join(status.reasons).lower()
+    observer.capture.assert_not_called()
