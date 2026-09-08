@@ -17,6 +17,36 @@ TOKEN = re.compile(r"--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|'(?:''|[^'])*'|`(?:``|[^`])
 IDENTIFIER = re.compile(r'(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z_0-9]*)\Z')
 
 
+# Schema paths use [] for an array entry. Unknown identifier fields fail closed.
+IDENTIFIER_PATHS = {
+    ('data_sources', 'tables', '[]', 'identifier'): 'table',
+    ('data_sources', 'metric_views', '[]', 'identifier'): 'metric_view',
+    ('data_sources', 'catalogs', '[]', 'identifier'): 'catalog',
+    ('data_sources', 'schemas', '[]', 'identifier'): 'schema',
+    ('instructions', 'join_specs', '[]', 'left', 'identifier'): 'table',
+    ('instructions', 'join_specs', '[]', 'right', 'identifier'): 'table',
+    ('instructions', 'sql_functions', '[]', 'identifier'): 'function',
+}
+
+
+def structured_identifiers(value, path=()):
+    """Yield mutable entries and resource kinds from one shared schema allowlist."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = (*path, key)
+            if key == 'identifier':
+                if child_path not in IDENTIFIER_PATHS:
+                    raise ValueError('Unrecognized structured identifier path: ' + '.'.join(child_path))
+                if not isinstance(child, str) or not child:
+                    raise ValueError('Invalid structured identifier')
+                yield value, IDENTIFIER_PATHS[child_path]
+            else:
+                yield from structured_identifiers(child, child_path)
+    elif isinstance(value, list):
+        for child in value:
+            yield from structured_identifiers(child, (*path, '[]'))
+
+
 def map_sql(sql, mappings):
     override = mappings.get('sql:' + sql)
     if override is not None:
@@ -105,13 +135,11 @@ class MappingTransformer:
         if mapping.transformer_version != self.version:
             raise ValueError('Unsupported mapping transformer version')
         content = vc.to_wire(artifact['serialized_space'])
-        sources = content.get('data_sources', {})
-        for kind in ('tables', 'metric_views', 'catalogs', 'schemas'):
-            for entry in sources.get(kind, []):
-                identifier = entry['identifier']
-                if identifier not in mapping.mappings and identifier not in mapping.mappings.values():
-                    raise ValueError('Unresolved structured identifier')
-                entry['identifier'] = mapping.mappings.get(identifier, identifier)
+        for entry, _kind in structured_identifiers(content):
+            identifier = entry['identifier']
+            if identifier not in mapping.mappings and identifier not in mapping.mappings.values():
+                raise ValueError('Unresolved structured identifier')
+            entry['identifier'] = mapping.mappings.get(identifier, identifier)
         map_executable_fields(content, mapping.mappings)
         environment = {key.removeprefix('target:'): value for key, value in mapping.mappings.items()
                        if key in {'target:warehouse_id', 'target:parent_path'}}

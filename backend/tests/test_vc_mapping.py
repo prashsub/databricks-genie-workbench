@@ -91,3 +91,28 @@ def test_warehouse_folder_binding_and_principals_remain_target_local(package_rig
         'parent_path': '/target/folder', 'consumers': ('target-analysts',)}
     assert 'warehouse_id' not in result.serialized_space
     assert 'permissions' not in result.serialized_space
+
+
+@pytest.mark.parametrize('case', ['mapped', 'unmapped', 'unknown_path'])
+def test_join_specs_and_sql_function_identifiers_map_exactly_or_fail_closed(package_rig, case):
+    rig = package_rig
+    mapping = replace(rig.mapping, mappings={
+        **dict(rig.mapping.mappings), 'dev.sales.customers': 'prod.sales.customers',
+        'dev.sales.fiscal_quarter': 'prod.sales.fiscal_quarter'})
+    content = {'instructions': {
+        'join_specs': [{'left': {'identifier': 'dev.sales.orders'},
+                        'right': {'identifier': 'dev.sales.customers'}}],
+        'sql_functions': [{'identifier': 'dev.sales.fiscal_quarter'}]}}
+    if case == 'unmapped':
+        content['instructions']['sql_functions'][0]['identifier'] = 'dev.sales.unreviewed'
+    elif case == 'unknown_path':
+        content['instructions']['future_schema'] = {'identifier': 'dev.sales.orders'}
+    if case != 'mapped':
+        with pytest.raises(ValueError):
+            MappingTransformer().render({'serialized_space': content}, mapping, rig.target)
+        return
+    result = MappingTransformer().render({'serialized_space': content}, mapping, rig.target).serialized_space
+    instructions = result['instructions']
+    assert instructions['join_specs'][0]['left']['identifier'] == 'prod.sales.orders'
+    assert instructions['join_specs'][0]['right']['identifier'] == 'prod.sales.customers'
+    assert instructions['sql_functions'][0]['identifier'] == 'prod.sales.fiscal_quarter'

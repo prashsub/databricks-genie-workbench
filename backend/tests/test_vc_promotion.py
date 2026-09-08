@@ -334,3 +334,28 @@ def test_execution_rechecks_transport_and_separate_securables(promotion_rig, cas
     with pytest.raises((PermissionError, ValueError)):
         rig.service.execute(uid(4), rig.executor)
     rig.gate.execute.assert_not_called()
+
+
+def test_preflight_checks_join_and_function_identifiers_for_executor_and_consumer(promotion_rig):
+    rig = promotion_rig
+    envelope = vc.to_wire(rig.version.snapshot.response_envelope)
+    envelope['serialized_space']['instructions'] = {
+        'join_specs': [{'left': {'identifier': 'dev.sales.join_left'},
+                        'right': {'identifier': 'dev.sales.join_right'}}],
+        'sql_functions': [{'identifier': 'dev.sales.fiscal_quarter'}]}
+    rig.version = replace(rig.version, snapshot=rig.service.canonicalizer.observe(envelope))
+    rig.ledger.get_version.return_value = rig.version
+    rig.mapping = replace(rig.mapping, mappings={**dict(rig.mapping.mappings),
+        **{f'dev.sales.{name}': f'prod.sales.{name}'
+           for name in ('join_left', 'join_right', 'fiscal_quarter')}})
+    reference = rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
+    rig.releases.get.return_value.package = reference
+    rig.service.preflight(rig.request.identity.operation_id, rig.executor)
+    checked = {(call.args[2], call.args[3], call.args[4]) for call in rig.dependencies.check.call_args_list}
+    for principal in ('target-sp', 'target-analysts'):
+        assert {(principal, 'table', 'prod.sales.join_left'),
+                (principal, 'table', 'prod.sales.join_right'),
+                (principal, 'function', 'prod.sales.fiscal_quarter')} <= checked
+    manifest = json.loads(rig.store.read(reference.manifest_uri))
+    assert set(manifest['required_sources']) == {
+        'dev.sales.orders', 'dev.sales.join_left', 'dev.sales.join_right', 'dev.sales.fiscal_quarter'}

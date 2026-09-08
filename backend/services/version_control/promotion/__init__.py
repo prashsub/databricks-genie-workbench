@@ -8,6 +8,7 @@ from backend.services.version_control import contracts as vc
 from backend.services.version_control.platform.identity import canonical_host
 from .packages import build, digest, encode, immutable_put, mapping_digest, policy_digests, portable
 from . import receipts
+from .mapping import structured_identifiers
 from .transport import separate_volumes
 
 
@@ -120,10 +121,8 @@ class PromotionService:
         if not all(environment.get(key) for key in ('warehouse_id', 'parent_path', 'consumers')):
             raise PermissionError('Explicit target warehouse, folder and consumers required')
         resources = [('warehouse', environment['warehouse_id']), ('folder', environment['parent_path'])]
-        sources = rendered.serialized_space.get('data_sources', {})
-        for collection, kind in (('tables', 'table'), ('metric_views', 'metric_view'),
-                                 ('catalogs', 'catalog'), ('schemas', 'schema')):
-            resources.extend((kind, entry['identifier']) for entry in sources.get(collection, []))
+        resources.extend((kind, entry['identifier'])
+                         for entry, kind in structured_identifiers(rendered.serialized_space))
         checks = []
         for principal in (executor.principal_id, *environment['consumers']):
             for kind, identifier in resources:
