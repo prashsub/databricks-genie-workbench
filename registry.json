@@ -119,11 +119,12 @@
     {
       "id": "M07",
       "desc": "Cross-workspace promotion",
-      "status": "BLOCKER-FIX DONE + VERIFIED (4 commits 78f21b2,df5d237,12f4da4,9271dbc; HEAD 9271dbc; pushed vc/m07). B1 identifier allowlist (join_specs+sql_functions mapped, unrecognized raises) + preflight/required_sources extended; B2 fragment mode + array arity preserved; B3 recursive env-strip before hash/upload; B4 direct projection tests. B1+B4 RED mutation-verified by polly. 1158 offline pass, integration deselected, owned-paths clean. IN FIX RE-REVIEW claude_code conv 3773493063976357.",
+      "status": "blocker-fix RESOLVED all 4 original (B1/B3/B4 full, B2 partial) but fix re-review (conv 3773493063976357) found 2 NEW source-leak regressions the fix introduced: F1 longest-prefix SQL mapping lets one-token catalog mapping promote unreviewed subtree (dev.internal.pii_raw -> prod...); F2 join_specs.sql element>=1 verbatim passthrough (DROP/UNION/unmapped promote unchecked). Both execution-proven, precise fixes given. FIX2 RUNNING pi/Astra conv 3773493063976423 (mapping.py+test only). Core safety no-regression confirmed; owned-paths PASS.",
       "worktree": "worktrees/m07",
       "review_conversation_id": "3773493063976266",
       "fix_conversation_id": "3773493063976345",
-      "fix_review_conversation_id": "3773493063976357"
+      "fix_review_conversation_id": "3773493063976357",
+      "fix2_conversation_id": "3773493063976423"
     },
     {
       "id": "M10",
