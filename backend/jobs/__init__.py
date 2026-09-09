@@ -317,23 +317,37 @@ def _governed_seam_pending(port: str) -> Callable[..., Any]:
     return factory
 
 
-def _build_governed_seams(config) -> GovernedSeams:
+def _build_governed_seams(config, adapters=None) -> GovernedSeams:
     """Assemble the platform `GovernedSeams` for governed mutation kinds.
 
-    Every factory is currently the fail-closed platform seam
-    (`_governed_seam_pending`); the composition wiring around them
-    (`resolve_governed_ports` -> `assemble_vc_runtime`) is complete and
-    offline-tested, so the live integration step only needs to replace these
-    factory bodies with explicit-credential constructors — no wiring changes.
+    The **promotion** graph is wired with real explicit-credential leaf
+    constructors via `platform.live_seams.build_governed_seams` (Delta facts/
+    ledger/registry/coordination, the mutation gate, `GenieTransport`, the
+    approval service and the promotion subgraph). `restore`/`optimizer`/
+    `reconcile` remain unwired (their seams are `None`, so `resolve_governed_ports`
+    skips them and those kinds stay fail-closed until wired and platform-validated).
+
+    `adapters` is the low-level credential/SQL/Volume injection seam; production
+    passes `None` (a live `PlatformAdapters(config)` is built from the explicit
+    config), while offline composition tests inject a fake with the same surface.
+    Falls back to the fail-closed placeholder graph only when explicit config is
+    absent (so `build_vc_runtime` still raises "not integrated" pre-provisioning).
     """
 
-    names = ("facts", "ledger", "registry", "canonicalizer", "identity", "executor",
-             "coordination", "approvals", "transport", "gate", "capability_probe",
-             "dispatcher", "restore", "optimizer", "promotion", "reconcile")
-    return GovernedSeams(**{name: _governed_seam_pending(name) for name in names})
+    if not config or any(not config.get(key) for key in _GOVERNED_CONFIG_KEYS):
+        names = ("facts", "ledger", "registry", "canonicalizer", "identity", "executor",
+                 "coordination", "approvals", "transport", "gate", "capability_probe",
+                 "dispatcher", "restore", "optimizer", "promotion", "reconcile")
+        return GovernedSeams(**{name: _governed_seam_pending(name) for name in names})
+
+    from backend.services.version_control.platform.live_seams import (
+        build_governed_seams,
+    )
+
+    return build_governed_seams(config, adapters=adapters)
 
 
-def _resolve_platform_ports(kind: str, config=None) -> dict:
+def _resolve_platform_ports(kind: str, config=None, adapters=None) -> dict:
     """Construct durable target-local ports for `kind` from explicit workspace
     configuration and credentials.
 
@@ -351,13 +365,13 @@ def _resolve_platform_ports(kind: str, config=None) -> dict:
         # executor is ever used, so a no-op executor is safe in that case.
         execute = _build_warehouse_executor(config) if complete else (lambda _s: None)
         return resolve_provision_ports(config=config or {}, execute=execute)
-    return resolve_governed_ports(config=config, seams=_build_governed_seams(config))
+    return resolve_governed_ports(config=config, seams=_build_governed_seams(config, adapters))
 
 
-def build_vc_runtime(kind: str, config=None) -> VcJobRuntime:
+def build_vc_runtime(kind: str, config=None, adapters=None) -> VcJobRuntime:
     if kind not in JOB_KINDS:
         raise PermissionError(f"VC {kind} runtime not integrated; unknown job kind")
-    ports = _resolve_platform_ports(kind, config)
+    ports = _resolve_platform_ports(kind, config, adapters)
     if kind == "provision":
         return assemble_provision_runtime(**ports)
     return assemble_vc_runtime(**ports)
