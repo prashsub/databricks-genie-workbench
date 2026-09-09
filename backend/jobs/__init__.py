@@ -85,7 +85,7 @@ def _make_write_ready(flags, capability_probe) -> Callable[[str], bool]:
 def assemble_vc_runtime(*, workspace_id, facts, flags, executor, identity, gate,
                         verify_only, attempt_state, capability_probe,
                         restore_service=None, optimizer_adapter=None,
-                        reconcile_service=None) -> VcJobRuntime:
+                        promotion_service=None, reconcile_service=None) -> VcJobRuntime:
     """Wire injected ports into a governed runtime.
 
     Only handlers verified end-to-end are wired; every other governed kind stays
@@ -93,7 +93,8 @@ def assemble_vc_runtime(*, workspace_id, facts, flags, executor, identity, gate,
     `GovernedJobRuntime` ("Job handler not integrated") until it is wired and
     platform-validated. `reconcile_service` is accepted and surfaced as
     `.service` for the direct-attribute reconcile entrypoint even though its
-    `.run` dispatch handler is not wired yet.
+    `.run` dispatch handler is not wired yet (reconcile reapply flows through the
+    gate via `vc_reconcile.run_reapply`, not a `.run` handler).
     """
 
     handlers: dict[str, Callable[[Any], Any]] = {}
@@ -104,6 +105,9 @@ def assemble_vc_runtime(*, workspace_id, facts, flags, executor, identity, gate,
         handlers["optimizer_apply"] = lambda request: optimizer_adapter.apply(
             request.optimizer_run_id, request.champion_id, request.binding,
             request.expected_base, executor)
+    if promotion_service is not None:
+        handlers["promotion"] = lambda request: promotion_service.execute(
+            request.identity.operation_id, executor)
 
     governed = GovernedJobRuntime(facts, workspace_id, handlers, verify_only,
                                   attempt_state, _make_write_ready(flags, capability_probe))
@@ -191,6 +195,7 @@ class GovernedSeams:
     dispatcher: Callable[..., Any] | None = None
     restore: Callable[..., Any] | None = None
     optimizer: Callable[..., Any] | None = None
+    promotion: Callable[..., Any] | None = None
     reconcile: Callable[..., Any] | None = None
 
 
@@ -252,6 +257,11 @@ def resolve_governed_ports(*, config, seams: GovernedSeams) -> dict:
     if seams.optimizer is not None:
         ports["optimizer_adapter"] = seams.optimizer(
             gate=gate, flags=flags, facts=facts, identity=identity, approvals=approvals)
+    if seams.promotion is not None:
+        ports["promotion_service"] = seams.promotion(
+            config, facts=facts, gate=gate, approvals=approvals, identity=identity,
+            ledger=ledger, canonicalizer=canonicalizer, registry=registry,
+            transport=transport, flags=flags, executor=executor, dispatcher=dispatcher)
     if seams.reconcile is not None:
         ports["reconcile_service"] = seams.reconcile(
             config, canonicalizer=canonicalizer, ledger=ledger, approvals=approvals,
@@ -288,15 +298,51 @@ def _build_warehouse_executor(config) -> Callable[[str], Any]:
     return execute
 
 
+def _governed_seam_pending(port: str) -> Callable[..., Any]:
+    """A fail-closed governed leaf constructor.
+
+    The credential/policy-heavy governed factories (Delta-backed facts, the
+    coordination service's admission/enrollment/recovery callbacks, the mutation
+    gate graph, verified identity, explicit-credential SDK clients) are only
+    built and validated against a provisioned namespace in the live integration
+    phase. Until then each raises "not integrated" the first time
+    `resolve_governed_ports` invokes it, keeping every governed kind fail-closed.
+    """
+
+    def factory(*_args, **_kwargs):
+        raise PermissionError(
+            f"VC governed runtime not integrated; the {port} platform seam is "
+            "unavailable (provision and validate the target workspace first)")
+
+    return factory
+
+
+def _build_governed_seams(config) -> GovernedSeams:
+    """Assemble the platform `GovernedSeams` for governed mutation kinds.
+
+    Every factory is currently the fail-closed platform seam
+    (`_governed_seam_pending`); the composition wiring around them
+    (`resolve_governed_ports` -> `assemble_vc_runtime`) is complete and
+    offline-tested, so the live integration step only needs to replace these
+    factory bodies with explicit-credential constructors — no wiring changes.
+    """
+
+    names = ("facts", "ledger", "registry", "canonicalizer", "identity", "executor",
+             "coordination", "approvals", "transport", "gate", "capability_probe",
+             "dispatcher", "restore", "optimizer", "promotion", "reconcile")
+    return GovernedSeams(**{name: _governed_seam_pending(name) for name in names})
+
+
 def _resolve_platform_ports(kind: str, config=None) -> dict:
     """Construct durable target-local ports for `kind` from explicit workspace
     configuration and credentials.
 
     `provision` is integrated: it resolves the reviewed owner migrations + grant
     matrix and a warehouse-bound executor from explicit config. Every governed
-    mutation kind remains a fail-closed platform seam (Delta-backed operation
-    facts, the mutation gate graph, verified identity, explicit-credential SDK
-    clients) pending the provisioning/integration phase.
+    mutation kind is routed through the completed composition path
+    (`resolve_governed_ports` over `_build_governed_seams`); the leaf factories
+    remain fail-closed platform seams until the live integration phase, so
+    governed kinds still raise "not integrated" here.
     """
 
     if kind == "provision":
@@ -305,9 +351,7 @@ def _resolve_platform_ports(kind: str, config=None) -> dict:
         # executor is ever used, so a no-op executor is safe in that case.
         execute = _build_warehouse_executor(config) if complete else (lambda _s: None)
         return resolve_provision_ports(config=config or {}, execute=execute)
-    raise PermissionError(
-        f"VC {kind} runtime not integrated; target-local platform ports are "
-        "unavailable (provision and validate the target workspace first)")
+    return resolve_governed_ports(config=config, seams=_build_governed_seams(config))
 
 
 def build_vc_runtime(kind: str, config=None) -> VcJobRuntime:

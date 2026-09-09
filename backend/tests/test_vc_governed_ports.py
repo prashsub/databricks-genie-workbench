@@ -40,7 +40,7 @@ def _config(**overrides):
 
 
 def _seams(*, calls, gate, executor, facts, with_restore=False, with_optimizer=False,
-           with_reconcile=False, with_dispatcher=False):
+           with_promotion=False, with_reconcile=False, with_dispatcher=False):
     def record(name, value):
         def factory(*args, **kwargs):
             calls.append((name, args, kwargs))
@@ -67,6 +67,8 @@ def _seams(*, calls, gate, executor, facts, with_restore=False, with_optimizer=F
         kwargs["restore"] = record("restore", SimpleNamespace(kind="restore"))
     if with_optimizer:
         kwargs["optimizer"] = record("optimizer", SimpleNamespace(kind="optimizer"))
+    if with_promotion:
+        kwargs["promotion"] = record("promotion", SimpleNamespace(kind="promotion"))
     if with_reconcile:
         kwargs["reconcile"] = record("reconcile", SimpleNamespace(kind="reconcile"))
     return GovernedSeams(**kwargs)
@@ -140,16 +142,64 @@ def test_handlers_wired_only_when_seams_present():
     calls, gate = [], SimpleNamespace()
     facts = _facts_new()
     seams = _seams(calls=calls, gate=gate, executor=SimpleNamespace(), facts=facts,
-                   with_restore=True, with_optimizer=True, with_reconcile=True,
-                   with_dispatcher=True)
+                   with_restore=True, with_optimizer=True, with_promotion=True,
+                   with_reconcile=True, with_dispatcher=True)
     ports = resolve_governed_ports(config=_config(), seams=seams)
     assert ports["restore_service"].kind == "restore"
     assert ports["optimizer_adapter"].kind == "optimizer"
+    assert ports["promotion_service"].kind == "promotion"
     assert ports["reconcile_service"].kind == "reconcile"
     # restore seam receives the constructed gate + dispatcher.
     restore_call = next(k for name, _a, k in calls if name == "restore")
     assert restore_call["gate"] is gate
     assert restore_call["dispatcher"].kind == "dispatcher"
+    # promotion seam receives the constructed gate + executor.
+    promotion_call = next(k for name, _a, k in calls if name == "promotion")
+    assert promotion_call["gate"] is gate
+
+
+def test_resolve_then_assemble_dispatches_promotion_end_to_end():
+    """The full offline composition path: builder output feeds assemble_vc_runtime
+    and dispatches a governed promotion through the runtime with fakes."""
+    from unittest.mock import Mock
+
+    from backend.jobs import assemble_vc_runtime
+    from backend.services.version_control.platform.capabilities import (
+        FIRST_WRITE_CAPABILITIES,
+    )
+
+    calls = []
+    gate = SimpleNamespace()
+    gate.verify_only = lambda operation_id, executor: "verified"
+    executor = SimpleNamespace(kind="executor", workspace_id="target", principal_id="sp")
+    facts = _facts_new()
+    promotion = Mock()
+    promotion.execute.return_value = "receipt"
+
+    def record(name, value):
+        def factory(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            return value
+        return factory
+
+    seams = _seams(calls=calls, gate=gate, executor=executor, facts=facts)
+    seams = GovernedSeams(**{**seams.__dict__,
+                            "promotion": record("promotion", promotion),
+                            "capability_probe": record(
+                                "capability_probe",
+                                lambda: {name: True for name in FIRST_WRITE_CAPABILITIES})})
+    # All write switches on so the runtime's write-ready gate admits the handler.
+    config = _config(flags={"vc_writes_enabled": True, "vc_promotion_enabled": True})
+
+    ports = resolve_governed_ports(config=config, seams=seams)
+    runtime = assemble_vc_runtime(**ports)
+    request = SimpleNamespace(
+        identity=SimpleNamespace(operation_id=OP, idempotency_key="idem"),
+        binding=SimpleNamespace(workspace_id="target", binding_id="b", binding_revision=1),
+        operation_type="promotion")
+    facts.get_request = lambda _op: SimpleNamespace(request=request)
+    assert runtime.run("promotion", OP) == "receipt"
+    promotion.execute.assert_called_once_with(OP, executor)
 
 
 @pytest.mark.parametrize("missing", ("workspace_id", "catalog",

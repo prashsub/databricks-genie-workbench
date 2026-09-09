@@ -96,6 +96,19 @@ def test_unwired_kind_fails_closed():
             runtime.run(kind, OP)
 
 
+def test_promotion_handler_runs_service_execute():
+    request = SimpleNamespace(identity=SimpleNamespace(operation_id=OP),
+                              binding=SimpleNamespace(workspace_id="target"),
+                              operation_type="promotion")
+    promotion = Mock()
+    promotion.execute.return_value = "receipt"
+    executor = SimpleNamespace(workspace_id="target", principal_id="sp")
+    runtime = _assemble(facts=_facts_for(request), executor=executor,
+                        promotion_service=promotion)
+    assert runtime.run("promotion", OP) == "receipt"
+    promotion.execute.assert_called_once_with(OP, executor)
+
+
 def test_write_ready_requires_write_switch():
     flags = FeatureFlags(vc_writes_enabled=True, vc_restore_enabled=False)
     runtime = _assemble(flags=flags, restore_service=Mock())
