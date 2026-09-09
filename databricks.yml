@@ -30,6 +30,9 @@ variables:
   vc_source_principal:
     description: "Cross-workspace source: vc_outbound_packages writer / receipts reader"
     default: ""
+  vc_governed_config_uri:
+    description: "UC Volume URI of the reviewed governed target config JSON (promotion); loaded in-Job"
+    default: ""
   control_schema:
     description: "Unity Catalog schema holding the VC control tables and Volumes"
     default: "vc_ctl"

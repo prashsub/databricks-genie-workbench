@@ -91,6 +91,10 @@ def test_jobs_take_operation_id_and_retry_verification_not_mutation():
                 "--approval-principal", "${var.vc_approval_principal}",
                 "--source-principal", "${var.vc_source_principal}",
             ]
+        elif kind == "promotion":
+            # The large reviewed governed config is loaded in-Job from an
+            # immutable UC Volume URI, never inlined as CLI parameters.
+            assert params[4:] == ["--governed-config", "${var.vc_governed_config_uri}"]
         else:
             assert params == head
 

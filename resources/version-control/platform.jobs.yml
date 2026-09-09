@@ -69,7 +69,18 @@ targets:
               python_wheel_task:
                 package_name: genie_workbench
                 entry_point: vc-platform
-                parameters: [--kind, promotion, --operation-id, "{{job.parameters.operation_id}}"]
+                # The reviewed governed target config (roles, selections, volumes,
+                # topology, source binding, flags) is too large for inline CLI
+                # parameters and is authored during provisioning; the Job loads it
+                # from an immutable UC Volume URI. Absence leaves promotion
+                # fail-closed ("not integrated").
+                parameters:
+                  - --kind
+                  - promotion
+                  - --operation-id
+                  - "{{job.parameters.operation_id}}"
+                  - --governed-config
+                  - ${var.vc_governed_config_uri}
         vc-polling:
           <<: *vc_job
           name: ${var.app_name}-vc-polling

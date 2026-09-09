@@ -82,6 +82,12 @@ def main(argv=None):
     parser.add_argument("--workspace-id", default=None)
     for role in PROVISION_ROLES:
         parser.add_argument(f"--{role}-principal", default=None)
+    # Governed write kinds (e.g. promotion) load their large, reviewed target
+    # config from an immutable JSON document authored during provisioning and
+    # pinned in the provisioned control namespace (a UC Volume URI in the Job,
+    # a local path in offline tests). It never travels as inline CLI parameters,
+    # and its absence leaves the kind fail-closed ("not integrated").
+    parser.add_argument("--governed-config", default=None)
     args = parser.parse_args(argv)
     if str(UUID(args.operation_id)) != args.operation_id:
         raise ValueError("Canonical operation_id required")
@@ -96,5 +102,31 @@ def main(argv=None):
         }
         if not all(config["principals"].values()):
             config["principals"] = {}
+    elif args.governed_config:
+        config = _load_governed_config(args.governed_config)
     from backend.jobs import build_vc_runtime
     return build_vc_runtime(args.kind, config).run(args.kind, args.operation_id)
+
+
+def _load_governed_config(location):
+    """Load the reviewed governed target config from `location`.
+
+    A `/Volumes/...` URI is read as the running Job's executor identity (ambient
+    credentials); any other value is read as a local path (offline tests). The
+    document is immutable and authored during provisioning, so it is parsed
+    verbatim with no runtime mutation. Returns the parsed dict, or `None` when no
+    location is supplied (the governed kind then stays fail-closed).
+    """
+    import json
+
+    if not location:
+        return None
+    if location.startswith("/Volumes/"):
+        from databricks.sdk import WorkspaceClient
+
+        raw = WorkspaceClient().files.download(location).contents.read()
+    else:
+        from pathlib import Path
+
+        raw = Path(location).read_bytes()
+    return json.loads(raw)
