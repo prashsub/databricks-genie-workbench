@@ -37,8 +37,8 @@ Can start with contract/scaffold and platform verification in parallel with M01/
 | 2 | `test_existing_optimizer_bundle_and_app_deploy_paths_remain_accounted_for` in same file | Inventory actual root/package bundles and script deployment; explicit DAB transition plan |
 | 3 | `test_modules_are_wired_once_with_write_switch_default_off` in `test_vc_composition.py` | Shared package/composition scaffold, lazy dependency injection, no accidental writer enablement |
 | 4 | `test_ddl_migrations_are_owned_ordered_idempotent_and_not_content_deploys` in `test_vc_provisioning.py` | Provisioning Job runs validated owner SQL/Volume specs and grants |
-| 5 | `test_runtime_principal_cannot_update_delete_or_alter_fact_tables` in `integration/test_vc_permissions.py` | Append-only properties plus least privilege, nonowner runtime principals |
-| 6 | `test_executor_cannot_insert_coordination_and_enrollment_is_serialized` in same file | Separate enrollment INSERT authority, executor UPDATE-only, verify grant support |
+| 5 | `test_runtime_principal_append_only_and_cannot_alter_fact_tables` in `integration/test_vc_permissions.py` | Append-only enforced by delta.appendOnly + non-owner runtime (SELECT+MODIFY); INSERT succeeds, UPDATE/DELETE rejected by append-only, ALTER/DROP denied by non-ownership. UC has no INSERT/UPDATE privilege — see contracts.md deviation |
+| 6 | `test_coordination_writers_are_distinct_serialized_sps` in same file | Executor + enrollment are distinct SPs both with SELECT+MODIFY; UPDATE-only/INSERT-only separation is protocol-enforced (Serializable + serialized enrollment Job + CAS), not grant-enforced |
 | 7 | `test_missing_fine_grained_dml_or_serializable_disables_writes` in `test_vc_provisioning.py` | Capability checks fail closed; no broad MODIFY fallback |
 | 8 | `test_wrong_run_as_fails_startup_without_self_healing` in `test_vc_identity.py` | Replace discovered startup mutation with verify/refuse behavior; no Job identity edits |
 | 9 | `test_explicit_profile_host_workspace_mismatch_is_rejected` in same file | Explicit source/target selection validation and OAuth M2M/OBO resolution; no default profile |

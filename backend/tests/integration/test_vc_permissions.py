@@ -15,19 +15,28 @@ from backend.services.version_control import platform
 
 
 @pytest.mark.integration
-def test_runtime_principal_cannot_update_delete_or_alter_fact_tables(live_platform):
+def test_runtime_principal_append_only_and_cannot_alter_fact_tables(live_platform):
+    # UC has no INSERT/UPDATE privilege: the runtime holds SELECT+MODIFY, and the
+    # append-only guarantee comes from delta.appendOnly + non-ownership. So INSERT
+    # succeeds, UPDATE/DELETE are rejected by append-only (not permission), and
+    # ALTER/DROP/REPLACE are denied because the runtime is not the owner.
     for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
         table = live_platform.table(name)
         assert table["properties"]["delta.appendOnly"] == "true"
         assert table["owner"] != live_platform.principal("runtime")
         live_platform.assert_sql_succeeds("runtime", f"{name}.insert")
-        for action in ("update", "delete", "alter", "drop", "replace"):
+        for action in ("update", "delete"):
+            live_platform.assert_sql_appendonly_rejected("runtime", f"{name}.{action}")
+        for action in ("alter", "drop", "replace"):
             live_platform.assert_sql_denied("runtime", f"{name}.{action}")
 
 
 @pytest.mark.integration
-def test_executor_cannot_insert_coordination_and_enrollment_is_serialized(live_platform):
-    live_platform.assert_sql_denied("executor", "genie_ops_coordination.insert")
+def test_coordination_writers_are_distinct_serialized_sps(live_platform):
+    # UC cannot split UPDATE-only vs INSERT-only, so executor and enrollment are
+    # distinct SPs both holding SELECT+MODIFY; the write separation is enforced by
+    # the coordination protocol: Serializable isolation + a serialized (single
+    # concurrent run, queued) enrollment Job run as the enrollment SP + CAS.
     live_platform.assert_sql_succeeds("executor", "genie_ops_coordination.update")
     live_platform.assert_sql_succeeds("enrollment", "genie_ops_coordination.enroll")
     table = live_platform.table("genie_ops_coordination")

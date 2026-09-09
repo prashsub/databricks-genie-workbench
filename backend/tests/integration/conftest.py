@@ -123,6 +123,18 @@ print(json.dumps({'host': client.config.host.rstrip('/'), 'workspace_id': str(id
         assert (error.get("error_code") in {"PERMISSION_DENIED", "INSUFFICIENT_PERMISSIONS"}
                 or "INSUFFICIENT_PERMISSIONS" in error.get("message", ""))
 
+    def assert_sql_appendonly_rejected(self, role, probe):
+        """UPDATE/DELETE on a fact table is rejected by delta.appendOnly, not by
+        a permission (UC has no INSERT/UPDATE privilege; the runtime holds MODIFY
+        bounded by the append-only table property). This is the append-only proof."""
+        status = self.sql(role, probe)["status"]
+        assert status["state"] == "FAILED"
+        error = status.get("error", {})
+        message = error.get("message", "")
+        assert ("APPEND_ONLY" in error.get("error_code", "")
+                or "DELTA_CANNOT_MODIFY_APPEND_ONLY" in message
+                or "append only" in message.lower())
+
 
 @pytest.fixture
 def live_platform():
