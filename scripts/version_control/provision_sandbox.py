@@ -176,7 +176,8 @@ def _account_id(profile: str) -> str:
 
 
 def _ensure_namespace(catalog: str, control_schema: str, warehouse_id: str,
-                      provisioner_app_id: str, profile: str) -> None:
+                      provisioner_app_id: str, consumer_app_ids: list[str],
+                      profile: str) -> None:
     statements = []
     if not _catalog_exists(catalog, profile):
         statements.append(f"CREATE CATALOG IF NOT EXISTS `{catalog}`")
@@ -188,6 +189,17 @@ def _ensure_namespace(catalog: str, control_schema: str, warehouse_id: str,
         (f"GRANT USE SCHEMA, CREATE TABLE, CREATE VOLUME "
          f"ON SCHEMA `{catalog}`.`{control_schema}` TO `{provisioner_app_id}`"),
     ]
+    # Namespace access for every consumer principal. This is admin/catalog-owner
+    # authority, so it is issued here (admin profile) rather than by the
+    # provision job (which runs as the provisioner and owns only the objects it
+    # creates). Object-level privileges are granted by the provision job's
+    # least-privilege matrix. Same-account SPs from a paired same-metastore
+    # workspace (e.g. the cross-workspace `source`) are grantable here too.
+    for consumer in dict.fromkeys(consumer_app_ids):
+        if consumer and consumer != provisioner_app_id:
+            statements.append(f"GRANT USE CATALOG ON CATALOG `{catalog}` TO `{consumer}`")
+            statements.append(
+                f"GRANT USE SCHEMA ON SCHEMA `{catalog}`.`{control_schema}` TO `{consumer}`")
     for statement in statements:
         response = _api("post", "/api/2.0/sql/statements", profile=profile, body={
             "warehouse_id": warehouse_id, "statement": statement,
@@ -216,6 +228,9 @@ def main() -> None:
     parser.add_argument("--grant-run-as-to",
                         help="User (e.g. me@databricks.com) to grant servicePrincipal.user "
                              "on each SP so the bundle deployer can bind run_as")
+    parser.add_argument("--extra-consumers", default="",
+                        help="Comma-separated application ids (e.g. a same-metastore "
+                             "cross-workspace source SP) to also grant USE CATALOG/USE SCHEMA")
     args = parser.parse_args()
 
     roles = [role.strip() for role in args.roles.split(",") if role.strip()]
@@ -259,8 +274,10 @@ def main() -> None:
         if not provisioner:
             raise SystemExit("Namespace creation requires the provisioner role in --roles")
         print(f"Ensuring namespace {args.catalog}.{args.control_schema}")
+        extra = [appid.strip() for appid in args.extra_consumers.split(",") if appid.strip()]
+        consumers = [meta["application_id"] for meta in state["roles"].values()] + extra
         _ensure_namespace(args.catalog, args.control_schema, args.warehouse_id,
-                          provisioner["application_id"], args.profile)
+                          provisioner["application_id"], consumers, args.profile)
         state["catalog"] = args.catalog
         state["control_schema"] = args.control_schema
         state["warehouse_id"] = args.warehouse_id

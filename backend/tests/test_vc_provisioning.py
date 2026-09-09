@@ -339,11 +339,14 @@ def test_grant_matrix_enforces_least_privilege_and_no_broad_modify():
     assert not any("genie_space_operations" in g and f"`{_MATRIX_PRINCIPALS['source']}`" in g
                    for g in grants)
 
-    # USE CATALOG / USE SCHEMA for every role so denials are permission denials.
-    for appid in _MATRIX_PRINCIPALS.values():
-        assert f"GRANT USE CATALOG ON CATALOG ${{catalog}} TO `{appid}`" in grants
-        assert (f"GRANT USE SCHEMA ON SCHEMA ${{catalog}}.${{control_schema}} "
-                f"TO `{appid}`") in grants
+    # Authority separation: the provision job runs as the provisioner, which owns
+    # only the objects it creates, so it can grant object privileges but NOT
+    # namespace access. USE CATALOG / USE SCHEMA are admin/catalog-owner grants
+    # issued during namespace setup, never by the provision job's matrix.
+    assert "USE CATALOG" not in joined
+    assert "USE SCHEMA" not in joined
+    for grant in grants:
+        assert " ON TABLE " in grant or " ON VOLUME " in grant
 
     # The runner accepts and fully renders every grant.
     executed = []

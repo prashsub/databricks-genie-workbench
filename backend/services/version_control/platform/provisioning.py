@@ -176,11 +176,11 @@ def build_grant_matrix(principals):
     table = "${catalog}.${control_schema}"
     grants = []
 
-    # USE CATALOG / USE SCHEMA so denials are permission denials, not namespace
-    # errors. Deterministic by role order.
-    for role in PROVISION_ROLES:
-        grants.append(f"GRANT USE CATALOG ON CATALOG ${{catalog}} TO {quoted[role]}")
-        grants.append(f"GRANT USE SCHEMA ON SCHEMA {table} TO {quoted[role]}")
+    # Object-level grants only. The provision job runs as the provisioner, which
+    # owns the tables/Volumes it creates and can therefore grant privileges on
+    # them, but it does NOT own the catalog/schema. USE CATALOG / USE SCHEMA are
+    # admin/catalog-owner authority and are granted during namespace setup
+    # (scripts/version_control/provision_sandbox.py), never here.
 
     # Fact tables: runtime appends only.
     for name in _FACT_TABLES:
