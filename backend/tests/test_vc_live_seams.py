@@ -187,3 +187,17 @@ def test_rows_coerces_statement_api_strings_to_store_native_types():
     # Naive UTC: `row_from_columns` reattaches tz via `_from_naive_utc`.
     assert row["updated_at"] == datetime(2026, 9, 9, 19, 30, 39, 233000)  # noqa: DTZ001
     assert row["observed_sequence"] is None
+
+
+def test_clock_satisfies_both_callable_and_now_contracts():
+    """One `_Clock` backs the whole governed graph: CoordinationService calls
+    `clock.now()`; the durable stores (DeltaCoordinationStore/DeltaRegistry) and
+    DriftService call `clock()`. Both must return an aware UTC datetime."""
+    from datetime import timezone
+
+    from backend.services.version_control.platform.live_seams import _Clock
+
+    clock = _Clock()
+    assert callable(clock)
+    called, vianow = clock(), clock.now()
+    assert called.tzinfo == timezone.utc and vianow.tzinfo == timezone.utc

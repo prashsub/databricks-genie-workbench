@@ -64,11 +64,21 @@ from backend.services.version_control.registry import DeltaRegistry
 
 
 class _Clock:
-    """Deployment-owned wall clock; never derived from request evidence."""
+    """Deployment-owned wall clock; never derived from request evidence.
+
+    The durable subsystem injects one clock into consumers with two contracts:
+    ``CoordinationService`` calls ``clock.now()`` while the durable stores
+    (``DeltaCoordinationStore``/``DeltaRegistry``) and ``DriftService`` call
+    ``clock()`` (offline they pass ``lambda: NOW``). This adapter satisfies both so
+    a single instance can back the whole governed graph.
+    """
 
     @staticmethod
     def now() -> datetime:
         return datetime.now(UTC)
+
+    def __call__(self) -> datetime:
+        return self.now()
 
 
 def _qualified(config: dict, table: str) -> str:

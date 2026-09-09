@@ -38,7 +38,16 @@ class FakeCoordSql:
         self.stored = None
         self.duplicate = False
         self.raise_on_merge = None
+        self.truncate_ms = False  # simulate REST Statements API TIMESTAMP ms-truncation
         self.calls = []
+
+    def _maybe_truncate(self):
+        if not self.truncate_ms or self.stored is None:
+            return
+        for column in ("updated_at", "lease_expires_at", "admitted_at"):
+            value = self.stored.get(column)
+            if isinstance(value, datetime):
+                self.stored[column] = value.replace(microsecond=(value.microsecond // 1000) * 1000)
 
     def __call__(self, statement, parameters=None):
         parameters = parameters or {}
@@ -51,6 +60,7 @@ class FakeCoordSql:
             return rows * 2 if self.duplicate else rows
         if text.startswith("INSERT"):
             self.stored = dict(parameters)
+            self._maybe_truncate()
             return []
         if text.startswith("MERGE"):
             if self.raise_on_merge is not None:
@@ -65,6 +75,7 @@ class FakeCoordSql:
                 for key, value in parameters.items():
                     if key.startswith("new_"):
                         self.stored[key[len("new_"):]] = value
+                self._maybe_truncate()
             return []
         raise AssertionError(f"Unexpected statement: {text}")
 
@@ -108,6 +119,32 @@ def test_cas_success_updates_and_returns_new_row():
     assert result.holder == "principal" and result.attempt_id == uid(5)
     assert store.read(binding.binding_id) == result
     assert len(sql.merges()) == 1
+
+
+def test_cas_win_detected_despite_server_timestamp_truncation():
+    """The REST Statements API returns Delta TIMESTAMP columns truncated to millisecond
+    precision, so the read-back row never byte-equals the locally computed `after`
+    (updated_at/lease_expires_at). The CAS must still detect the win by the optimistic
+    token (row_version/generation/attempt_id) and return the durable, server-truth row --
+    otherwise a MERGE that already committed would false-negative and orphan the write
+    (the live promotion-gate 'Serializable CAS lost' bug)."""
+    micros = datetime(2026, 9, 7, 12, 0, 0, 123456, tzinfo=UTC)
+    sql = FakeCoordSql()
+    sql.truncate_ms = True
+    binding = binding_fixture()
+    store = DeltaCoordinationStore(sql, "`cat`.`control`.`genie_ops_coordination`",
+                                   resolve_binding=lambda _id: binding, clock=lambda: micros)
+    store.initialize(binding, None)
+    result = store.compare_and_swap(
+        binding.binding_id, 1, 0, 0, lambda row: row.state == CoordinationState.IDLE,
+        state=CoordinationState.RESERVED, holder="principal", attempt_id=uid(5),
+        active_operation_id=uid(6), generation=1, unresolved=True,
+        lease_expires_at=micros + timedelta(seconds=60))
+    assert result is not None  # committed win, not a false negative on truncated ts
+    assert result.state == CoordinationState.RESERVED and result.row_version == 1
+    # The returned row carries the server-truncated timestamp, not the local micros.
+    assert result.updated_at == micros.replace(microsecond=123000)
+    assert result.lease_expires_at == (micros + timedelta(seconds=60)).replace(microsecond=123000)
 
 
 def test_cas_precondition_miss_returns_none_without_merge():

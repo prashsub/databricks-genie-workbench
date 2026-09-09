@@ -1,11 +1,18 @@
 """Synchronous, fail-closed coordination. Never sends a Genie mutation."""
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from math import isfinite
 from uuid import uuid4
 
 from backend.services.version_control import contracts as c
 from .row import CoordinationRow
+
+
+def _floor_ms(value: datetime) -> datetime:
+    """Truncate a datetime to millisecond precision (the resolution Delta TIMESTAMPs
+    round-trip through the REST Statements API), so CAS read-back verification of a
+    server-authoritative timestamp is not a false mismatch on sub-ms micros."""
+    return value.replace(microsecond=(value.microsecond // 1000) * 1000)
 
 
 @dataclass(frozen=True)
@@ -137,6 +144,13 @@ class CoordinationService:
         observed = self._row(row.binding)
         def _mismatch(key, value):
             got = getattr(observed, key)
+            if isinstance(got, datetime) and isinstance(value, datetime):
+                # Server-authoritative TIMESTAMPs (lease_expires_at/admitted_at) round-trip
+                # through the REST Statements API at millisecond precision, so the locally
+                # computed micros value never byte-equals the read-back. Compare at ms; the
+                # store already proved the exact-attempt win via row_version/generation/
+                # attempt_id, and the timestamp is written from this same CAS.
+                return _floor_ms(got) != _floor_ms(value)
             if got == value:
                 return False
             # JSON columns re-read as frozen mappings/tuples; compare canonical wire

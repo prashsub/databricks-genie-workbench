@@ -183,4 +183,17 @@ class DeltaCoordinationStore:
                 return None
             raise
         observed = self.read(binding_id)
-        return observed if observed == after else None
+        # Detect the win by the optimistic-concurrency token advancing to exactly this
+        # attempt's (row_version, generation, attempt_id) -- NOT byte-exact full-row
+        # equality. Server-authoritative timestamps (`updated_at`/`lease_expires_at`)
+        # are stored as Delta TIMESTAMP and round-trip through the REST Statements API
+        # truncated to millisecond precision, so `observed == after` can never hold
+        # against a real table and would false-negative *after the MERGE already
+        # committed*, orphaning the write. Delta serializes concurrent MERGEs (the
+        # loser raises DELTA_CONCURRENT, caught above), so a row_version match uniquely
+        # identifies our commit; return the durable (server-truth) row.
+        if (observed is None or observed.row_version != after.row_version
+                or observed.generation != after.generation
+                or observed.attempt_id != after.attempt_id):
+            return None
+        return observed
