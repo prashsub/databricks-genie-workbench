@@ -429,6 +429,106 @@ class M06Platform:
         key = fact_key(provisional)
         return replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key)))
 
+    # -- untrusted-source isolation (test #15) ----------------------------
+    def _capture_insert(self, fact):
+        """Render the exact INSERT `DeltaFactStore.append` would emit for `fact`
+        without executing it, so the gate can replay it as the target executor
+        (allowed) and as the untrusted source (must be denied)."""
+        from backend.services.version_control.contracts import to_wire
+        from backend.services.version_control.governance.delta import DeltaFactStore
+
+        captured = {}
+
+        def recorder(statement, parameters=None):
+            captured["statement"] = statement
+            captured["parameters"] = parameters
+            return []
+
+        store = DeltaFactStore(recorder, self.catalog, self.control_schema,
+                               self.target_workspace_id, writes_enabled=True)
+        store.append(fact.event_key, to_wire(fact))
+        return captured["statement"], captured["parameters"]
+
+    def valid_insert(self, kind):
+        """Build a target-valid ``approval_request`` or ``receipt`` fact and return
+        the (statement, parameters) that appends it. Only the target-owned runtime
+        holds SELECT+MODIFY on the operations table, so a source replay of the
+        identical, schema-valid INSERT must be denied by UC — the fact boundary is
+        the grant, not the JSON ``fact_kind`` or any workspace predicate."""
+        from dataclasses import replace
+        from datetime import UTC, datetime, timedelta
+        from uuid import NAMESPACE_URL, uuid4, uuid5
+
+        from backend.services.version_control.contracts import (
+            ActorContext,
+            ApprovalInputs,
+            BindingRef,
+            DeploymentReceipt,
+            FactKind,
+            FactStatus,
+            Fingerprints,
+            OperationFact,
+            OperationStatus,
+            RequestIdentity,
+        )
+        from backend.services.version_control.governance.facts import fact_key
+
+        ws = self.target_workspace_id
+        d = "a" * 64
+        operation_id = str(uuid4())
+        now = datetime.now(UTC)
+        binding = BindingRef(str(uuid4()), 1, "audit-gate", ws, "physical-space", "dev")
+        actor = ActorContext("audit-actor@example.invalid", ws, "human")
+        fp = Fingerprints(d, d, d, "vc-c14n/1")
+        if kind == "approval_request":
+            fact_kind = FactKind.APPROVAL_REQUEST
+            evidence = ApprovalInputs(
+                "VC/1.0", operation_id, "promotion", str(uuid4()), d, fp, None, None,
+                d, None, "vc-c14n/1", binding, fp, None, d, d, d, {"minimum": 1},
+                actor.subject_id, {"verify_only": True}, now + timedelta(hours=1))
+        elif kind == "receipt":
+            fact_kind = FactKind.RECEIPT
+            evidence = DeploymentReceipt(
+                schema_version="VC/1.0", release_id=str(uuid4()), operation_id=operation_id,
+                target_binding=binding, attempt_id=str(uuid4()), generation=1,
+                approval_id=str(uuid4()), approval_digest=d, source_version_id=str(uuid4()),
+                package_digest=d, mapping_digest=d, intended_fingerprints=fp,
+                rendered_fingerprints=fp, observed_fingerprints=fp, pre_version_id=str(uuid4()),
+                post_version_id=str(uuid4()), transformer_version="vc-x/1",
+                canonicalizer_version="vc-c14n/1", executor_id=actor.subject_id,
+                job_run_id="run-1", validation_evidence_digest=d, benchmark_evidence_digest=d,
+                status=OperationStatus.CONFIRMED, compensation_operation_id=None, recorded_at=now)
+        else:
+            raise ValueError(f"Unknown valid_insert kind: {kind!r}")
+        provisional = OperationFact(
+            event_id=str(uuid4()), fact_kind=fact_kind, operation_id=operation_id,
+            transition_sequence=0, event_key="", binding=binding,
+            request=RequestIdentity(operation_id, str(uuid4()), d),
+            operation_type="promotion", requester_id=actor.subject_id, actor=actor,
+            status=FactStatus.REQUESTED, evidence=evidence, recorded_at=now)
+        key = fact_key(provisional)
+        finished = replace(provisional, event_key=key,
+                           event_id=str(uuid5(NAMESPACE_URL, key)))
+        return self._capture_insert(finished)
+
+    def read_approved_export_as_source(self):
+        """The source SP is granted READ VOLUME on the target-published receipts
+        export (`vc_target_receipts`), a same-metastore shared-grant surface, so
+        listing it must succeed."""
+        ok, message = self._live._files_api("source", "read", "vc_target_receipts")
+        if not ok:
+            raise AssertionError(
+                f"source should read the approved export volume; got: {message[:200]}")
+        return True
+
+    def read_private_evidence_as_source(self):
+        """The source SP holds no grant on the private approval-evidence Volume
+        (`vc_approval_evidence`), so a read must raise PermissionError."""
+        ok, message = self._live._files_api("source", "read", "vc_approval_evidence")
+        if ok:
+            raise AssertionError("source unexpectedly read the private evidence volume")
+        raise PermissionError(message[:400])
+
     def count_event(self, event_key):
         rows = self._execute("executor",
                              f"SELECT COUNT(*) AS n FROM {self.operations_table} WHERE event_key = :key",
