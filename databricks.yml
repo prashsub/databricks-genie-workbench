@@ -33,7 +33,6 @@ sync:
   include:
     - .build
     - .build/**
-    - dashboards/**
     - packages/genie-space-optimizer/src/genie_space_optimizer/jobs
     - packages/genie-space-optimizer/src/genie_space_optimizer/jobs/**
   exclude:
@@ -41,11 +40,8 @@ sync:
     - frontend/**
     - tests/**
     - sql/**
-    - TODO/**
     - packages/genie-space-optimizer/tests/**
     - packages/genie-space-optimizer/src/genie_space_optimizer/backend/**
-    - packages/genie-space-optimizer/node_modules/**
-    - packages/genie-space-optimizer/.build/**
 
 artifacts:
   default:
