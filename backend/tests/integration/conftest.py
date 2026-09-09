@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 
@@ -372,7 +373,10 @@ class M06Platform:
         return self._denying("source")(statement, parameters)
 
     # -- durable fact store (M06) -----------------------------------------
-    def operation_facts(self):
+    def _build_ledger(self):
+        """Construct a live target-owned DurableOperationFacts over DeltaFactStore
+        and return (ledger, store) so callers can retain the store handle (the
+        outage probes patch its SQL and private-evidence readers)."""
         from backend.services.version_control.governance.delta import DeltaFactStore
         from backend.services.version_control.governance.facts import (
             DurableOperationFacts,
@@ -381,10 +385,16 @@ class M06Platform:
         store = DeltaFactStore(self.sql("executor"), self.catalog, self.control_schema,
                                self.target_workspace_id, writes_enabled=True,
                                read_evidence=self._read_evidence)
-        return DurableOperationFacts(store.read, store.append, writes_enabled=True)
+        return DurableOperationFacts(store.read, store.append, writes_enabled=True), store
+
+    def operation_facts(self):
+        return self._build_ledger()[0]
 
     def _read_evidence(self, uri):
-        selection = self.config["roles"]["executor"]
+        # Private preflight evidence lives in the approval-owned Volume; it is read
+        # back under the approval role (the Volume's writer/reader), not the
+        # executor, which holds no grant on vc_approval_evidence.
+        selection = self.config["roles"]["approval"]
         script = (
             "import sys\n"
             "from databricks.sdk import WorkspaceClient\n"
@@ -528,6 +538,271 @@ class M06Platform:
         if ok:
             raise AssertionError("source unexpectedly read the private evidence volume")
         raise PermissionError(message[:400])
+
+    # -- live identity provider (M08) -------------------------------------
+    def _sdk_client(self, profile):
+        """Build an in-process WorkspaceClient bound to `profile`, ignoring any
+        ambient DATABRICKS_* env so the profile (and optional config_file) is the
+        sole credential — the identity provider must call jobs.get / SCIM in
+        process (not via the CLI subprocess helpers)."""
+        from databricks.sdk import WorkspaceClient
+
+        saved = {name: os.environ.pop(name) for name in list(os.environ)
+                 if name.startswith("DATABRICKS_")}
+        try:
+            kwargs = {"profile": profile}
+            if self.config.get("config_file"):
+                kwargs["config_file"] = self.config["config_file"]
+            return WorkspaceClient(**kwargs)
+        finally:
+            os.environ.update(saved)
+
+    @property
+    def _directory(self):
+        """Target-local directory reader (admin) for live SCIM group/actor
+        resolution; service principals cannot read arbitrary Users/Groups."""
+        if getattr(self, "_directory_client", None) is None:
+            profile = self.config["approval_identities"]["directory_profile"]
+            self._directory_client = self._sdk_client(profile)
+        return self._directory_client
+
+    @property
+    def identity(self):
+        if getattr(self, "_identity_provider", None) is None:
+            from backend.services.version_control.platform.identity import (
+                PlatformIdentityProvider,
+            )
+
+            profile = self.config["roles"]["executor"]["profile"]
+            self._identity_provider = PlatformIdentityProvider(
+                profiles={profile: lambda profile=profile: self._sdk_client(profile)},
+                request_resolver=self._resolve_actor,
+                group_resolver=self._resolve_groups,
+                edit_resolver=None,
+                job_client=self._sdk_client(profile))
+        return self._identity_provider
+
+    def _resolve_groups(self, subject_id, workspace_id):
+        client = self._directory
+        try:
+            user = client.users.get(subject_id)
+            return frozenset(group.display for group in (user.groups or []))
+        except Exception:  # noqa: BLE001 - SCIM user miss -> fall back to SP lookup
+            for sp in client.service_principals.list(
+                    filter=f'applicationId eq "{subject_id}"'):
+                return frozenset(group.display for group in (sp.groups or []))
+        raise PermissionError(f"Unknown subject for group resolution: {subject_id}")
+
+    def _resolve_actor(self, authentication_reference):
+        from backend.services.version_control.contracts import ActorContext
+
+        client = self._directory
+        try:
+            client.users.get(authentication_reference)
+            kind = "human"
+        except Exception:  # noqa: BLE001 - SCIM user miss -> classify as service principal
+            if not list(client.service_principals.list(
+                    filter=f'applicationId eq "{authentication_reference}"')):
+                raise PermissionError(f"Unknown authenticated subject: {authentication_reference}")
+            kind = "service"
+        return ActorContext(authentication_reference, self.target_workspace_id, kind)
+
+    def authenticated_human(self):
+        from backend.services.version_control.contracts import AuthenticatedRequest
+
+        reference = self.config["approval_identities"]["approvers"][0]["id"]
+        return self.identity.actor(AuthenticatedRequest(reference, self.target_workspace_id))
+
+    def authenticated_service(self):
+        from backend.services.version_control.contracts import AuthenticatedRequest
+
+        reference = self.config["roles"]["executor"]["principal_id"]
+        return self.identity.actor(AuthenticatedRequest(reference, self.target_workspace_id))
+
+    # -- production approval orchestration (tests #7/#12 live) -------------
+    def _upload_private_evidence(self, operation_id):
+        """Write the large preflight evidence blob to the approval-owned Volume as
+        the approval role and return (uri, sha256); the fact store verifies the
+        digest on append and re-reads it during authorization."""
+        blob = b"vc-preflight-evidence:" + operation_id.encode()
+        uri = (f"/Volumes/{self.catalog}/{self.control_schema}/vc_approval_evidence/"
+               f"{operation_id}/preflight.bin")
+        profile = self.config["roles"]["approval"]["profile"]
+        script = (
+            "import io, sys\n"
+            "from databricks.sdk import WorkspaceClient\n"
+            "client = WorkspaceClient(profile=sys.argv[1])\n"
+            "client.files.upload(sys.argv[2], io.BytesIO(sys.stdin.buffer.read()), overwrite=True)\n")
+        result = subprocess.run([sys.executable, "-c", script, profile, uri], input=blob,
+                                env=self._live._environment(), capture_output=True, timeout=180, check=False)
+        if result.returncode:
+            raise RuntimeError(f"Private evidence upload failed: {result.stderr.decode()[:200]}")
+        return uri, sha256(blob).hexdigest()
+
+    def approved_production_request(self):
+        """Drive a real production approval to a grantable state over live Delta
+        facts + SCIM identity: enrol nothing new, record the reviewed request with
+        durable preflight evidence, request approval as the requester SP, and cast
+        two distinct human approve votes. Returns (service, request, executor,
+        human) so the gate can assert authorize() succeeds and that revoking a
+        human's approver membership or an evidence/Delta outage blocks it."""
+        from dataclasses import replace
+        from datetime import UTC, datetime, timedelta
+        from types import SimpleNamespace
+        from uuid import NAMESPACE_URL, uuid4, uuid5
+
+        from backend.services.version_control.contracts import (
+            ActorContext,
+            ApprovalInputs,
+            AuthenticatedRequest,
+            BindingRef,
+            ExplicitExecutorSelection,
+            FactKind,
+            FactStatus,
+            Fingerprints,
+            MutationRequest,
+            OperationFact,
+            PatchStage,
+            RequestIdentity,
+            StageEvidence,
+            canonical_json_hash,
+        )
+        from backend.services.version_control.governance.approvals import (
+            ApprovalService,
+            request_digest,
+        )
+        from backend.services.version_control.governance.facts import fact_key
+
+        ws = self.target_workspace_id
+        ident = self.config["approval_identities"]
+        requester_id = ident["requester_principal_id"]
+        executor_role = self.config["roles"]["executor"]
+        now = datetime.now(UTC)
+        digest = "a" * 64
+        operation_id = str(uuid4())
+        binding = BindingRef(str(uuid4()), 1, "audit-approval", ws, "physical-space", "prod")
+        fp = Fingerprints(digest, digest, digest, "vc-c14n/1")
+
+        # Reviewed request bound to immutable inputs (mirrors ApprovalService rules).
+        request = MutationRequest(
+            RequestIdentity(operation_id, str(uuid4()), digest), binding, "edit",
+            str(uuid4()), fp.state_digest, {"instructions": []}, None, operation_id)
+        rendered = canonical_json_hash("vc-rendered-target/1", {
+            "serialized_space": request.serialized_space, "description": request.description})
+        inputs = ApprovalInputs(
+            "VC/1.0", operation_id, "edit", request.source_version_id, digest, fp, None, None,
+            digest, None, "vc-c14n/1", binding, fp, None, digest, digest, digest,
+            {"minimum": 1}, requester_id, {"verify_only": True}, now + timedelta(hours=1))
+        inputs = replace(inputs, rendered_target_digest=rendered)
+        request = replace(request, identity=replace(request.identity,
+                                                     request_digest=request_digest(request)))
+
+        # Durable preflight evidence: inline digest for _bound, plus the large blob
+        # in the approval Volume so the evidence-outage probe has a real reader.
+        evidence_uri, evidence_sha = self._upload_private_evidence(operation_id)
+        provisional = OperationFact(
+            event_id=str(uuid4()), fact_kind=FactKind.OPERATION, operation_id=operation_id,
+            transition_sequence=0, event_key="", binding=binding, request=request.identity,
+            operation_type="edit", requester_id=requester_id,
+            actor=ActorContext(requester_id, ws, "service"), status=FactStatus.PREIMAGE_CAPTURED,
+            evidence=StageEvidence("VC/1.0", PatchStage.CONFIG_PENDING, now, digest, None),
+            recorded_at=now, evidence_uri=evidence_uri, evidence_digest=evidence_sha)
+        key = fact_key(provisional)
+        op_fact = replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key)))
+
+        ledger, store = self._build_ledger()
+        ledger.record_request(request, op_fact)
+        registry = SimpleNamespace(resolve=lambda binding_id: binding)
+        service = ApprovalService(ledger, self.identity, registry, lambda: now,
+                                  target_identity=lambda selection: self.identity,
+                                  writes_enabled=True)
+
+        requester_actor = self.identity.actor(AuthenticatedRequest(requester_id, ws))
+        approval = service.request(inputs, requester_actor)
+        executor = self.identity.executor(ExplicitExecutorSelection(
+            ws, executor_role["host"], executor_role["principal_id"],
+            ident["execution_ref"], executor_role["profile"]))
+        approvers = [self.identity.actor(AuthenticatedRequest(entry["id"], ws))
+                     for entry in ident["approvers"]]
+        for approver in approvers:
+            service.vote(approval.approval_id, "approve", approver)
+
+        self._last_ledger, self._last_store = ledger, store
+        return service, request, executor, approvers[0]
+
+    def revoke_target_approver_membership(self, human):
+        """Context manager that removes `human` from the approver policy groups so
+        the target-side re-check at authorization fails, then restores them."""
+        return self._membership_suspended(human.subject_id)
+
+    @contextmanager
+    def _membership_suspended(self, subject_id):
+        from databricks.sdk.service.iam import (
+            ComplexValue,
+            Patch,
+            PatchOp,
+            PatchSchema,
+        )
+
+        groups = self.config["approval_identities"]["groups"]
+        client = self._directory
+        targets = [groups["approvers"], groups["target-approvers"]]
+        schema = [PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP]
+        for group_id in targets:
+            client.groups.patch(group_id, operations=[Patch(
+                op=PatchOp.REMOVE, path=f'members[value eq "{subject_id}"]')], schemas=schema)
+        self._await_membership(subject_id, present=False)
+        try:
+            yield
+        finally:
+            for group_id in targets:
+                client.groups.patch(group_id, operations=[Patch(
+                    op=PatchOp.ADD, path="members",
+                    value=[ComplexValue(value=subject_id).as_dict()])], schemas=schema)
+            self._await_membership(subject_id, present=True)
+
+    def _await_membership(self, subject_id, *, present, timeout=30):
+        """Block until the directory reflects the membership change, so the gate's
+        authorize() observes the revocation (or restoration) rather than racing a
+        SCIM read replica."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            has = "approvers" in self._resolve_groups(subject_id, self.target_workspace_id)
+            if has == present:
+                return
+            time.sleep(2)
+        raise AssertionError(
+            f"Directory did not reflect approvers membership present={present} for {subject_id}")
+
+    @contextmanager
+    def deny_operation_reads(self):
+        """Simulate a Delta fact-store outage: committed reads raise, so no earlier
+        positive authorization can be reused (FM-OUTAGE)."""
+        original = self._last_ledger._read
+
+        def outage():
+            raise OSError("operation fact store unavailable")
+
+        self._last_ledger._read = outage
+        try:
+            yield
+        finally:
+            self._last_ledger._read = original
+
+    @contextmanager
+    def deny_private_evidence_reads(self):
+        """Simulate a private-evidence Volume outage: the fact store can no longer
+        verify the durable preflight blob, so authorization fails closed."""
+        original = self._last_store.read_evidence
+
+        def outage(_uri):
+            raise OSError("private evidence volume unavailable")
+
+        self._last_store.read_evidence = outage
+        try:
+            yield
+        finally:
+            self._last_store.read_evidence = original
 
     def count_event(self, event_key):
         rows = self._execute("executor",
