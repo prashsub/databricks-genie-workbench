@@ -2,16 +2,15 @@
 
 import json
 import os
-from pathlib import Path
+import re
+import time
 from datetime import timedelta
 from hashlib import sha256
 from io import BytesIO
-import re
-import time
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-
 
 pytestmark = pytest.mark.integration
 
@@ -37,7 +36,9 @@ class TwoWorkspacePromotion:
         self.probe_name = 'm07-permission-probe-' + str(uuid4())
 
     def verify_identities_and_securables(self):
-        from backend.services.version_control.promotion.transport import separate_volumes
+        from backend.services.version_control.promotion.transport import (
+            separate_volumes,
+        )
         for role, client in self.clients.items():
             selected = self.config['roles'][role]
             actual = client.api_client.do('GET', '/api/2.0/preview/scim/v2/Me',
@@ -86,7 +87,7 @@ class TwoWorkspacePromotion:
         namespace = self.config['target_namespace']
         assert re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*\.[A-Za-z_][A-Za-z_0-9]*', namespace)
         response = self.sql(self.clients['source_owner'],
-            f'SHOW GRANTS `{namespace.split(".")[0]}`.`{namespace.split(".")[1]}`.`genie_space_operations`')
+            f'SHOW GRANTS ON TABLE `{namespace.split(".")[0]}`.`{namespace.split(".")[1]}`.`genie_space_operations`')
         source_ids = {self.config['roles']['source']['principal_id'], *self.config.get('source_groups', [])}
         assert not any(row[0] in source_ids and row[1].upper() in {'MODIFY', 'INSERT', 'UPDATE', 'ALL PRIVILEGES'}
                        for row in response), 'Source has target operation-write authority'
@@ -117,7 +118,9 @@ class TwoWorkspacePromotion:
     def promote_and_verify_retry_and_reverse_receipt(self):
         from backend.services.config_fingerprint import Canonicalizer
         from backend.services.version_control import contracts as vc
-        from backend.services.version_control.promotion.mapping import MappingTransformer
+        from backend.services.version_control.promotion.mapping import (
+            MappingTransformer,
+        )
         from backend.services.version_control.promotion.packages import digest, encode
         source = self.clients['source']
         target = self.clients['target']
