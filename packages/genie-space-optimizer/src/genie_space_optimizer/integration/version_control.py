@@ -2,8 +2,10 @@
 
 No backend application imports: the target-local composition owns adapters.
 """
-from typing import Protocol, Any
+from contextlib import contextmanager
 from dataclasses import dataclass
+from threading import RLock
+from typing import Any, Protocol
 
 
 def require_candidate_session_for_job():
@@ -82,6 +84,96 @@ def assert_candidate_write(client: Any, space_id: str) -> None:
     resource = client._session.validate(client._session.resource.run_id)
     if resource.space_id != space_id:
         raise PermissionError("Mutation does not target the isolated candidate resource")
+
+
+class OptimizerIsolationRegistry:
+    """Concrete :class:`IsolationRegistry`.
+
+    Managed-binding detection is delegated to an injected read of the VC
+    managed registry (``managed_lookup``); optimizer ownership of candidate
+    spaces is tracked in-process and only ever set/cleared by the candidate
+    lifecycle. It refuses to claim a space the managed registry reports as a
+    live binding (defense in depth against cloning onto a governed space).
+    """
+
+    def __init__(self, managed_lookup, workspace_resolver):
+        self._managed_lookup = managed_lookup
+        self._workspace_resolver = workspace_resolver
+        self._owners: dict[tuple[str, str], str] = {}
+        self._lock = RLock()
+
+    def resolve_physical(self, workspace_id: str, space_id: str) -> Any:
+        return self._managed_lookup(workspace_id, space_id)
+
+    def optimizer_owner(self, workspace_id: str, space_id: str) -> str | None:
+        with self._lock:
+            return self._owners.get((workspace_id, space_id))
+
+    def workspace_id_for(self, client: Any) -> str:
+        return self._workspace_resolver(client)
+
+    def claim(self, workspace_id: str, space_id: str, run_id: str) -> None:
+        if self.resolve_physical(workspace_id, space_id) is not None:
+            raise PermissionError("Cannot claim a managed binding as a candidate")
+        with self._lock:
+            existing = self._owners.get((workspace_id, space_id))
+            if existing is not None and existing != run_id:
+                raise PermissionError("Candidate is already owned by another optimizer run")
+            self._owners[(workspace_id, space_id)] = run_id
+
+    def release(self, workspace_id: str, space_id: str, run_id: str) -> None:
+        with self._lock:
+            existing = self._owners.get((workspace_id, space_id))
+            if existing is not None and existing != run_id:
+                raise PermissionError("Candidate is not owned by this optimizer run")
+            self._owners.pop((workspace_id, space_id), None)
+
+
+class CandidateSpaceTransport(Protocol):
+    def create_candidate(self, workspace_id: str, source_space_id: str, run_id: str) -> str:
+        """Provision an isolated candidate copy of the managed source; return its id."""
+        ...
+
+    def delete_candidate(self, workspace_id: str, space_id: str) -> None:
+        """Tear down a candidate space; must tolerate best-effort repeated calls."""
+        ...
+
+
+class CandidateSpaceLifecycle:
+    """Create/own/tear-down an optimizer-owned candidate Genie space, fail-closed.
+
+    Writes are disabled by default. The source must be a managed live binding
+    (we only clone a governed space). Ownership is claimed before the session is
+    yielded and always revoked on exit; the candidate is always deleted, and a
+    failed delete still revokes ownership so a leaked id cannot be reused
+    silently.
+    """
+
+    def __init__(self, registry: OptimizerIsolationRegistry,
+                 transport: CandidateSpaceTransport, *, writes_enabled: bool = False):
+        self._registry = registry
+        self._transport = transport
+        self._writes_enabled = writes_enabled
+
+    @contextmanager
+    def session(self, run_id: str, workspace_id: str, source_space_id: str, client: Any):
+        if self._writes_enabled is not True:
+            raise PermissionError("Candidate lifecycle writes are disabled")
+        if self._registry.resolve_physical(workspace_id, source_space_id) is None:
+            raise PermissionError("Source binding is not a managed live space")
+        candidate_id = self._transport.create_candidate(workspace_id, source_space_id, run_id)
+        try:
+            self._registry.claim(workspace_id, candidate_id, run_id)
+        except BaseException:
+            self._transport.delete_candidate(workspace_id, candidate_id)
+            raise
+        binding = EvaluationBinding(workspace_id, candidate_id, run_id)
+        session = CandidateSession(binding, self._registry, client, writes_enabled=True)
+        try:
+            yield session
+        finally:
+            self._registry.release(workspace_id, candidate_id, run_id)
+            self._transport.delete_candidate(workspace_id, candidate_id)
 
 
 class ChampionAdapter(Protocol):
