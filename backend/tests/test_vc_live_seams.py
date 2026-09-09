@@ -159,3 +159,31 @@ def test_incomplete_config_stays_fail_closed():
     broken = {k: v for k, v in _config().items() if k != "catalog"}
     with pytest.raises(PermissionError, match="not integrated"):
         build_vc_runtime("promotion", broken, adapters=FakeAdapters())
+
+
+def test_rows_coerces_statement_api_strings_to_store_native_types():
+    """The REST Statements API returns every cell as a string; `_rows` must hand the
+    durable stores typed fences/booleans/timestamps like the typed connector."""
+    from datetime import datetime
+
+    from backend.services.version_control.platform.live_seams import _rows
+
+    response = {
+        "manifest": {"schema": {"columns": [
+            {"name": "binding_revision", "type_name": "LONG"},
+            {"name": "state", "type_name": "STRING"},
+            {"name": "unresolved", "type_name": "BOOLEAN"},
+            {"name": "updated_at", "type_name": "TIMESTAMP"},
+            {"name": "observed_sequence", "type_name": "INT"},
+        ]}},
+        "result": {"data_array": [
+            ["1", "idle", "false", "2026-09-09 19:30:39.233", None],
+        ]},
+    }
+    (row,) = _rows(response)
+    assert row["binding_revision"] == 1 and isinstance(row["binding_revision"], int)
+    assert row["state"] == "idle"
+    assert row["unresolved"] is False
+    # Naive UTC: `row_from_columns` reattaches tz via `_from_naive_utc`.
+    assert row["updated_at"] == datetime(2026, 9, 9, 19, 30, 39, 233000)  # noqa: DTZ001
+    assert row["observed_sequence"] is None

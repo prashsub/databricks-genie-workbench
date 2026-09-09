@@ -471,8 +471,41 @@ def _statement_parameters(parameters):
     return rendered
 
 
+_INTEGER_TYPES = frozenset({"BYTE", "SHORT", "INT", "INTEGER", "LONG", "BIGINT"})
+_FLOAT_TYPES = frozenset({"FLOAT", "DOUBLE"})
+
+
+def _coerce(type_name: str, value):
+    """Coerce a SQL Statements API string cell into the store's native Python type.
+
+    The REST Statements API returns every cell as a string (thrift is IP-ACL
+    blocked), but the durable stores compare typed values — integer fences
+    (`binding_revision`, `row_version`, `generation`), booleans and `datetime`
+    timestamps. Coercing here from the result manifest's `type_name` makes the REST
+    seam behave like the typed connector the M03 CAS gate validated against; string
+    columns (e.g. SHOW GRANTS) pass through unchanged.
+    """
+    if value is None:
+        return None
+    if type_name in _INTEGER_TYPES:
+        return int(value)
+    if type_name == "BOOLEAN":
+        return value == "true"
+    if type_name in _FLOAT_TYPES:
+        return float(value)
+    if type_name.startswith("DECIMAL"):
+        return float(value)
+    if type_name.startswith("TIMESTAMP"):
+        return datetime.fromisoformat(value.replace(" ", "T", 1))
+    return value
+
+
 def _rows(response) -> list:
     manifest = response.get("manifest", {}) or {}
-    columns = [c["name"] for c in (manifest.get("schema", {}) or {}).get("columns", [])]
+    schema_columns = (manifest.get("schema", {}) or {}).get("columns", [])
+    names = [c["name"] for c in schema_columns]
+    types = [c.get("type_name", "STRING") for c in schema_columns]
     data = (response.get("result", {}) or {}).get("data_array", []) or []
-    return [dict(zip(columns, row, strict=False)) for row in data]
+    return [{name: _coerce(type_name, cell)
+             for name, type_name, cell in zip(names, types, row, strict=False)}
+            for row in data]
