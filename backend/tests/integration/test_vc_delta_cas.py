@@ -26,14 +26,15 @@ send-boundary probe is the mutation trace: this CAS test never PATCHes Genie.
 Production adapter wiring, real Genie transport, and full effective-grant tests
 remain separate deployment gates. No local run proves any real-Delta behavior.
 """
+import json
+import os
+import re
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import fields, replace
-from datetime import datetime, timedelta, timezone
-import json
-import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import re
 from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
@@ -42,10 +43,11 @@ import pytest
 
 from backend.services.version_control import contracts as c
 from backend.services.version_control.coordination import (
-    CoordinationError, CoordinationService,
+    CoordinationError,
+    CoordinationService,
 )
-from backend.services.version_control.coordination.service import OwnershipError
 from backend.services.version_control.coordination.row import CoordinationRow
+from backend.services.version_control.coordination.service import OwnershipError
 
 pytestmark = pytest.mark.integration
 
@@ -56,7 +58,7 @@ def uid():
 
 class Clock:
     def now(self):
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def execute(connection, statement, parameters=None):
@@ -64,6 +66,16 @@ def execute(connection, statement, parameters=None):
     with connection.cursor() as cursor:
         cursor.execute(statement, parameters or {})
         return [row.asDict() for row in cursor.fetchall()] if cursor.description else []
+
+
+def dumps(value):
+    """c.to_wire() yields frozen mappingproxy structures; json can't serialize
+    those directly, so convert any Mapping to a plain dict on the way out."""
+    def default(obj):
+        if isinstance(obj, Mapping):
+            return dict(obj)
+        raise TypeError(f'Not JSON serializable: {type(obj).__name__}')
+    return json.dumps(value, default=default)
 
 
 def row_values(row):
@@ -74,11 +86,11 @@ def row_values(row):
                    if f.name != 'environment'})
     for name in ('checkpoint', 'termination_evidence'):
         value = getattr(row, name)
-        values[f'{name}_json'] = json.dumps(value) if value is not None else None
+        values[f'{name}_json'] = dumps(value) if value is not None else None
     for name in ('observed', 'approved', 'deployed'):
         values[f'{name}_head_version_id'] = getattr(row.heads, name)
     # SQL connector uses naive UTC TIMESTAMPs; never depend on host timezone.
-    return {key: (value.astimezone(timezone.utc).replace(tzinfo=None)
+    return {key: (value.astimezone(UTC).replace(tzinfo=None)
                   if isinstance(value, datetime) else value.value
                   if isinstance(value, (c.CoordinationState, c.PatchStage)) else value)
             for key, value in values.items()}
@@ -113,17 +125,19 @@ class DeltaCoordinationStore:
             values[name] = json.loads(value) if value is not None else None
         for key, value in values.items():
             if isinstance(value, datetime):
-                values[key] = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+                values[key] = value.replace(tzinfo=UTC) if value.tzinfo is None else value
         values['state'] = c.CoordinationState(values['state'])
         if values['mutation_stage'] is not None:
             values['mutation_stage'] = c.PatchStage(values['mutation_stage'])
         return CoordinationRow(binding=binding, heads=heads, **values)
 
     def compare_and_swap(self, binding_id, binding_revision, row_version,
-                         generation, predicate, **changes):
+                         expected_generation, predicate, **changes):
+        # The fence generation is a separate positional; `changes` may carry the
+        # NEW generation, so this parameter must not be named `generation`.
         before = self.read(binding_id)
         if (before is None or (before.binding.binding_revision, before.row_version,
-                              before.generation) != (binding_revision, row_version, generation)
+                              before.generation) != (binding_revision, row_version, expected_generation)
                 or not predicate(before)):
             return None
         after = replace(before, **changes, row_version=row_version + 1,
@@ -131,7 +145,7 @@ class DeltaCoordinationStore:
         values = row_values(after)
         parameters = {f'new_{key}': value for key, value in values.items()}
         parameters.update(id=binding_id, revision=binding_revision, version=row_version,
-                          generation=generation, state=before.state.value,
+                          generation=expected_generation, state=before.state.value,
                           unresolved=before.unresolved, attempt=before.attempt_id)
         assignments = ', '.join(f't.{key} = :new_{key}' for key in values)
         # The Python predicate is checked on this exact version; EVERY runtime
@@ -167,7 +181,7 @@ class DeltaArtifacts:
 
     def put(self, kind, key, value):
         execute(self.connection, f'INSERT INTO {self.table} VALUES (:kind, :key, :payload)',
-                {'kind': kind, 'key': key, 'payload': json.dumps(c.to_wire(value))})
+                {'kind': kind, 'key': key, 'payload': dumps(c.to_wire(value))})
 
     def get(self, kind, key=None):
         clause = '' if key is None else ' AND artifact_key = :key'
@@ -260,9 +274,13 @@ def delta(request):
             connection = stack.enter_context(sql.connect(
                 server_hostname=host, http_path=http_path,
                 credentials_provider=lambda: config.authenticate,
-                session_configuration={'spark.sql.session.timeZone': 'UTC'},
                 _retry_stop_after_attempts_count=1,
             ))
+            # Serverless DBSQL rejects the spark.sql.session.timeZone session config
+            # (CONFIG_NOT_AVAILABLE); SET TIME ZONE is accepted and pins the same UTC
+            # guarantee the naive-TIMESTAMP handling depends on. Assert it took.
+            execute(connection, "SET TIME ZONE 'UTC'")
+            assert execute(connection, 'SELECT current_timezone() AS tz')[0]['tz'] == 'UTC'
             return connection
 
         owner = connect(profiles[0])
@@ -278,10 +296,18 @@ def delta(request):
                                   for kind in ('coordination', 'artifacts'))
         ddl = (Path(__file__).resolve().parents[2] / 'version_control_ddl' / '05-coordination.sql').read_text()
         ddl = ddl.replace('${catalog}.${control_schema}.genie_ops_coordination', table)
-        # Register cleanup immediately after each successful CREATE. Runtime clients
-        # never INSERT coordination, ALTER isolation, or perform destructive teardown.
-        execute(owner, ddl)
+        # The owned DDL is CREATE + idempotent ALTER ADD CONSTRAINT (inline CHECK is
+        # unsupported); the SQL connector executes one statement per call, so split on
+        # ';' and drop full-line comments. Register cleanup immediately after the CREATE
+        # so a later ALTER failure still tears the table down. Runtime clients never
+        # INSERT coordination, ALTER isolation, or perform destructive teardown.
+        uncommented = '\n'.join(line for line in ddl.splitlines()
+                                if not line.strip().startswith('--'))
+        statements = [statement.strip() for statement in uncommented.split(';') if statement.strip()]
+        execute(owner, statements[0])
         stack.callback(execute, owner, f'DROP TABLE {table}')
+        for statement in statements[1:]:
+            execute(owner, statement)
         execute(owner, f'''CREATE TABLE {artifacts_table}
             (kind STRING, artifact_key STRING, payload STRING) USING DELTA
             TBLPROPERTIES ('delta.appendOnly'='true')''')
@@ -293,7 +319,10 @@ def delta(request):
         for client in [owner, *clients]:
             detail = execute(client, f'DESCRIBE DETAIL {table}')
             assert len(detail) == 1 and detail[0]['format'].lower() == 'delta'
-            assert detail[0]['properties'].get('delta.isolationLevel') == 'Serializable'
+            # The connector returns the MAP<STRING,STRING> properties column as a
+            # list of (key, value) tuples, not a dict.
+            properties = dict(detail[0]['properties'])
+            assert properties.get('delta.isolationLevel') == 'Serializable'
 
         binding = c.BindingRef(uid(), 1, f'cas-{suffix}', workspace_id,
                                f'disposable-cas-{suffix}', 'test')
