@@ -32,6 +32,58 @@ from backend.services.version_control.platform.capabilities import (
 # Runtime flags the promotion write path checks (all others default off).
 _FLAGS = {"vc_writes_enabled": True, "vc_promotion_enabled": True, "vc_history_enabled": True}
 
+# In-Job OAuth M2M secret env-var names per role (governed credential storage).
+# The vc-promotion Job task populates these from a target-workspace secret scope
+# (``{{secrets/<scope>/<key>}}``); ``PlatformAdapters.client`` reads them to build
+# each role's client. The operator/local path uses named profiles instead and
+# never sets these.
+_ROLE_SECRET_ENV = {
+    "executor": ("VC_EXECUTOR_CLIENT_ID", "VC_EXECUTOR_CLIENT_SECRET"),
+    "source": ("VC_SOURCE_CLIENT_ID", "VC_SOURCE_CLIENT_SECRET"),
+    "approval": ("VC_APPROVAL_CLIENT_ID", "VC_APPROVAL_CLIENT_SECRET"),
+    "directory": ("VC_DIRECTORY_CLIENT_ID", "VC_DIRECTORY_CLIENT_SECRET"),
+}
+
+
+def _m2m_auth(role: str, host: str) -> dict:
+    client_id_env, client_secret_env = _ROLE_SECRET_ENV[role]
+    return {"mode": "m2m", "host": host,
+            "client_id_env": client_id_env, "client_secret_env": client_secret_env}
+
+
+def to_job_config(governed: dict, *, directory: dict) -> dict:
+    """Augment an ``author()`` config with in-Job OAuth M2M auth (governed
+    credential storage) so ``PlatformAdapters.client`` never depends on a local
+    profile inside the Job.
+
+    Every role client is built from Job-injected M2M secrets, including the
+    executor: the identity provider routes ``profile is None`` selections to the
+    OBO/PAT (human) branch, so the target-local *service* executor must present a
+    verified OAuth M2M identity, not ambient auth. The ``profile`` field is kept
+    verbatim as the identity-provider routing key (``_profiles``); the auth-first
+    ``client()`` uses the ``auth`` block and ignores it for construction.
+
+    A dedicated least-privileged ``directory`` role (SCIM group/actor resolution
+    only) is added and pinned via ``directory_role`` so approver-group checks in
+    ``ApprovalService.authorize`` never run as the executor.
+    """
+    job = json.loads(json.dumps(governed))  # deep copy; never mutate the input
+    for role in ("executor", "source", "approval"):
+        spec = job["roles"][role]
+        spec["auth"] = _m2m_auth(role, spec["host"])
+    job["roles"]["directory"] = {
+        "host": directory["host"],
+        "workspace_id": directory["workspace_id"],
+        "principal_id": directory["principal_id"],
+        # A warehouse is required by PlatformAdapters.sql for any role it might run
+        # SQL as; the directory role only resolves SCIM, but pin the target warehouse
+        # for uniformity/fail-closed clarity.
+        "warehouse_id": job["warehouse_id"],
+        "auth": _m2m_auth("directory", directory["host"]),
+    }
+    job["directory_role"] = "directory"
+    return job
+
 
 def _source_binding(cfg: dict) -> dict:
     """Stable logical identity for the immutable source version in the ledger.

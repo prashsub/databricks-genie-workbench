@@ -16,10 +16,11 @@ from backend.services.version_control.platform.capabilities import (
 )
 from backend.services.version_control.promotion import PromotionService
 from backend.tests.test_vc_live_seams import FakeAdapters
-from scripts.version_control.author_governed_config import author
+from scripts.version_control.author_governed_config import author, to_job_config
 
 TARGET_HOST = "https://target.example.com"
 SOURCE_HOST = "https://source.example.com"
+_DIRECTORY = {"host": TARGET_HOST, "workspace_id": "111", "principal_id": "directory-sp"}
 
 
 def _two_workspace_config():
@@ -92,6 +93,44 @@ def test_authored_config_composes_the_real_promotion_graph():
 def test_author_requires_promotion_job_id():
     with pytest.raises(ValueError, match="promotion_job_id required"):
         author(_two_workspace_config())
+
+
+def test_to_job_config_adds_m2m_auth_and_dedicated_directory_role():
+    """The in-Job config gives every role an m2m auth block (governed credential
+    storage), keeps the profile as the identity routing key, and adds a dedicated
+    directory role pinned via directory_role. The operator config is not mutated."""
+    governed = author(_two_workspace_config(), promotion_job_id=987)
+    job = to_job_config(governed, directory=_DIRECTORY)
+
+    # Every runtime role now authenticates via injected M2M secrets, pinned to its
+    # own host; the profile survives as the identity-provider routing key.
+    for role in ("executor", "source", "approval"):
+        auth = job["roles"][role]["auth"]
+        assert auth["mode"] == "m2m"
+        assert auth["host"] == governed["roles"][role]["host"]
+        assert auth["client_id_env"] and auth["client_secret_env"]
+        assert job["roles"][role]["profile"] == governed["roles"][role]["profile"]
+    assert job["roles"]["executor"]["auth"]["client_id_env"] == "VC_EXECUTOR_CLIENT_ID"
+    assert job["roles"]["source"]["auth"]["client_secret_env"] == "VC_SOURCE_CLIENT_SECRET"
+
+    # Dedicated least-privileged directory reader, pinned for group resolution.
+    directory = job["roles"]["directory"]
+    assert directory["principal_id"] == "directory-sp"
+    assert directory["auth"]["client_id_env"] == "VC_DIRECTORY_CLIENT_ID"
+    assert "profile" not in directory  # never routed through executor()
+    assert job["directory_role"] == "directory"
+
+    # The operator config is untouched (deep copy).
+    assert "auth" not in governed["roles"]["executor"]
+    assert "directory" not in governed["roles"]
+
+
+def test_job_config_composes_the_real_promotion_graph():
+    """The augmented in-Job config still composes end-to-end through the real graph."""
+    governed = author(_two_workspace_config(), promotion_job_id=987)
+    job = to_job_config(governed, directory=_DIRECTORY)
+    runtime = build_vc_runtime("promotion", job, adapters=FakeAdapters())
+    assert "promotion" in runtime._governed._handlers
 
 
 def test_author_reuses_existing_source_binding():

@@ -307,17 +307,44 @@ class PlatformAdapters:
 
             selection = self.config["roles"][role]
             profile = selection.get("profile")
-            saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("DATABRICKS_")}
-            try:
-                kwargs: dict[str, Any] = {}
-                if profile:
-                    kwargs["profile"] = profile
+            auth = selection.get("auth")
+            # `auth` (in-Job governed credential storage) is authoritative when present:
+            # in-Job configs also carry `profile` purely as the identity-provider routing
+            # key (`_profiles`), so it must NOT be interpreted as a local profile here.
+            if auth and auth.get("mode") == "m2m":
+                # OAuth M2M from Job-injected secret env vars, pinned to the role's
+                # explicit host. Ambient DATABRICKS_* is isolated so the run_as identity
+                # cannot conflict with these explicit credentials.
+                kwargs: dict[str, Any] = {"host": auth.get("host") or selection["host"],
+                                          "client_id": os.environ[auth["client_id_env"]],
+                                          "client_secret": os.environ[auth["client_secret_env"]]}
+                self._clients[role] = self._isolated_client(WorkspaceClient, kwargs)
+            elif profile:
+                # Local path (offline/operator): a named profile is authoritative, so
+                # isolate ambient DATABRICKS_* during construction to avoid unified-auth
+                # conflicts, then restore it.
+                kwargs = {"profile": profile}
                 if self.config.get("config_file"):
                     kwargs["config_file"] = self.config["config_file"]
-                self._clients[role] = WorkspaceClient(**kwargs)
-            finally:
-                os.environ.update(saved)
+                self._clients[role] = self._isolated_client(WorkspaceClient, kwargs)
+            else:
+                # Ambient run_as identity. DATABRICKS_* is exactly how the platform
+                # injects that credential, so it must NOT be popped.
+                self._clients[role] = WorkspaceClient()
         return self._clients[role]
+
+    @staticmethod
+    def _isolated_client(factory, kwargs):
+        """Build a WorkspaceClient with explicit credentials (profile or M2M) while
+        temporarily removing every DATABRICKS_* env var, so ambient env cannot shadow
+        or conflict with the explicit auth. Restores the env unconditionally."""
+        import os
+
+        saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("DATABRICKS_")}
+        try:
+            return factory(**kwargs)
+        finally:
+            os.environ.update(saved)
 
     # -- SQL (REST Statements API; thrift is IP-ACL blocked) --------------
     def sql(self, role: str) -> Callable[..., list]:
