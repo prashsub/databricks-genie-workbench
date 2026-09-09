@@ -171,3 +171,33 @@ def test_transport_disables_hidden_sdk_retries_for_post_and_both_patches(monkeyp
     assert len(sends) == 1, "Exactly one HTTP send, with no SDK retry or redirect replay"
     assert sends[0].method == ("POST" if method == "create" else "PATCH")
     coordination.assert_owner.assert_called_once_with(claim)
+
+
+def test_transport_get_pins_by_value_not_object_identity():
+    """Callers re-derive a freshly *verified* executor per operation (a new object
+    for the same principal), so the GET pin must accept value-equal executors -- the
+    promotion observer path depends on it -- while still rejecting a different
+    principal/workspace/execution_ref. The credential used is always self.executor."""
+    from dataclasses import replace
+    from unittest.mock import Mock
+
+    from backend.services.genie_client import GenieTransport
+    from backend.services.version_control import contracts as vc
+    from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
+
+    binding, executor = binding_fixture(), executor_fixture()
+    registry = Mock(spec=vc.Registry)
+    registry.resolve.return_value = binding
+    flags = Mock()
+    flags.enabled.return_value = True
+    transport = GenieTransport(executor=executor, authenticate=lambda ctx: {"Authorization": "x"},
+                               coordination=Mock(spec=vc.Coordination), registry=registry, flags=flags)
+    transport._request = lambda *a, **k: {"serialized_space": {"x": 1}}
+    twin = replace(executor)  # value-equal, new object (fresh live verification)
+    assert twin is not executor and twin == executor
+    assert transport.get(binding, twin) == {"serialized_space": {"x": 1}}
+    for bad in (replace(executor, principal_id="intruder"),
+                replace(executor, workspace_id="999"),
+                replace(executor, execution_ref="job/999")):
+        with pytest.raises(PermissionError, match="pinned"):
+            transport.get(binding, bad)

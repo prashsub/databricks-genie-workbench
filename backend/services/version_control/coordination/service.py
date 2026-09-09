@@ -83,6 +83,21 @@ class CoordinationService:
         except Exception as exc:
             raise AuthorityUnavailable('Durable authority unavailable or ambiguous') from exc
 
+    @staticmethod
+    def _binding_eq(observed, current):
+        """Coordination binding equality that treats `space_id` as registry-authoritative.
+
+        A space enrolled provisionally (space_id=None) and later BOUND fills in its
+        physical `space_id` at the SAME `binding_revision` (`bind_created` bumps no
+        revision). The coordination row and any versions/grants minted before the bind
+        therefore freeze space_id=None while the registry -- the sole authority, checked
+        by `_current` -- reports the bound space_id. Every other identity field
+        (binding_id/revision/space_key/workspace_id/environment) still pins the binding;
+        only space_id is normalized away so a bound binding matches its own
+        provisionally-initialized row/lineage.
+        """
+        return replace(observed, space_id=current.space_id) == current
+
     def _current(self, binding):
         if self._io(self.resolve_binding, binding.binding_id) != binding:
             raise OwnershipError('Not the unique current binding/revision')
@@ -90,9 +105,15 @@ class CoordinationService:
     def _row(self, binding):
         self._current(binding)
         row = self._io(self.store.read, binding.binding_id)
-        if row is None or row.binding != binding:
+        if row is None or not self._binding_eq(row.binding, binding):
             raise OwnershipError('Missing ownership row or revision mismatch')
-        return row
+        # `binding` is the registry-current binding (`_current` just proved it). Heal the
+        # row's frozen enroll-time space_id to it, so every downstream consumer -- the
+        # `_cas` post-verify (`_row(row.binding)`), observe/reserve acquisition, head
+        # lineage -- operates on the BOUND identity rather than the provisional one. The
+        # store's space_id column stays as enrolled (space_id is registry-authoritative,
+        # never coordination-owned); `_row` re-heals on each read.
+        return row if row.binding == binding else replace(row, binding=binding)
 
     def initialize(self, binding: c.BindingRef, enrollment: c.EnrollmentProof) -> None:
         # The callback verifies a held serialized enrollment authority, including
@@ -245,7 +266,7 @@ class CoordinationService:
         if (reservation.request != self._request(row)
                 or reservation.executor.principal_id != row.holder
                 or reservation.executor.execution_ref != row.executor_ref
-                or authorization.binding != row.binding
+                or not self._binding_eq(authorization.binding, row.binding)
                 or authorization.request != reservation.request
                 or authorization.expires_at <= self.clock.now()
                 or bool(authorization.approval_id) != bool(authorization.approval_digest)
@@ -464,7 +485,7 @@ class CoordinationService:
         if evidence.fence.binding_id != binding.binding_id:
             raise OwnershipError('Recovery fence belongs to another binding')
         row = self._owned(evidence.fence, allow_quarantine=True)
-        if row.binding != binding or row.state != c.CoordinationState.QUARANTINED:
+        if not self._binding_eq(row.binding, binding) or row.state != c.CoordinationState.QUARANTINED:
             raise OwnershipError('Only the quarantined exact attempt can be recovered')
         trusted = self._io(self.termination.for_attempt, row.executor_ref, row.attempt_id)
         if (trusted is None or trusted != evidence.termination
@@ -603,6 +624,22 @@ class CoordinationService:
             observed_sequence=row.observed_sequence + 1)
         return c.ObservationLease(self._fence(row), row.observed_sequence, row.lease_expires_at)
 
+    def release_observation(self, fence: c.FenceToken) -> None:
+        """Finalize an OBSERVING lease with no head change (back to IDLE).
+
+        The unchanged-capture path (M04 Observer) takes an observation lease, finds the
+        live target still equal to the committed observed head, and appends no version --
+        so there is no head to advance. `advance_heads` deliberately rejects an empty
+        update (BLOCK-3: an all-None update must never silently consume a lease), so the
+        no-op observation is released here instead, preserving heads/observed sequence
+        exactly like `advance_heads`'s observing-lease finalization. Only the lease owner
+        holding an OBSERVING row may release; anything else fails closed.
+        """
+        row = self._owned(fence)
+        if row.state != c.CoordinationState.OBSERVING:
+            raise OwnershipError('Only an active observation lease can be released')
+        self._release(row)
+
     def _advances(self, binding, current, candidate):
         """True iff candidate is current, or a descendant of current, by committed lineage."""
         if current is None:
@@ -613,7 +650,7 @@ class CoordinationService:
                 return True
             seen.add(node)
             version = self._io(self.ledger.get_version, binding, node)
-            if version is None or version.context.binding != binding:
+            if version is None or not self._binding_eq(version.context.binding, binding):
                 raise CoordinationError('Head lineage is not committed to this binding')
             node = version.context.parent_version_id
         return False
@@ -623,7 +660,7 @@ class CoordinationService:
         version = self._io(self.ledger.get_version, row.binding, version_id)
         if version is None or version.version_id != version_id:
             raise CoordinationError(f'{name} head does not resolve to a committed version')
-        if version.context.binding != row.binding:
+        if not self._binding_eq(version.context.binding, row.binding):
             raise CoordinationError(f'{name} head belongs to another binding or revision')
         ref = c.ObservationRef(version.version_id, row.binding.binding_id,
                                row.binding.binding_revision,
@@ -660,7 +697,7 @@ class CoordinationService:
             ref = c.ObservationRef(version.version_id, row.binding.binding_id,
                 row.binding.binding_revision, version.snapshot.state_digest,
                 version.snapshot.response_envelope_digest)
-            if (version.version_id != update.observed or context.binding != row.binding
+            if (version.version_id != update.observed or not self._binding_eq(context.binding, row.binding)
                     or context.attempt_id != row.attempt_id or context.generation != row.generation
                     or context.parent_version_id != row.heads.observed
                     or not self._io(self.ledger.verify_committed, ref)):

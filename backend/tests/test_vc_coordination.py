@@ -357,6 +357,50 @@ def test_empty_head_update_rejected_and_lease_retained(h):
     assert row.state == c.CoordinationState.OBSERVING and row.unresolved
 
 
+def test_release_observation_finalizes_unchanged_lease_to_idle(h):
+    """The M04 unchanged-capture path appends no version, so it finalizes its observation
+    lease via release_observation rather than advance_heads (which rejects the all-None
+    update). The row returns to IDLE with heads/observed_sequence preserved; only the
+    OBSERVING lease owner may release, and a stale fence fails closed."""
+    enroll(h)
+    lease = h.service.observe_exclusively(h.binding, h.executor)
+    before = h.store.read(h.binding.binding_id)
+    h.service.release_observation(lease.fence)
+    row = h.store.read(h.binding.binding_id)
+    assert row.state == c.CoordinationState.IDLE and not row.unresolved
+    assert row.holder is None and row.attempt_id is None
+    assert row.heads == before.heads and row.observed_sequence == before.observed_sequence
+    with pytest.raises(OwnershipError):  # no active lease left to release
+        h.service.release_observation(lease.fence)
+
+
+def test_bound_binding_matches_its_provisionally_enrolled_row(h):
+    """A space enrolled provisionally (space_id=None) and later BOUND fills its space_id at
+    the SAME binding_revision (bind_created bumps no revision), so the coordination row
+    freezes space_id=None. `_binding_eq` treats space_id as registry-authoritative (already
+    pinned by `_current`), so post-bind ownership ops -- observe_exclusively/reserve --
+    match the provisional row instead of failing OwnershipError. A genuine revision
+    mismatch still fails closed."""
+    provisional = replace(h.binding, space_id=None)
+    h.proof = replace(h.proof, binding_id=provisional.binding_id, binding_revision=1)
+    h.resolve_binding.return_value = provisional
+    h.service.initialize(provisional, h.proof)
+    assert h.store.read(provisional.binding_id).binding.space_id is None
+    # Registry now BOUND at the same revision; the coordination row still says space_id=None.
+    bound = h.binding  # space_id set
+    h.resolve_binding.return_value = bound
+    lease = h.service.observe_exclusively(bound, h.executor)  # OwnershipError before the fix
+    assert lease.fence.binding_id == bound.binding_id
+    h.service.release_observation(lease.fence)
+    reservation = h.service.reserve(bound, h.request, h.executor)
+    assert reservation.fence.binding_id == bound.binding_id
+    # A real binding_revision mismatch is still rejected.
+    stale = replace(bound, binding_revision=2)
+    h.resolve_binding.return_value = stale
+    with pytest.raises(OwnershipError):
+        h.service.reserve(stale, h.request, h.executor)
+
+
 def test_admission_claim_can_advance_heads_positive_control(h):
     from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
     durable_facts(h)

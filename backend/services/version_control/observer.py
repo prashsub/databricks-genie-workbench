@@ -56,7 +56,7 @@ class Observer:
         if status.heads.observed is not None:
             previous = self.ledger.get_version(binding, status.heads.observed)
             if self.canonicalizer.compare(previous.snapshot, snapshot) == vc.Comparison.EQUAL:
-                self.coordination.advance_heads(lease.fence, vc.HeadUpdate(None, None, None, None))
+                self.coordination.release_observation(lease.fence)
                 # Unchanged: the live target still equals the committed observed head, so no
                 # new version is appended. The observed head *is* the current base, so return
                 # it as `captured_version` (drift stays exactly as the status reader reported)

@@ -31,6 +31,19 @@ def test_release_surface_binds_real_commands_over_the_live_graph():
     assert surface.promotion.approvals is surface.approvals
 
 
+def test_observer_drives_the_coordination_service_not_the_store():
+    """The promotion Observer takes leases + advances heads via observe_exclusively/
+    advance_heads, which live on the CoordinationService, not the DeltaCoordinationStore.
+    Wiring the store here made the live base observation fail closed; pin the service."""
+    from backend.services.version_control.coordination.service import CoordinationService
+
+    surface = build_release_surface(_config(), adapters=FakeAdapters())
+    observer = surface.promotion.observer
+    assert isinstance(observer.coordination, CoordinationService)
+    assert callable(observer.coordination.observe_exclusively)
+    assert callable(observer.coordination.advance_heads)
+
+
 def test_approve_record_is_approved_with_one_vote_per_approver():
     import backend.services.version_control.contracts as vc
 

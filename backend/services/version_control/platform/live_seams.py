@@ -139,7 +139,7 @@ def build_governed_seams(config: dict, *, adapters: Any = None):
         state["coordination_store"] = store
         termination = PlatformTerminationEvidenceProvider(
             adapters.attempt_inventory, adapters.job_reader, adapters.worker_supervisor_reader)
-        return CoordinationService(
+        service = CoordinationService(
             store=store, facts=facts, ledger=ledger, clock=clock,
             resolve_binding=policies.resolve_binding(registry),
             verify_enrollment=policies.verify_enrollment(registry),
@@ -153,6 +153,11 @@ def build_governed_seams(config: dict, *, adapters: Any = None):
             authorize_human_recovery=policies.authorize_human_recovery,
             authorize_heads=policies.authorize_heads,
             validate_stage_evidence=policies.validate_stage_evidence)
+        # The Observer (built later in the promotion graph) drives leases/head
+        # advancement through the *service* (observe_exclusively/advance_heads live
+        # here, not on the store), so stash the shared instance for it.
+        state["coordination_service"] = service
+        return service
 
     def approvals_factory(cfg, *, facts, identity, registry):
         approvals = ApprovalService(facts, identity, registry, clock.now,
@@ -190,7 +195,7 @@ def build_governed_seams(config: dict, *, adapters: Any = None):
         native = NativeTransport(adapters.topology_proof, cfg["source_workspace_id"],
                                  cfg["workspace_id"])
         observer = Observer(
-            coordination=state["coordination_store"], ledger=ledger, canonicalizer=canonicalizer,
+            coordination=state["coordination_service"], ledger=ledger, canonicalizer=canonicalizer,
             transport=transport, identity=identity,
             reader_selection=_selection(cfg["target_selection"]),
             status_reader=_clean_status_reader(state["coordination_store"], registry))

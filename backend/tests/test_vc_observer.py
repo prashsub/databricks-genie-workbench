@@ -28,6 +28,7 @@ def observer_rig(rig):
         rig.fence, 1, datetime.now(timezone.utc) + timedelta(minutes=1))
     rig.coordination.advance_heads.side_effect = lambda fence, update: rig.trace.append("advance") or vc.Heads(
         update.observed, status.heads.approved, status.heads.deployed)
+    rig.coordination.release_observation.side_effect = lambda fence: rig.trace.append("release")
     observer = Observer(coordination=rig.coordination, ledger=rig.ledger, canonicalizer=rig.canonicalizer,
         transport=rig.transport, identity=identity, reader_selection=selection,
         status_reader=lambda binding, actor: status)
@@ -104,7 +105,9 @@ def test_unchanged_capture_returns_observed_head_as_base_preserving_drift(observ
     assert second.captured_version.version_id == head
     assert second.status.drift == vc.DriftState.CLEAN
     assert not second.busy and not second.status.stale
-    assert "advance" in rig.trace  # lease released via no-op head advance
+    # No head to advance on an unchanged target: the lease is finalized via
+    # release_observation (advance_heads rejects an all-None update), not advance.
+    assert "release" in rig.trace and "advance" not in rig.trace
     rig.ledger.append_observation.assert_called_once()  # no second append on unchanged
 
 

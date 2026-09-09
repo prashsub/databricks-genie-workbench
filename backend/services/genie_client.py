@@ -44,7 +44,14 @@ class GenieTransport:
         self.host = executor.host.rstrip("/")
 
     def get(self, binding, executor):
-        if executor is not self.executor:
+        # Value-equality (not object identity): every caller re-derives a freshly
+        # *verified* executor per operation (identity.executor runs a live SCIM Me
+        # check each time), so the same verified principal is a new object each call.
+        # The transport always authenticates as `self.executor` (its own pinned,
+        # verified credential) in `_request`, so requiring the exact instance would
+        # make the promotion observer path impossible while adding no security --
+        # a value match on (workspace/host/principal/execution_ref) is the real pin.
+        if executor != self.executor:
             raise PermissionError("Transport is pinned to its verified executor")
         self._binding(binding)
         response = self._request("GET", self._path(binding), query={"include_serialized_space": "true"})
