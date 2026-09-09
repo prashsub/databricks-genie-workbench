@@ -281,6 +281,10 @@ def repeatable_sandbox_provision(root, selection, runner):
     preflight_deployment(root)
     if runner.verify_selection(selection) is not True:
         raise PermissionError("Live provisioning identity/host/workspace not verified")
+    # `bundle validate --strict` rejects the gitignored `.build` sync globs when
+    # the wheel output is absent, so build wheels first (mirrors a real deploy
+    # pipeline, which builds artifacts before validate/deploy).
+    runner.build_artifacts(root)
     profile_args = ["--profile", selection["profile"]]
     variables = [f"--var={key}={value}" for key, value in sorted(selection.get("variables", {}).items())]
     root_args = ["--target", selection["target"], *profile_args, *variables]

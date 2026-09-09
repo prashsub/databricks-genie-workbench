@@ -73,6 +73,32 @@ print(json.dumps({'host': client.config.host.rstrip('/'), 'workspace_id': str(id
                                 capture_output=True, text=True, timeout=1800, check=False)
         assert result.returncode == 0, "Live DAB validation/deploy/run failed; not a passing deployment gate"
 
+    def build_artifacts(self, root):
+        """Build wheels into the gitignored `.build` dirs before validate/deploy.
+
+        `bundle validate --strict` treats an unmatched `.build` sync glob as a
+        warning (fatal in strict mode), so populate it first, exactly as a real
+        deploy pipeline does. Commands mirror the artifact `build` hooks in
+        databricks.yml, resources/version-control/platform.jobs.yml, and the
+        standalone GSO package bundle (packages/genie-space-optimizer)."""
+        root = Path(root)
+        builds = (
+            (root,
+             ("rm -f .build/genie_space_optimizer-*.whl && "
+              "cd packages/genie-space-optimizer && uv build --wheel --out-dir ../../.build && "
+              "cd ../.. && cp .build/genie_space_optimizer-*.whl "
+              ".build/genie_space_optimizer-0.0.0-py3-none-any.whl")),
+            (root, "uv build --wheel --out-dir .build"),
+            (root / "packages/genie-space-optimizer",
+             ("rm -f .build/genie_space_optimizer-*.whl && uv build --wheel --out-dir .build && "
+              "cp .build/genie_space_optimizer-*.whl "
+              ".build/genie_space_optimizer-0.0.0-py3-none-any.whl")),
+        )
+        for cwd, script in builds:
+            result = subprocess.run(["sh", "-c", script], cwd=cwd, env=self._environment(),
+                                    capture_output=True, text=True, timeout=1800, check=False)
+            assert result.returncode == 0, f"Artifact build failed ({cwd}): {result.stderr}"
+
     def content_fingerprint(self):
         spaces = self.config["governed_spaces"]
         assert spaces, "Explicit governed-space inventory required"
@@ -83,13 +109,30 @@ print(json.dumps({'host': client.config.host.rstrip('/'), 'workspace_id': str(id
             contents[space_id] = {key: space.get(key) for key in ("serialized_space", "description", "title")}
         return sha256(json.dumps(contents, sort_keys=True).encode()).hexdigest()
 
+    @staticmethod
+    def _durable_table_properties(properties):
+        """Keep only the properties provisioning owns as the durable contract.
+
+        The UC table `properties` map also carries per-commit and statistics
+        metadata (delta.lastCommitTimestamp, delta.lastUpdateVersion, row-tracking
+        column UUIDs, spark.sql.statistics.*, the redundant tableId). Those change
+        on every commit — including the idempotent ALTER DROP/ADD CONSTRAINT the
+        provisioner re-issues — so a repeatable-provisioning gate must compare the
+        end-state (appendOnly, CHECK constraints, protocol version, features), not
+        the commit history."""
+        volatile_prefixes = ("spark.sql.statistics.", "delta.rowTracking.materialized")
+        volatile_keys = {"delta.lastCommitTimestamp", "delta.lastUpdateVersion", "io.unitycatalog.tableId"}
+        return {key: value for key, value in (properties or {}).items()
+                if key not in volatile_keys and not key.startswith(volatile_prefixes)}
+
     def provisioning_fingerprint(self):
         from backend.services.version_control.platform.provisioning import OWNER_SPECS
         resources = {}
         for owner, kind, name in OWNER_SPECS:
             if kind == "table":
                 resource = self.table(name)
-                resources[name] = {key: resource.get(key) for key in ("table_id", "owner", "columns", "properties")}
+                resources[name] = {key: resource.get(key) for key in ("table_id", "owner", "columns")}
+                resources[name]["properties"] = self._durable_table_properties(resource.get("properties"))
             else:
                 resource = self.api("provisioner", "get", f"/api/2.1/unity-catalog/volumes/{self.config['namespace']}.{name}")
                 resources[name] = {key: resource.get(key) for key in ("volume_id", "owner", "full_name", "volume_type")}
