@@ -15,11 +15,15 @@ from backend.services.version_control import platform
 
 
 @pytest.mark.integration
-def test_runtime_principal_append_only_and_cannot_alter_fact_tables(live_platform):
-    # UC has no INSERT/UPDATE privilege: the runtime holds SELECT+MODIFY, and the
-    # append-only guarantee comes from delta.appendOnly + non-ownership. So INSERT
-    # succeeds, UPDATE/DELETE are rejected by append-only (not permission), and
-    # ALTER/DROP/REPLACE are denied because the runtime is not the owner.
+def test_runtime_fact_writes_are_append_guarded_and_tamper_evident(live_platform):
+    # PLATFORM REALITY (proved live): UC has no INSERT-only privilege and MODIFY
+    # also confers ALTER/CREATE OR REPLACE, so a fact writer can technically flip
+    # delta.appendOnly and rewrite history — no grant configuration makes a UC
+    # table immutable to its own writer. The reframed guarantee is therefore:
+    #   (1) delta.appendOnly rejects accidental UPDATE/DELETE while set,
+    #   (2) destructive DROP still requires ownership (MANAGE), and
+    #   (3) every commit is durably attributed in Delta history, so tampering is
+    #       detectable (the flip itself is covered by the tamper-evidence test).
     for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
         table = live_platform.table(name)
         assert table["properties"]["delta.appendOnly"] == "true"
@@ -27,8 +31,32 @@ def test_runtime_principal_append_only_and_cannot_alter_fact_tables(live_platfor
         live_platform.assert_sql_succeeds("runtime", f"{name}.insert")
         for action in ("update", "delete"):
             live_platform.assert_sql_appendonly_rejected("runtime", f"{name}.{action}")
-        for action in ("alter", "drop", "replace"):
-            live_platform.assert_sql_denied("runtime", f"{name}.{action}")
+        live_platform.assert_sql_denied("runtime", f"{name}.drop")
+        latest = live_platform.describe_history(name, limit=1)[0]
+        assert latest["operation"] in {"WRITE", "MERGE", "COPY INTO"}
+        assert latest["userName"] == live_platform.principal("runtime")
+
+
+@pytest.mark.integration
+def test_fact_table_tampering_is_detectable_in_delta_history(live_platform):
+    # A SELECT+MODIFY holder CAN flip delta.appendOnly (UC platform reality). The
+    # guarantee is that the mutation is durably recorded and attributed, not that
+    # it is prevented — run on a disposable owner-created table so the real fact
+    # tables are never mutated.
+    name = live_platform.provision_scratch_appendonly_table("runtime")
+    fqn = f"{live_platform.config['namespace']}.{name}"
+    try:
+        flip = live_platform.exec_sql(
+            "runtime", f"ALTER TABLE {fqn} SET TBLPROPERTIES ('delta.appendOnly' = 'false')")
+        assert flip["status"]["state"] == "SUCCEEDED"  # documents the MODIFY reality
+        tamper = [row for row in live_platform.describe_history(name, limit=5)
+                  if row["operation"] == "SET TBLPROPERTIES"]
+        assert tamper, "appendOnly flip must be recorded in Delta history"
+        assert tamper[0]["userName"] == live_platform.principal("runtime")
+        drop = live_platform.exec_sql("runtime", f"DROP TABLE {fqn}")
+        assert drop["status"]["state"] == "FAILED"  # teardown remains owner-only
+    finally:
+        live_platform.drop_owner_table(name)
 
 
 @pytest.mark.integration
@@ -52,14 +80,16 @@ def test_coordination_writers_are_distinct_serialized_sps(live_platform):
 
 @pytest.mark.integration
 def test_package_approval_receipt_securables_have_separate_writers(live_platform):
+    # WRITE VOLUME is a file-level privilege (no SQL DML), probed via the Files API.
     expected = {"vc_snapshots": "observer", "vc_approval_evidence": "approval",
                 "vc_outbound_packages": "source", "vc_target_receipts": "executor"}
     for volume, writer in expected.items():
-        live_platform.assert_sql_succeeds(writer, f"{volume}.write")
+        live_platform.assert_volume_write_succeeds(writer, volume)
         for other in set(expected.values()) - {writer}:
-            live_platform.assert_sql_denied(other, f"{volume}.write")
-    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
-    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
+            live_platform.assert_volume_write_denied(other, volume)
+    live_platform.assert_volume_read_succeeds("executor", "vc_outbound_packages")
+    live_platform.assert_volume_read_succeeds("source", "vc_target_receipts")
+    # Source has no grant on the operations fact table: every DML and read denied.
     for action in ("insert", "update", "delete", "alter"):
         live_platform.assert_sql_denied("source", f"genie_space_operations.{action}")
     live_platform.assert_sql_denied("source", "genie_space_operations.read")
@@ -69,9 +99,9 @@ def test_package_approval_receipt_securables_have_separate_writers(live_platform
 def test_source_target_artifact_topology_is_verified_without_remote_write_credentials(live_platform):
     source = live_platform.api("source", "get", "/api/2.1/unity-catalog/metastore_summary")
     target = live_platform.api("executor", "get", "/api/2.1/unity-catalog/metastore_summary")
-    live_platform.assert_sql_succeeds("executor", "vc_outbound_packages.read")
-    live_platform.assert_sql_succeeds("source", "vc_target_receipts.read")
-    live_platform.assert_sql_denied("source", "vc_target_receipts.write")
+    live_platform.assert_volume_read_succeeds("executor", "vc_outbound_packages")
+    live_platform.assert_volume_read_succeeds("source", "vc_target_receipts")
+    live_platform.assert_volume_write_denied("source", "vc_target_receipts")
     live_platform.assert_sql_denied("source", "genie_space_operations.insert")
     assert source["metastore_id"] == live_platform.config["topology"]["source_metastore"]
     assert target["metastore_id"] == live_platform.config["topology"]["target_metastore"]
