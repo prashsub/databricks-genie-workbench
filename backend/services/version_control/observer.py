@@ -26,6 +26,17 @@ class Observer:
         actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
         return self._capture(binding, reason, executor, self.status_reader(binding, actor))
 
+    @staticmethod
+    def _summary_of(version) -> vc.VersionSummary:
+        """Project a committed ledger Version into the VersionSummary the unchanged-capture
+        branch hands back (mirrors DeltaVersionLedger._to_summary field-for-field)."""
+        context = version.context
+        return vc.VersionSummary(
+            version.version_id, context.binding.binding_id, context.observed_at,
+            context.origin, context.actor.subject_id, context.parent_version_id,
+            context.restored_from_version_id, version.snapshot.fingerprints,
+            context.optimizer_run_id, context.champion_id)
+
     def _capture(self, binding, reason, executor, status):
         try:
             return self._capture_committed(binding, reason, executor, status)
@@ -46,7 +57,15 @@ class Observer:
             previous = self.ledger.get_version(binding, status.heads.observed)
             if self.canonicalizer.compare(previous.snapshot, snapshot) == vc.Comparison.EQUAL:
                 self.coordination.advance_heads(lease.fence, vc.HeadUpdate(None, None, None, None))
-                return vc.ObservationResult(replace(status, stale=False), None, False)
+                # Unchanged: the live target still equals the committed observed head, so no
+                # new version is appended. The observed head *is* the current base, so return
+                # it as `captured_version` (drift stays exactly as the status reader reported)
+                # instead of a spurious "no observation" None. Base-needing callers -- M07
+                # preflight/compensation -- require the committed base here; a first promotion
+                # to a freshly base-observed target only ever traverses this unchanged branch.
+                # Busy/failure paths above still return None.
+                return vc.ObservationResult(replace(status, stale=False),
+                                            self._summary_of(previous), False)
         context = vc.CaptureContext(binding, f"{lease.fence.attempt_id}:observe",
             datetime.now(timezone.utc), reason,
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),

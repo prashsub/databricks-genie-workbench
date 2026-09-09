@@ -87,6 +87,27 @@ def test_unchanged_open_deduplicates_committed_observation(observer_rig):
     rig.ledger.append_observation.assert_called_once()
 
 
+def test_unchanged_capture_returns_observed_head_as_base_preserving_drift(observer_rig):
+    """M07 preflight/compensation need the committed base on an unchanged target: the
+    unchanged branch must return the observed-head version as captured_version and leave
+    drift exactly as the status reader reports (CLEAN in the promotion path), never None
+    and never forced to UNKNOWN like a fresh capture."""
+    rig, observer, viewer, status, identity = observer_rig
+    first = observer.capture_on_open(rig.binding, viewer)
+    head = first.captured_version.version_id
+    # Simulate the promotion path's CLEAN status reader over the now-committed head.
+    clean = replace(first.status, drift=vc.DriftState.CLEAN, stale=False)
+    observer.status_reader = lambda *args: clean
+    rig.trace.clear()
+    second = observer.capture(rig.binding, "promotion_base", rig.executor)
+    assert second.captured_version is not None
+    assert second.captured_version.version_id == head
+    assert second.status.drift == vc.DriftState.CLEAN
+    assert not second.busy and not second.status.stale
+    assert "advance" in rig.trace  # lease released via no-op head advance
+    rig.ledger.append_observation.assert_called_once()  # no second append on unchanged
+
+
 @pytest.mark.parametrize("failure", ["append_observation", "verify_committed", "advance_heads"])
 def test_capture_persistence_failure_returns_stale_and_disables_actions(observer_rig, failure):
     rig, observer, viewer, status, identity = observer_rig
