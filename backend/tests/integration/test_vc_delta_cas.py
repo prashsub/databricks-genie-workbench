@@ -97,7 +97,13 @@ def row_values(row):
 
 
 class DeltaCoordinationStore:
-    """Real SQL implementation of the injected M03 store port, local to this gate."""
+    """Real SQL implementation of the injected M03 store port, local to this gate.
+
+    The production promotion of this store is
+    ``backend/services/version_control/coordination/store.DeltaCoordinationStore``
+    (same MERGE, fence recheck and DELTA_CONCURRENT-only loss). This gate keeps a
+    connection-bound copy with the barrier/proposals race hooks; keep the two in
+    sync (offline coverage: backend/tests/test_vc_coordination_store.py)."""
     def __init__(self, connection, table, binding):
         self.connection, self.table, self.binding = connection, table, binding
         self.barrier = None
