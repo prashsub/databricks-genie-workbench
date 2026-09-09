@@ -26,6 +26,16 @@ def export(service, receipt):
                 'benchmark_evidence_digest': receipt.benchmark_evidence_digest}
     immutable_put(service.receipt_store, prefix + '/tests.json', encode(evidence))
     immutable_put(service.receipt_store, prefix + '/receipt.json', encode(receipt))
+    # Mirror the receipt (content-addressed, immutable) to the source-readable
+    # reverse-receipt volume so the source workspace can poll its outcome without
+    # any target write authority. Cross-metastore topologies rely on this copy;
+    # same-metastore deployments still publish it for a uniform receipt-back API.
+    # A reverse-write failure propagates so the caller retries the export (never
+    # the mutation) and the forward copy stays authoritative.
+    reverse = getattr(service, 'reverse_receipt_volume', None)
+    if reverse:
+        reverse_prefix = f'{reverse}/sha256/{digest(receipt)}'
+        immutable_put(service.receipt_store, reverse_prefix + '/receipt.json', encode(receipt))
     return receipt
 
 
