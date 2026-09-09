@@ -180,6 +180,14 @@ def main(argv=None) -> None:
     cfg = json.loads(Path(two_ws_path).read_text())
     approval_identities = json.loads(Path(integration_path).read_text())["approval_identities"]
     governed = author(cfg, promotion_job_id=cfg.get("promotion_job_id"))
+    # The approval workflow (vote/authorize) must resolve human approver SCIM groups,
+    # which the least-privileged executor SP cannot read. Point the identity provider's
+    # directory client at the admin `directory_profile` for this local minting only
+    # (the governed Job config is authored separately and never gains this role).
+    directory_profile = approval_identities.get("directory_profile")
+    if directory_profile:
+        governed["roles"]["directory"] = {"profile": directory_profile}
+        governed["directory_role"] = "directory"
     surface = build_release_surface(governed)
     plan = _plan_from_config(surface, cfg, governed, approval_identities)
     result = mint(surface, plan)

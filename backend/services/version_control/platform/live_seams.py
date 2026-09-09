@@ -224,7 +224,7 @@ def build_governed_seams(config: dict, *, adapters: Any = None):
             "store": adapters.files_store("source"),
             "receipt_store": adapters.files_store("executor"),
             "dependencies": adapters.dependency_checker(),
-            "tests": PreflightTestRunner(query=adapters.sql("executor")),
+            "tests": PreflightTestRunner(query=adapters.preflight_query()),
             "releases": ReleaseCatalog(adapters.release_facts_reader(facts),
                                        volumes["outbound"], cfg["target_host"]),
             "pending": PendingOperations(adapters.pending_reader(facts)),
@@ -433,6 +433,21 @@ class PlatformAdapters:
 
     def worker_supervisor_reader(self, execution_ref, attempt_id):
         return None
+
+    # -- preflight test query (executor-bound, positional rows) -----------
+    def preflight_query(self) -> Callable[[str, Any], list]:
+        """Adapt the executor SQL seam to the PreflightTestRunner contract.
+
+        The runner calls ``query(statement, executor)`` and reads results
+        positionally (``rows[0][0]`` for COUNT); the credential is pinned by the
+        executor seam, so the passed executor is verified upstream and ignored
+        here. ``execute`` returns typed dict rows, so project them to lists."""
+        execute = self.sql("executor")
+
+        def query(statement: str, _executor: Any = None) -> list:
+            return [list(row.values()) for row in execute(statement)]
+
+        return query
 
     # -- dependency checker (live preflight permission probes) ------------
     def dependency_checker(self) -> DependencyChecker:

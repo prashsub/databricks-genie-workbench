@@ -81,6 +81,9 @@ class FakeAdapters:
     def worker_supervisor_reader(self, *_a):
         return None
 
+    def preflight_query(self):
+        return lambda statement, executor=None: []
+
     def dependency_checker(self):
         return SimpleNamespace(check=lambda *a, **k: True)
 
@@ -222,6 +225,26 @@ def test_release_facts_reader_returns_release_kind_facts_for_operation():
     facts.binding_facts.assert_called_once_with("b-1", vc.FactKind.RELEASE)
     facts.get_request.side_effect = LookupError  # no durable request yet
     assert reader("op-1") == []
+
+
+def test_preflight_query_ignores_executor_and_projects_dict_rows_positionally(monkeypatch):
+    """PreflightTestRunner calls query(sql, executor) and reads rows[0][0]; the seam
+    is executor-credential-bound so the passed executor is ignored, and the typed
+    dict rows from `execute` are projected to positional lists for COUNT access."""
+    from backend.services.version_control.platform.live_seams import PlatformAdapters
+
+    adapters = PlatformAdapters({"roles": {"executor": {"warehouse_id": "wh"}}})
+    seen = {}
+
+    def execute(statement, parameters=None):
+        seen["statement"], seen["parameters"] = statement, parameters
+        return [{"count(1)": 7}]
+
+    monkeypatch.setattr(adapters, "sql", lambda role: execute)
+    query = adapters.preflight_query()
+    rows = query("SELECT COUNT(*) FROM t", object())  # a non-dict executor must not leak into params
+    assert rows == [[7]] and rows[0][0] == 7
+    assert seen["statement"] == "SELECT COUNT(*) FROM t" and seen["parameters"] is None
 
 
 def _adapters_with(monkeypatch, *, sql_rows=None, warehouse_acl=None, folder_acl=None):

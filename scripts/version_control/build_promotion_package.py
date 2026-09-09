@@ -92,7 +92,11 @@ def main() -> None:
     snapshot = canonicalizer.observe(src_envelope)
     source_binding = vc.BindingRef(str(uuid4()), 1, config["target_binding"]["space_key"],
                                    src_role["workspace_id"], config["source_space_id"], "dev")
-    version_id = str(uuid4())
+    # Reuse the pinned source_version_id if the ledger was already seeded (D2.5a):
+    # the manifest embeds only the version id + content digests (not the binding),
+    # so re-running D2.3 to refresh the mapping/consumer digests MUST keep the same
+    # version id, or the seeded ledger row (idempotent on observation_key) diverges.
+    version_id = config.get("source_version_id") or str(uuid4())
     version = vc.Version(version_id, snapshot, vc.CaptureContext(
         source_binding, "capture", datetime.now(UTC), "initial",
         vc.ActorContext(src_role["principal_id"], src_role["workspace_id"], "service"),
@@ -123,9 +127,16 @@ def main() -> None:
     prefix = f"{config['volumes']['outbound']}/sha256/{manifest.package_digest}"
     payloads = dict(files)
     payloads["manifest.json"] = packages.encode(manifest)
+    from databricks.sdk.errors.platform import AlreadyExists
+
     for name, content in payloads.items():
         dest = f"{prefix}/{name}"
-        source.files.upload(dest, BytesIO(content), overwrite=False)
+        try:
+            source.files.upload(dest, BytesIO(content), overwrite=False)
+        except AlreadyExists:
+            # Content-addressed path: an identical prior upload is fine, a divergent
+            # one is a digest collision we must never mask. Fall through to verify.
+            pass
         readback = source.files.download(dest).contents.read()
         if readback != content:
             raise SystemExit(f"immutable upload mismatch for {name}")
