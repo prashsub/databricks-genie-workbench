@@ -15,6 +15,8 @@ from backend.services.version_control import platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# Deliberate monotonic ratchet: raise only when new integration tests land, never lower.
+LANDED_INTEGRATION_BASELINE = 15
 
 
 @pytest.mark.parametrize("scenario", ["clear", "dual_authority", "unknown", "missing_yaml"])
@@ -373,12 +375,16 @@ def test_unverified_cross_metastore_artifact_transport_disables_topology():
     assert verify(proof) is False
 
 
-def _has_module_integration_mark(module):
-    for statement in module.body:
-        if not isinstance(statement, ast.Assign):
+def _has_scope_integration_mark(scope):
+    for statement in scope.body:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+        else:
             continue
         if not any(isinstance(target, ast.Name) and target.id == "pytestmark"
-                   for target in statement.targets):
+                   for target in targets):
             continue
         marks = (statement.value.elts if isinstance(statement.value, (ast.List, ast.Tuple))
                  else [statement.value])
@@ -404,9 +410,9 @@ def test_integration_gate_command_collects_every_integration_test():
         f"Integration collection errored:\n{result.stdout}\n{result.stderr}")
     collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
     declared_count = 0
-    for path in (ROOT / "backend" / "tests" / "integration").glob("*.py"):
+    for path in (ROOT / "backend" / "tests" / "integration").rglob("*.py"):
         module = ast.parse(path.read_text(), filename=str(path))
-        module_integration_mark = _has_module_integration_mark(module)
+        module_integration_mark = _has_scope_integration_mark(module)
         for node in ast.walk(module):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -430,9 +436,21 @@ def test_integration_gate_command_collects_every_integration_test():
             declared_count += case_count
     assert len(collected) == declared_count, (
         f"Expected all {declared_count} declared integration cases collected, saw {len(collected)}:\n{result.stdout}")
-    # Cumulative baseline: M08's 5 + M06's 5; raise as future modules add integration tests.
-    assert len(collected) >= 10, (
-        f"Expected at least 10 baseline integration tests collected, saw {len(collected)}:\n{result.stdout}")
+    # Independently enumerate every case in the gated directory, without filtering
+    # by marks. Losing a module's pytestmark must not silently shrink both the AST
+    # declaration count and the marked collection. Use the same (possibly fake) ROOT.
+    # Explicitly override the project's default -m 'not integration' selection.
+    all_result = subprocess.run(
+        [sys.executable, "-m", "pytest", "backend/tests/integration",
+         "-m", "", "--collect-only", "-q"],
+        cwd=str(ROOT), capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(ROOT)))
+    assert all_result.returncode == 0, (
+        f"Unfiltered integration collection errored:\n{all_result.stdout}\n{all_result.stderr}")
+    all_cases = re.findall(r"^(backend/tests/integration/\S+::\S+)$", all_result.stdout, re.MULTILINE)
+    assert declared_count == len(all_cases), (
+        f"integration directory contains {len(all_cases)} cases, but only {declared_count} are declared "
+        f"integration cases:\n{all_result.stdout}")
 
     # Pin the layout: no integration-marked test may drift back out of the gated
     # directory. Match the decorator only where it is actually applied (a line whose
@@ -444,7 +462,9 @@ def test_integration_gate_command_collects_every_integration_test():
         source = path.read_text()
         assert not marker_decorator.search(source), (
             f"{path} carries an integration test outside backend/tests/integration/")
-        assert not _has_module_integration_mark(ast.parse(source, filename=str(path))), (
+        module = ast.parse(source, filename=str(path))
+        assert not any(_has_scope_integration_mark(scope) for scope in ast.walk(module)
+                       if isinstance(scope, (ast.Module, ast.ClassDef))), (
             f"{path} carries an integration test outside backend/tests/integration/")
 
     assert (tests_dir / "integration" / "__init__.py").exists(), (
@@ -466,6 +486,23 @@ def test_integration_gate_command_collects_every_integration_test():
     assert "pytest.skip" not in conftest, "live_platform must not silently skip deployment blockers"
 
 
+def test_integration_suite_never_shrinks_below_landed_baseline():
+    # Real-tree gate only: synthetic layouts reuse the equality gate above, not
+    # this landed baseline. Resolve from this file rather than monkeypatchable ROOT.
+    real_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "backend/tests/integration",
+         "-m", "integration", "--collect-only", "-q"],
+        cwd=str(real_root), capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(real_root)))
+    assert result.returncode == 0, (
+        f"Integration collection errored:\n{result.stdout}\n{result.stderr}")
+    collected = re.findall(r"^(backend/tests/integration/\S+::\S+)$", result.stdout, re.MULTILINE)
+    assert len(collected) >= LANDED_INTEGRATION_BASELINE, (
+        f"{len(collected)} collected cases is below landed integration baseline "
+        f"{LANDED_INTEGRATION_BASELINE}; never lower the baseline")
+
+
 def test_integration_gate_rejects_partial_collection(monkeypatch):
     run = subprocess.run
 
@@ -479,6 +516,46 @@ def test_integration_gate_rejects_partial_collection(monkeypatch):
     declared, collected = map(int, re.search(r"Expected all (\d+).*saw (\d+)", str(error.value)).groups())
     assert collected == declared - 1
     assert collected >= 5
+
+
+@pytest.mark.parametrize("replacement", ["", "# pytestmark = pytest.mark.integration"])
+def test_integration_gate_rejects_removed_real_module_mark(tmp_path, monkeypatch, replacement):
+    shutil.copytree(ROOT / "backend", tmp_path / "backend",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copyfile(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    test_integration_gate_command_collects_every_integration_test()
+
+    module = tmp_path / "backend/tests/integration/test_vc_delta_cas.py"
+    source = module.read_text()
+    assert "pytestmark = pytest.mark.integration\n" in source
+    module.write_text(source.replace("pytestmark = pytest.mark.integration", replacement))
+    with pytest.raises(AssertionError, match="integration directory contains .* cases, but only .* are declared"):
+        test_integration_gate_command_collects_every_integration_test()
+
+
+def test_integration_gate_rejects_deleted_real_integration_file(tmp_path):
+    shutil.copytree(ROOT / "backend", tmp_path / "backend",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copyfile(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    command = [
+        sys.executable, "-m", "pytest", "backend/tests/test_vc_provisioning.py", "-q",
+        "-k", "test_integration_gate_command_collects_every_integration_test or "
+              "test_integration_suite_never_shrinks_below_landed_baseline",
+    ]
+    options = dict(cwd=str(tmp_path), capture_output=True, text=True,
+                   env=dict(os.environ, PYTHONPATH=str(tmp_path)))
+    intact = subprocess.run(command, **options)
+    assert intact.returncode == 0, intact.stdout + intact.stderr
+
+    (tmp_path / "backend/tests/integration/test_vc_delta_cas.py").unlink()
+    deleted = subprocess.run(command, **options)
+    assert deleted.returncode == 1, (
+        f"Deleting a landed integration file must fail the real-tree gate:\n"
+        f"{deleted.stdout}\n{deleted.stderr}")
+    assert "below landed integration baseline" in deleted.stdout
+    # Declaration/collection/recount equality still passes; only the baseline fails.
+    assert "1 failed, 1 passed" in deleted.stdout
 
 
 @pytest.fixture
@@ -496,6 +573,17 @@ def integration_gate_layout(tmp_path, monkeypatch):
         "def test_sample(value): pass\n")
     monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
     return tests_dir
+
+
+def test_integration_gate_counts_nested_integration_file(integration_gate_layout):
+    nested_dir = integration_gate_layout / "integration" / "subdir"
+    nested_dir.mkdir()
+    (nested_dir / "test_nested.py").write_text(
+        "import pytest\n"
+        "pytestmark = pytest.mark.integration\n"
+        "@pytest.mark.parametrize('value', [0, 1])\n"
+        "def test_nested(value): pass\n")
+    test_integration_gate_command_collects_every_integration_test()
 
 
 @pytest.mark.parametrize("mark", [
@@ -531,8 +619,19 @@ def test_integration_gate_rejects_marks_outside_layout(integration_gate_layout, 
 
 
 @pytest.mark.parametrize("source", [
-    "def helper():\n    pytestmark = pytest.mark.integration\n",
+    "pytestmark: list = [pytest.mark.integration]\n",
     "class Helper:\n    pytestmark = pytest.mark.integration\n",
+    "class TestOutside:\n    pytestmark: list = [pytest.mark.integration]\n"
+    "    def test_outside(self): pass\n",
+])
+def test_integration_gate_rejects_annotated_and_class_marks_outside_layout(integration_gate_layout, source):
+    (integration_gate_layout / "test_outside.py").write_text("import pytest\n" + source)
+    with pytest.raises(AssertionError, match="carries an integration test outside"):
+        test_integration_gate_command_collects_every_integration_test()
+
+
+@pytest.mark.parametrize("source", [
+    "def helper():\n    pytestmark = pytest.mark.integration\n",
     "pytestmark = [pytest.mark.other]\n",
     "example = 'pytestmark = pytest.mark.integration'\n",
 ])
