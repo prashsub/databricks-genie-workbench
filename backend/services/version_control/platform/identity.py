@@ -135,9 +135,13 @@ class TrustedSnapshotReader:
 
 
 def verify_job_run_as(client, execution_ref: str, expected_principal_id: str) -> None:
-    if not execution_ref.isdigit() or int(execution_ref) <= 0 or not expected_principal_id:
+    # The governed execute path (promotion/restore/optimizer/gate) carries the
+    # executor selection as ``job/<id>`` (validated by each `_executor`); the
+    # optimizer boot check passes a bare ``GSO_JOB_ID``. Accept either form.
+    job_ref = execution_ref.removeprefix("job/")
+    if not job_ref.isdigit() or int(job_ref) <= 0 or not expected_principal_id:
         raise ValueError("Explicit Job and expected principal required")
-    job = client.jobs.get(job_id=int(execution_ref))
+    job = client.jobs.get(job_id=int(job_ref))
     settings = getattr(job, "settings", None)
     run_as = getattr(settings, "run_as", None)
     if (getattr(run_as, "service_principal_name", None) != expected_principal_id

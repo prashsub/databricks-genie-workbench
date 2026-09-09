@@ -82,6 +82,28 @@ def test_deploy_script_exits_nonzero_on_unresolved_placeholders():
     assert "exit 1" in block, "Unresolved placeholders must abort the deploy (exit 1), not only warn"
 
 
+def test_verify_job_run_as_accepts_job_prefixed_execution_ref():
+    # The governed execute path (promotion/restore/optimizer/gate) carries the
+    # executor selection as `job/<id>`; verify_run_as must resolve it to the bare
+    # Job id (the offline suites mock this call, so it was never exercised live
+    # until the D2.5b promotion). A bare `GSO_JOB_ID` must keep working too.
+    from backend.services.version_control.platform.identity import verify_job_run_as
+
+    client = Mock()
+    client.jobs.get.return_value = SimpleNamespace(settings=SimpleNamespace(
+        run_as=SimpleNamespace(service_principal_name="exec-sp", user_name=None)))
+    verify_job_run_as(client, "job/1070747496219890", "exec-sp")
+    client.jobs.get.assert_called_once_with(job_id=1070747496219890)
+    verify_job_run_as(client, "42", "exec-sp")  # bare id still accepted
+    # Wrong run_as still refuses; a malformed ref is still a ValueError.
+    client.jobs.get.return_value = SimpleNamespace(settings=SimpleNamespace(
+        run_as=SimpleNamespace(service_principal_name="other-sp", user_name=None)))
+    with pytest.raises(PermissionError, match="run_as"):
+        verify_job_run_as(client, "job/42", "exec-sp")
+    with pytest.raises(ValueError, match="Explicit Job"):
+        verify_job_run_as(client, "job/not-a-number", "exec-sp")
+
+
 def test_explicit_profile_host_workspace_mismatch_is_rejected():
     provider_type = getattr(platform, "PlatformIdentityProvider", None)
     assert callable(provider_type), "VC identity requires explicit credential selection"

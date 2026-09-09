@@ -376,10 +376,30 @@ class PlatformAdapters:
                 kind = "service"
             return vc.ActorContext(reference, selection["workspace_id"], kind)
 
+        _EDIT_LEVELS = frozenset({"CAN_EDIT", "CAN_MANAGE", "IS_OWNER"})
+
+        def resolve_edit(subject_id, binding):
+            # A release requester must genuinely hold edit rights on the target
+            # Genie space. Reading the object ACL requires CAN_MANAGE, which the
+            # executor already holds, so this works both in the driver (admin
+            # directory) and in the Job (executor directory).
+            if not getattr(binding, "space_id", None):
+                return False
+            acl = directory.api_client.do(
+                "GET", f"/api/2.0/permissions/genie/{binding.space_id}")
+            for entry in acl.get("access_control_list", []) or []:
+                ref = (entry.get("service_principal_name") or entry.get("user_name")
+                       or entry.get("group_name"))
+                if ref == subject_id and any(
+                        perm.get("permission_level") in _EDIT_LEVELS
+                        for perm in entry.get("all_permissions", []) or []):
+                    return True
+            return False
+
         return PlatformIdentityProvider(
             profiles={profile: (lambda role=role: self.client(role))} if profile else None,
             request_resolver=resolve_actor, group_resolver=resolve_groups,
-            edit_resolver=None, job_client=self.client(role))
+            edit_resolver=resolve_edit, job_client=self.client(role))
 
     # -- capability + topology proofs -------------------------------------
     def capability_probe(self) -> Callable[[], dict]:
