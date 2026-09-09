@@ -218,5 +218,14 @@
       "status": "APPROVED + INTEGRATED at 5c091f2",
       "branch": "vc/backlog-m07nb"
     }
+  },
+  "backlog_reviews": {
+    "integ-gate-D": {
+      "status": "in-review",
+      "review_conversation_id": "2592456325593076",
+      "branch": "origin/vc/backlog-integ-gate",
+      "head": "537269f",
+      "note": "final re-review after budget restored; A/B/C/D committed, self-verified (deletion-regression RED confirmed); trunk at 5c091f2 has M07-nb+M05-F3 already integrated"
+    }
   }
 }
