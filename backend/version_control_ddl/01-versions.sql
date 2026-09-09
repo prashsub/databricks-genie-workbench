@@ -32,11 +32,13 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${control_schema}.genie_space_versions (
   canonicalizer_version STRING NOT NULL,
   optimizer_run_id STRING,
   champion_id STRING,
-  release_id STRING,
-  CONSTRAINT valid_origin CHECK (origin IN
-    ('workbench','external','optimizer','restore','promotion','unknown')),
-  CONSTRAINT valid_revision CHECK (binding_revision > 0),
-  CONSTRAINT envelope_present CHECK (
-    (response_envelope_json IS NOT NULL AND response_envelope_uri IS NULL) OR
-    (response_envelope_json IS NULL AND response_envelope_uri IS NOT NULL))
+  release_id STRING
 ) USING DELTA TBLPROPERTIES ('delta.appendOnly'='true');
+-- CHECK constraints are attached via ALTER; inline table DDL supports only
+-- PRIMARY KEY / FOREIGN KEY. DROP IF EXISTS + ADD keeps re-runs idempotent.
+ALTER TABLE ${catalog}.${control_schema}.genie_space_versions DROP CONSTRAINT IF EXISTS valid_origin;
+ALTER TABLE ${catalog}.${control_schema}.genie_space_versions ADD CONSTRAINT valid_origin CHECK (origin IN ('workbench','external','optimizer','restore','promotion','unknown'));
+ALTER TABLE ${catalog}.${control_schema}.genie_space_versions DROP CONSTRAINT IF EXISTS valid_revision;
+ALTER TABLE ${catalog}.${control_schema}.genie_space_versions ADD CONSTRAINT valid_revision CHECK (binding_revision > 0);
+ALTER TABLE ${catalog}.${control_schema}.genie_space_versions DROP CONSTRAINT IF EXISTS envelope_present;
+ALTER TABLE ${catalog}.${control_schema}.genie_space_versions ADD CONSTRAINT envelope_present CHECK ((response_envelope_json IS NOT NULL AND response_envelope_uri IS NULL) OR (response_envelope_json IS NULL AND response_envelope_uri IS NOT NULL));

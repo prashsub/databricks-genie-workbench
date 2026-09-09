@@ -233,10 +233,17 @@ def test_owner_manifests_are_built_from_ddl_files_and_accepted_by_provision():
         assert manifest["idempotent"] is True
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", manifest["revision"])
         assert manifest["statements"]
-        for statement in manifest["statements"]:
-            assert "${catalog}.${control_schema}." + manifest["name"] in statement
-            verb = "TABLE" if manifest["kind"] == "table" else "VOLUME"
-            assert f"CREATE {verb} IF NOT EXISTS" in statement
+        qualified = "${catalog}.${control_schema}." + manifest["name"]
+        create = manifest["statements"][0]
+        verb = "TABLE" if manifest["kind"] == "table" else "VOLUME"
+        assert qualified in create
+        assert f"CREATE {verb} IF NOT EXISTS" in create
+        # Any statements after the CREATE attach CHECK constraints via ALTER
+        # (Databricks CREATE TABLE supports only PK/FK inline).
+        for statement in manifest["statements"][1:]:
+            assert qualified in statement
+            assert statement.upper().startswith("ALTER TABLE")
+            assert "CONSTRAINT" in statement.upper()
     runner = Mock()
     runner.validate_owner_spec.return_value = True
     platform.provision(manifests, runner)

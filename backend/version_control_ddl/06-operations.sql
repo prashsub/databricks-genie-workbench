@@ -34,12 +34,15 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${control_schema}.genie_space_operations (
   evidence_json STRING NOT NULL,
   evidence_uri STRING,
   evidence_digest STRING,
-  recorded_at TIMESTAMP NOT NULL,
-  CONSTRAINT operations_backend CHECK (coordination_backend = 'delta'),
-  CONSTRAINT operation_sequence CHECK (transition_sequence >= 0),
-  CONSTRAINT operation_binding_revision CHECK (binding_revision > 0),
-  CONSTRAINT operation_fact CHECK (fact_kind IN
-    ('operation','create_intent','approval_request','approval_vote',
-     'approval_granted','approval_consumed','approval_invalidated',
-     'release','receipt','acknowledgement','break_glass','recovery'))
+  recorded_at TIMESTAMP NOT NULL
 ) USING DELTA TBLPROPERTIES ('delta.appendOnly'='true');
+-- CHECK constraints are attached via ALTER; inline table DDL supports only
+-- PRIMARY KEY / FOREIGN KEY. DROP IF EXISTS + ADD keeps re-runs idempotent.
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations DROP CONSTRAINT IF EXISTS operations_backend;
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations ADD CONSTRAINT operations_backend CHECK (coordination_backend = 'delta');
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations DROP CONSTRAINT IF EXISTS operation_sequence;
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations ADD CONSTRAINT operation_sequence CHECK (transition_sequence >= 0);
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations DROP CONSTRAINT IF EXISTS operation_binding_revision;
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations ADD CONSTRAINT operation_binding_revision CHECK (binding_revision > 0);
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations DROP CONSTRAINT IF EXISTS operation_fact;
+ALTER TABLE ${catalog}.${control_schema}.genie_space_operations ADD CONSTRAINT operation_fact CHECK (fact_kind IN ('operation','create_intent','approval_request','approval_vote','approval_granted','approval_consumed','approval_invalidated','release','receipt','acknowledgement','break_glass','recovery'));

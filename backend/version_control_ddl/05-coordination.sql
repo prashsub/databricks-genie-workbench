@@ -32,8 +32,11 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${control_schema}.genie_ops_coordination (
   approved_head_version_id STRING,
   deployed_head_version_id STRING,
   observed_sequence BIGINT NOT NULL,
-  updated_at TIMESTAMP NOT NULL,
-  CONSTRAINT coordination_state CHECK (state IN
-    ('idle','observing','reserved','admitted','quarantined')),
-  CONSTRAINT nonnegative_fence CHECK (generation >= 0 AND row_version >= 0)
+  updated_at TIMESTAMP NOT NULL
 ) USING DELTA TBLPROPERTIES ('delta.isolationLevel'='Serializable');
+-- CHECK constraints are attached via ALTER; inline table DDL supports only
+-- PRIMARY KEY / FOREIGN KEY. DROP IF EXISTS + ADD keeps re-runs idempotent.
+ALTER TABLE ${catalog}.${control_schema}.genie_ops_coordination DROP CONSTRAINT IF EXISTS coordination_state;
+ALTER TABLE ${catalog}.${control_schema}.genie_ops_coordination ADD CONSTRAINT coordination_state CHECK (state IN ('idle','observing','reserved','admitted','quarantined'));
+ALTER TABLE ${catalog}.${control_schema}.genie_ops_coordination DROP CONSTRAINT IF EXISTS nonnegative_fence;
+ALTER TABLE ${catalog}.${control_schema}.genie_ops_coordination ADD CONSTRAINT nonnegative_fence CHECK (generation >= 0 AND row_version >= 0);

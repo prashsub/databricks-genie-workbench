@@ -15,6 +15,15 @@ _STATEMENT = re.compile(
     r"\$\{catalog\}\.\$\{control_schema\}\.(\w+)",
     re.IGNORECASE,
 )
+# CHECK constraints are attached to tables via ALTER because Databricks
+# CREATE TABLE only supports PRIMARY KEY / FOREIGN KEY inline. Owners emit an
+# idempotent DROP-then-ADD pair per constraint; nothing else is permitted after
+# a CREATE (no ALTER SET TBLPROPERTIES, no DROP COLUMN, etc.).
+_ALTER = re.compile(
+    r"ALTER\s+TABLE\s+\$\{catalog\}\.\$\{control_schema\}\.(\w+)\s+"
+    r"(?:ADD|DROP)\s+CONSTRAINT\b",
+    re.IGNORECASE,
+)
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -31,7 +40,10 @@ OWNER_SPECS = (
 
 
 def _split_statements(text):
-    return [part.strip() for part in text.split(";") if part.strip()]
+    # Drop full-line `--` comments so they don't bleed into the following
+    # statement chunk when splitting on `;` (owners annotate the ALTER blocks).
+    body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
+    return [part.strip() for part in body.split(";") if part.strip()]
 
 
 def _revision(statements):
@@ -39,18 +51,30 @@ def _revision(statements):
 
 
 def _classify(statement):
+    """Return ``(verb, kind, name)`` for a recognized owner statement, else None.
+
+    ``verb`` is ``"create"`` (CREATE TABLE/VOLUME) or ``"alter"`` (ALTER TABLE
+    ADD/DROP CONSTRAINT). Anything else is unrecognized.
+    """
+
     match = _STATEMENT.match(statement)
-    if match is None:
-        return None
-    return ("table" if match.group(1).upper() == "TABLE" else "volume"), match.group(2)
+    if match is not None:
+        kind = "table" if match.group(1).upper() == "TABLE" else "volume"
+        return ("create", kind, match.group(2))
+    match = _ALTER.match(statement)
+    if match is not None:
+        return ("alter", "table", match.group(1))
+    return None
 
 
 def build_owner_manifests(ddl_root=None):
     """Read the reviewed owner DDL files into provisioning manifests.
 
     Each `OWNER_SPECS` object is matched to its `CREATE ... IF NOT EXISTS`
-    statement by name; the revision is the SHA-256 of the exact reviewed bytes.
-    This authors no DDL — it only transcribes and hashes what the owners wrote.
+    statement by name; any following `ALTER TABLE ... CONSTRAINT` statements in
+    the same file attach to that object (in file order). The revision is the
+    SHA-256 of the exact reviewed bytes. This authors no DDL — it only
+    transcribes and hashes what the owners wrote.
     """
 
     root = Path(ddl_root) if ddl_root is not None else _DDL_ROOT
@@ -60,20 +84,26 @@ def build_owner_manifests(ddl_root=None):
             classified = _classify(statement)
             if classified is None:
                 raise ValueError(f"Unrecognized owner migration statement in {path.name}")
-            kind, name = classified
-            if name in objects:
-                raise ValueError(f"Duplicate owner migration for {name}")
-            objects[name] = (kind, statement)
+            verb, kind, name = classified
+            if verb == "create":
+                if name in objects:
+                    raise ValueError(f"Duplicate owner migration for {name}")
+                objects[name] = {"kind": kind, "statements": [statement]}
+            else:  # alter — must follow its object's CREATE
+                if name not in objects:
+                    raise ValueError(f"ALTER before CREATE for {name} in {path.name}")
+                objects[name]["statements"].append(statement)
     manifests = []
     for owner, kind, name in OWNER_SPECS:
         if name not in objects:
             raise ValueError(f"Missing owner migration for {name}")
-        found_kind, statement = objects[name]
-        if found_kind != kind:
+        found = objects[name]
+        if found["kind"] != kind:
             raise ValueError(f"Owner migration kind mismatch for {name}")
+        statements = list(found["statements"])
         manifests.append({"owner": owner, "kind": kind, "name": name,
-                          "idempotent": True, "revision": _revision([statement]),
-                          "statements": [statement]})
+                          "idempotent": True, "revision": _revision(statements),
+                          "statements": statements})
     return manifests
 
 
@@ -107,15 +137,22 @@ class OwnerMigrationRunner:
             return False
         if spec.get("revision") != _revision(statements):
             return False
-        for statement in statements:
+        for index, statement in enumerate(statements):
             residual = statement.replace("${catalog}", "").replace("${control_schema}", "")
             if "${" in residual:
                 return False
             classified = _classify(statement)
             if classified is None:
                 return False
-            kind, name = classified
-            if name != spec.get("name") or kind != spec.get("kind"):
+            verb, kind, name = classified
+            if name != spec.get("name"):
+                return False
+            if index == 0:
+                # The object is created first; kind must match the reviewed spec.
+                if verb != "create" or kind != spec.get("kind"):
+                    return False
+            elif verb != "alter":
+                # Only ALTER TABLE ... CONSTRAINT may follow the CREATE.
                 return False
         return True
 

@@ -3,6 +3,18 @@ targets:
     mode: production
     workspace:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    # The vc jobs run_as dedicated SPs (separation of duties). Those SPs must be
+    # able to read the wheel artifacts under the deployer's bundle folder, so
+    # grant them CAN_MANAGE on the deployment (root folder + jobs); workspace ACL
+    # inheritance covers artifacts/.internal/*.whl. Without this, serverless
+    # library install fails with "library file does not exist or ... permission".
+    permissions:
+      - service_principal_name: ${var.vc_provisioner_principal}
+        level: CAN_MANAGE
+      - service_principal_name: ${var.vc_executor_principal}
+        level: CAN_MANAGE
+      - service_principal_name: ${var.vc_enrollment_principal}
+        level: CAN_MANAGE
     # Build hook only (mirrors root artifacts.default for the GSO wheel): the
     # genie_workbench wheel lands in .build/, which is synced (root sync
     # include) and referenced by each job environment's relative dependency
