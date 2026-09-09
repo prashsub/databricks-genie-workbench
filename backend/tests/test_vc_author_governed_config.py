@@ -63,9 +63,13 @@ def test_author_maps_roles_selections_and_proofs():
     assert governed["source_selection"]["execution_ref"].startswith("workbench")
     assert governed["promotion_job_id"] == 987
 
-    # Source binding is derived + bound to the real source space.
+    # Source binding is derived + bound to the real source space, but lives in the
+    # *target* workspace: the target-owned ledger only accepts versions in its
+    # trusted workspace, so the source version is imported under a target-workspace
+    # binding (the real source workspace is carried by source_workspace_id).
     assert governed["source_binding"]["space_id"] == "spaceSRC"
-    assert governed["source_binding"]["workspace_id"] == "222"
+    assert governed["source_binding"]["workspace_id"] == "111"
+    assert governed["source_workspace_id"] == "222"
 
     # The emitted proofs satisfy the live gates' read-only shape.
     assert topology_read_ready(governed["topology"]) is True

@@ -52,7 +52,14 @@ def _source_binding(cfg: dict) -> dict:
         "binding_id": binding_id,
         "binding_revision": 1,
         "space_key": f"{target_binding['space_key']}-source",
-        "workspace_id": source["workspace_id"],
+        # The target-owned ledger only accepts versions in its trusted target
+        # workspace (`DeltaVersionLedger.append_observation` rejects any other
+        # `binding.workspace_id`). The source version is therefore *imported* into
+        # the target ledger under this target-workspace binding; the real source
+        # workspace is carried separately by `source_workspace_id` (topology only).
+        # `space_id` keeps the source space for provenance. D2.5a seeds this exact
+        # binding, and the Job's `_inputs` requires the ledger row to equal it.
+        "workspace_id": target_binding["workspace_id"],
         "space_id": cfg["source_space_id"],
         "environment": "dev",
     }
