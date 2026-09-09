@@ -1,10 +1,21 @@
 """Execute reviewed owner migrations, never author DDL or Genie content."""
 
 import re
+from hashlib import sha256
 from pathlib import Path
 from uuid import UUID
 
 from .bundles import preflight_deployment
+
+# Owner migration bytes live in backend/version_control_ddl/ and are authored by
+# the DDL owners (M02/M03/M06/M07). M08 invokes them; it never edits them.
+_DDL_ROOT = Path(__file__).resolve().parents[3] / "version_control_ddl"
+_STATEMENT = re.compile(
+    r"CREATE\s+(TABLE|VOLUME)\s+IF\s+NOT\s+EXISTS\s+"
+    r"\$\{catalog\}\.\$\{control_schema\}\.(\w+)",
+    re.IGNORECASE,
+)
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 OWNER_SPECS = (
@@ -17,6 +28,104 @@ OWNER_SPECS = (
     ("M07", "volume", "vc_outbound_packages"),
     ("M07", "volume", "vc_target_receipts"),
 )
+
+
+def _split_statements(text):
+    return [part.strip() for part in text.split(";") if part.strip()]
+
+
+def _revision(statements):
+    return "sha256:" + sha256("\n".join(statements).encode()).hexdigest()
+
+
+def _classify(statement):
+    match = _STATEMENT.match(statement)
+    if match is None:
+        return None
+    return ("table" if match.group(1).upper() == "TABLE" else "volume"), match.group(2)
+
+
+def build_owner_manifests(ddl_root=None):
+    """Read the reviewed owner DDL files into provisioning manifests.
+
+    Each `OWNER_SPECS` object is matched to its `CREATE ... IF NOT EXISTS`
+    statement by name; the revision is the SHA-256 of the exact reviewed bytes.
+    This authors no DDL — it only transcribes and hashes what the owners wrote.
+    """
+
+    root = Path(ddl_root) if ddl_root is not None else _DDL_ROOT
+    objects = {}
+    for path in sorted(root.glob("*.sql")):
+        for statement in _split_statements(path.read_text()):
+            classified = _classify(statement)
+            if classified is None:
+                raise ValueError(f"Unrecognized owner migration statement in {path.name}")
+            kind, name = classified
+            if name in objects:
+                raise ValueError(f"Duplicate owner migration for {name}")
+            objects[name] = (kind, statement)
+    manifests = []
+    for owner, kind, name in OWNER_SPECS:
+        if name not in objects:
+            raise ValueError(f"Missing owner migration for {name}")
+        found_kind, statement = objects[name]
+        if found_kind != kind:
+            raise ValueError(f"Owner migration kind mismatch for {name}")
+        manifests.append({"owner": owner, "kind": kind, "name": name,
+                          "idempotent": True, "revision": _revision([statement]),
+                          "statements": [statement]})
+    return manifests
+
+
+class OwnerMigrationRunner:
+    """Execute reviewed owner migration bytes and grants against warehouse SQL.
+
+    Runs as the provisioner identity. `execute` is a blocking callable that runs
+    one rendered SQL statement. `${catalog}`/`${control_schema}` are the only
+    permitted templates and are replaced with validated, backtick-quoted
+    identifiers — never caller input.
+    """
+
+    def __init__(self, execute, catalog, control_schema, grants):
+        if not (_IDENTIFIER.fullmatch(catalog) and _IDENTIFIER.fullmatch(control_schema)):
+            raise ValueError("Catalog and control schema must be simple identifiers")
+        self._execute = execute
+        self._catalog = catalog
+        self._control_schema = control_schema
+        self._grants = tuple(grants)
+
+    def _render(self, text):
+        rendered = (text.replace("${catalog}", f"`{self._catalog}`")
+                        .replace("${control_schema}", f"`{self._control_schema}`"))
+        if "${" in rendered:
+            raise ValueError("Unresolved template placeholder in owner migration")
+        return rendered
+
+    def validate_owner_spec(self, spec):
+        statements = spec.get("statements")
+        if not statements or spec.get("idempotent") is not True:
+            return False
+        if spec.get("revision") != _revision(statements):
+            return False
+        for statement in statements:
+            residual = statement.replace("${catalog}", "").replace("${control_schema}", "")
+            if "${" in residual:
+                return False
+            classified = _classify(statement)
+            if classified is None:
+                return False
+            kind, name = classified
+            if name != spec.get("name") or kind != spec.get("kind"):
+                return False
+        return True
+
+    def apply_owner_spec(self, spec):
+        for statement in spec["statements"]:
+            self._execute(self._render(statement))
+
+    def apply_grants(self):
+        for grant in self._grants:
+            self._execute(self._render(grant))
 
 
 def provision(manifests, runner) -> None:

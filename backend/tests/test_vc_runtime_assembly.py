@@ -18,11 +18,17 @@ from unittest.mock import Mock
 
 import pytest
 
-from backend.jobs import VcJobRuntime, assemble_vc_runtime, build_vc_runtime
+from backend.jobs import (
+    VcJobRuntime,
+    assemble_provision_runtime,
+    assemble_vc_runtime,
+    build_vc_runtime,
+)
 from backend.services.version_control.platform.capabilities import (
     FIRST_WRITE_CAPABILITIES,
 )
 from backend.services.version_control.platform.feature_flags import FeatureFlags
+from backend.services.version_control.platform.provisioning import OWNER_SPECS
 
 OP = "00000000-0000-4000-8000-000000000011"
 
@@ -151,3 +157,33 @@ def test_build_vc_runtime_fails_closed_offline():
 def test_build_vc_runtime_rejects_unknown_kind():
     with pytest.raises(PermissionError, match="not integrated"):
         build_vc_runtime("bogus")
+
+
+def _synthetic_manifests():
+    return [{"owner": owner, "kind": kind, "name": name,
+             "idempotent": True, "revision": "sha256:" + "a" * 64}
+            for owner, kind, name in OWNER_SPECS]
+
+
+def test_provision_runtime_runs_owner_migrations_without_a_durable_request():
+    runner = Mock()
+    runner.validate_owner_spec.return_value = True
+    runtime = assemble_provision_runtime(
+        workspace_id="target", manifests=_synthetic_manifests(), runner=runner)
+    assert isinstance(runtime, VcJobRuntime)
+    runtime.run("provision", OP)
+    assert runner.apply_owner_spec.call_count == len(OWNER_SPECS)
+    runner.apply_grants.assert_called_once_with()
+
+
+def test_provision_runtime_rejects_governed_kinds():
+    runtime = assemble_provision_runtime(
+        workspace_id="target", manifests=_synthetic_manifests(), runner=Mock())
+    for kind in ("restore", "optimizer_apply", "verification", "reconcile", "promotion"):
+        with pytest.raises(PermissionError, match="not integrated"):
+            runtime.run(kind, OP)
+
+
+def test_build_vc_runtime_provision_fails_closed_offline():
+    with pytest.raises(PermissionError, match="not integrated"):
+        build_vc_runtime("provision")

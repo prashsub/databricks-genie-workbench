@@ -1,4 +1,3 @@
-from pathlib import Path
 import ast
 import os
 import re
@@ -7,12 +6,12 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from backend.services.version_control import platform
-
 
 ROOT = Path(__file__).resolve().parents[2]
 # Deliberate monotonic ratchet: raise only when new integration tests land, never lower.
@@ -221,6 +220,64 @@ def test_ddl_migrations_are_owned_ordered_idempotent_and_not_content_deploys():
     with pytest.raises(ValueError, match="owner"):
         run(manifests, runner)
     runner.apply_owner_spec.assert_not_called()
+
+
+def test_owner_manifests_are_built_from_ddl_files_and_accepted_by_provision():
+    build = getattr(platform, "build_owner_manifests", None)
+    assert callable(build), "Provisioning must build owner manifests from the DDL files"
+    from backend.services.version_control.platform.provisioning import OWNER_SPECS
+
+    manifests = build()
+    assert {(m["owner"], m["kind"], m["name"]) for m in manifests} == set(OWNER_SPECS)
+    for manifest in manifests:
+        assert manifest["idempotent"] is True
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", manifest["revision"])
+        assert manifest["statements"]
+        for statement in manifest["statements"]:
+            assert "${catalog}.${control_schema}." + manifest["name"] in statement
+            verb = "TABLE" if manifest["kind"] == "table" else "VOLUME"
+            assert f"CREATE {verb} IF NOT EXISTS" in statement
+    runner = Mock()
+    runner.validate_owner_spec.return_value = True
+    platform.provision(manifests, runner)
+    assert runner.apply_owner_spec.call_count == len(OWNER_SPECS)
+    runner.apply_grants.assert_called_once_with()
+
+
+def test_owner_migration_runner_validates_renders_and_grants():
+    runner_cls = getattr(platform, "OwnerMigrationRunner", None)
+    assert callable(runner_cls), "Owner migrations execute reviewed bytes, never author DDL"
+    executed = []
+    grants = ("GRANT SELECT ON TABLE ${catalog}.${control_schema}.genie_space_versions TO `exec`",)
+    runner = runner_cls(executed.append, "sandbox_cat", "vc_ctl", grants)
+    manifests = platform.build_owner_manifests()
+
+    assert all(runner.validate_owner_spec(manifest) is True for manifest in manifests)
+    for manifest in manifests:
+        runner.apply_owner_spec(manifest)
+    runner.apply_grants()
+
+    assert executed, "Owner migrations and grants must reach the SQL executor"
+    assert all("${" not in statement for statement in executed), "Templates must be fully rendered"
+    assert any("`sandbox_cat`.`vc_ctl`.genie_space_versions" in statement for statement in executed)
+    assert executed[-1].startswith("GRANT SELECT ON TABLE `sandbox_cat`.`vc_ctl`.genie_space_versions")
+
+
+def test_owner_migration_runner_rejects_tampered_specs_and_bad_identifiers():
+    runner_cls = platform.OwnerMigrationRunner
+    runner = runner_cls(lambda _sql: None, "cat", "ctl", ())
+    good = platform.build_owner_manifests()[0]
+    assert runner.validate_owner_spec(good) is True
+    assert runner.validate_owner_spec(dict(good, idempotent=False)) is False
+    assert runner.validate_owner_spec(dict(good, revision="sha256:" + "0" * 64)) is False
+    assert runner.validate_owner_spec(dict(good, name="genie_space_registry")) is False
+    injected = dict(good, statements=[good["statements"][0] + " ${evil}"])
+    assert runner.validate_owner_spec(injected) is False
+    for bad in ("bad-cat", "1cat", "cat;drop", "", "cat.schema"):
+        with pytest.raises(ValueError):
+            runner_cls(lambda _sql: None, bad, "ctl", ())
+        with pytest.raises(ValueError):
+            runner_cls(lambda _sql: None, "cat", bad, ())
 
 
 def test_fact_permissions_require_append_only_nonowner_and_no_modify():

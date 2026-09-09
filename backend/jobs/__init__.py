@@ -25,6 +25,7 @@ from backend.services.version_control.platform.capabilities import (
     capabilities_ready,
 )
 from backend.services.version_control.platform.jobs import JOB_KINDS, GovernedJobRuntime
+from backend.services.version_control.platform.provisioning import provision
 
 # Per-kind write switch consulted (in addition to vc_writes_enabled + live
 # capabilities) before a governed mutation handler is allowed to run.
@@ -42,15 +43,24 @@ class VcJobRuntime:
     individual ports read directly by module job entrypoints."""
 
     workspace_id: str
-    facts: Any
-    gate: Any
-    identity: Any
-    executor: Any
-    flags: Any
-    service: Any
-    _governed: GovernedJobRuntime
+    facts: Any = None
+    gate: Any = None
+    identity: Any = None
+    executor: Any = None
+    flags: Any = None
+    service: Any = None
+    _governed: GovernedJobRuntime | None = None
+    _provision: Callable[[str], Any] | None = None
 
     def run(self, kind: str, operation_id: str):
+        if kind == "provision":
+            if self._provision is None:
+                raise PermissionError(
+                    "VC provision runtime not integrated; provision and validate "
+                    "the target workspace first")
+            return self._provision(operation_id)
+        if self._governed is None:
+            raise PermissionError(f"VC {kind} runtime not integrated")
         return self._governed.run(kind, operation_id)
 
 
@@ -100,6 +110,24 @@ def assemble_vc_runtime(*, workspace_id, facts, flags, executor, identity, gate,
                         service=reconcile_service, _governed=governed)
 
 
+def assemble_provision_runtime(*, workspace_id, manifests, runner) -> VcJobRuntime:
+    """Bootstrap provisioning runtime.
+
+    `provision` is the one governed kind that cannot flow through
+    `GovernedJobRuntime`: it precedes the durable fact tables it would otherwise
+    load a request from (chicken-and-egg). It instead runs the reviewed owner
+    migrations and grants directly, guarded by `provision()`'s manifest checks
+    and the runner's per-spec validation. No Genie content is ever touched.
+    """
+
+    def _run_provision(operation_id: str):
+        # operation_id is validated canonical by `main()`; provisioning is
+        # infrastructure bootstrap and consumes no durable request.
+        provision(manifests, runner)
+
+    return VcJobRuntime(workspace_id=workspace_id, _provision=_run_provision)
+
+
 def _resolve_platform_ports(kind: str) -> dict:
     """Construct durable target-local ports for `kind` from explicit workspace
     configuration and credentials.
@@ -122,4 +150,7 @@ def _resolve_platform_ports(kind: str) -> dict:
 def build_vc_runtime(kind: str) -> VcJobRuntime:
     if kind not in JOB_KINDS:
         raise PermissionError(f"VC {kind} runtime not integrated; unknown job kind")
-    return assemble_vc_runtime(**_resolve_platform_ports(kind))
+    ports = _resolve_platform_ports(kind)
+    if kind == "provision":
+        return assemble_provision_runtime(**ports)
+    return assemble_vc_runtime(**ports)
