@@ -42,6 +42,7 @@ def _surface(*, base_busy=False, base_stale=False, base_version=True):
         source_selection=SimpleNamespace(profile="src-profile"),
         observer=Mock(), preflight=Mock(return_value=evidence),
         releases=Mock(), store=Mock())
+    promotion.releases.get.side_effect = LookupError("fresh")  # default: no prior release
     promotion.observer.capture.return_value = observation
     identity = Mock()
     identity.executor.return_value = executor
@@ -87,6 +88,28 @@ def test_mint_drives_create_validate_approve_promote_in_order(monkeypatch):
     surface.approvals.authorize.assert_called_once_with(request, executor)
     # 6. promote mints the approved operation fact (approval_id == operation_id).
     surface.commands.promote.assert_called_once_with(OP, OP, "rel-key", plan.requester)
+
+
+def test_mint_is_resumable_and_skips_create_when_release_already_exists(monkeypatch):
+    """The RELEASE fact is immutable and the operation id is deterministic from
+    (workspace, requester, key), so a re-run must reuse the existing release (skip
+    create, which would conflict on a fresh recorded_at) and resume validate->promote
+    against that same deterministic id."""
+    surface, _executor, _request, _evidence = _surface()
+    surface.promotion.releases.get.side_effect = None  # a prior release exists
+    surface.promotion.releases.get.return_value = Mock(name="pinned-release")
+    monkeypatch.setattr(driver, "_release_manifest", lambda s, op: Mock())
+    monkeypatch.setattr(driver, "build_approval_inputs", Mock(return_value=Mock()))
+    plan = _plan()
+    expected_id = driver._release_operation_id(plan.requester, plan.key)
+
+    result = mint(surface, plan)
+
+    surface.commands.create.assert_not_called()
+    assert result["operation_id"] == expected_id
+    surface.promotion.releases.get.assert_called_once_with(expected_id)
+    surface.commands.validate.assert_called_once_with(expected_id, "rel-key", plan.requester)
+    surface.commands.promote.assert_called_once_with(expected_id, expected_id, "rel-key", plan.requester)
 
 
 @pytest.mark.parametrize("kind", ["busy", "stale", "no_version"])

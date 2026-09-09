@@ -437,21 +437,66 @@ class PlatformAdapters:
     # -- dependency checker (live preflight permission probes) ------------
     def dependency_checker(self) -> DependencyChecker:
         client = self.client("executor")
+        query = self.sql("executor")
 
-        def grantees(kind, identifier, privilege):
-            return frozenset()  # populated live via SHOW GRANTS; wired in D2.5
+        # UC securable keyword for `SHOW GRANTS ON <securable> <name>`. Metric views
+        # are governed as tables for SELECT.
+        _SECURABLE = {"table": "TABLE", "metric_view": "TABLE", "catalog": "CATALOG",
+                      "schema": "SCHEMA", "function": "FUNCTION"}
+
+        def grantees(identifier, kind, privilege):
+            securable = _SECURABLE.get(kind)
+            if securable is None:
+                return frozenset()
+            # Backtick each dotted UC name part; the identifier is schema-validated
+            # upstream (structured_identifiers) so it is a plain qualified name.
+            quoted = ".".join(f"`{part}`" for part in identifier.split("."))
+            try:
+                rows = query(f"SHOW GRANTS ON {securable} {quoted}")
+            except Exception:  # noqa: BLE001 - a missing/denied securable fails closed
+                return frozenset()
+            wanted = {privilege, "ALL PRIVILEGES"}
+            out = set()
+            for row in rows:
+                lowered = {str(key).lower(): value for key, value in row.items()}
+                if lowered.get("actiontype", lowered.get("action_type")) in wanted:
+                    principal = lowered.get("principal")
+                    if principal:
+                        out.add(principal)
+            return frozenset(out)
+
+        _WAREHOUSE_USE = frozenset({"CAN_USE", "CAN_MANAGE"})
 
         def warehouse_users(identifier):
-            return frozenset()
+            try:
+                acl = client.api_client.do(
+                    "GET", f"/api/2.0/permissions/warehouses/{identifier}")
+            except Exception:  # noqa: BLE001
+                return frozenset()
+            return _principals_with(acl, _WAREHOUSE_USE)
+
+        # Any explicit folder ACL entry (read and above) counts as "can use the
+        # destination folder"; the executor's write need is proven by the live
+        # dispatch step, not preflight.
+        _FOLDER_USE = frozenset({"CAN_READ", "CAN_RUN", "CAN_EDIT", "CAN_MANAGE"})
 
         def folder_users(identifier):
-            return frozenset()
+            try:
+                status = client.workspace.get_status(identifier)
+                acl = client.api_client.do(
+                    "GET", f"/api/2.0/permissions/directories/{status.object_id}")
+            except Exception:  # noqa: BLE001
+                return frozenset()
+            return _principals_with(acl, _FOLDER_USE)
 
         def resolve_groups(principal):
             try:
                 user = client.users.get(principal)
                 return frozenset(group.display for group in (user.groups or []))
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - SCIM user miss -> SP lookup
+                for sp in client.service_principals.list(
+                        filter=f'applicationId eq "{principal}"'):
+                    return frozenset(group.display for group in (sp.groups or []))
                 return frozenset()
 
         return DependencyChecker(grantees=grantees, warehouse_users=warehouse_users,
@@ -460,9 +505,16 @@ class PlatformAdapters:
     # -- projections over the durable operations facts --------------------
     def release_facts_reader(self, facts) -> Callable[[str], list]:
         def read(operation_id):
-            operation = facts.get_request(operation_id)
-            release = getattr(operation, "release", None)
-            return list(release or [])
+            # The RELEASE fact is a binding-scoped OperationFact (PackageManifest
+            # evidence). `get_request` returns an ApprovedOperation (request+approval),
+            # which carries no release list, so read the RELEASE-kind facts for this
+            # operation's binding directly and filter to this operation id.
+            try:
+                request = facts.get_request(operation_id).request
+            except LookupError:
+                return []
+            return [fact for fact in facts.binding_facts(request.binding.binding_id, vc.FactKind.RELEASE)
+                    if fact.operation_id == operation_id]
 
         return read
 
@@ -544,3 +596,17 @@ def _rows(response) -> list:
     return [{name: _coerce(type_name, cell)
              for name, type_name, cell in zip(names, types, row, strict=False)}
             for row in data]
+
+
+def _principals_with(acl: dict, levels: frozenset) -> frozenset:
+    """Collect every principal (SP application id / user name / group name) that
+    holds any of `levels` in a workspace-object permissions ACL. Shared by the
+    warehouse and folder dependency probes."""
+    out = set()
+    for entry in acl.get("access_control_list", []) or []:
+        reference = (entry.get("service_principal_name") or entry.get("user_name")
+                     or entry.get("group_name"))
+        if reference and any(perm.get("permission_level") in levels
+                             for perm in entry.get("all_permissions", []) or []):
+            out.add(reference)
+    return frozenset(out)

@@ -41,6 +41,17 @@ def target_folder(config: dict) -> str:
     return f"/Users/{admin}" if admin else "/Workspace"
 
 
+def _consumers(config: dict) -> tuple[str, ...]:
+    """Principals declared as consumers of the promoted target space. Explicit
+    ``consumers`` in the config wins; otherwise default to the target executor SP
+    (the gate operator). Sorted + deduped for a deterministic mapping digest."""
+    declared = config.get("consumers")
+    if declared:
+        return tuple(sorted(set(declared)))
+    principal = config.get("roles", {}).get("target", {}).get("principal_id")
+    return (principal,) if principal else ()
+
+
 def build_mapping_policy(config: dict) -> tuple[vc.MappingSpec, vc.TestPolicy]:
     """Build the exact source->target mapping + test policy the package was built
     from. Kept as the single source of truth so the D2.5b release re-creates the
@@ -51,6 +62,12 @@ def build_mapping_policy(config: dict) -> tuple[vc.MappingSpec, vc.TestPolicy]:
         "target:warehouse_id": config["target_warehouse_id"],
         "target:parent_path": target_folder(config),
     }
+    # Declare the promoted space's consumers so preflight can prove each can use the
+    # target warehouse/folder/tables. For the two-workspace gate the target executor
+    # SP is the operator/consumer; it is granted SELECT on the target table, CAN_USE
+    # on the warehouse, and folder access during D2.5 provisioning.
+    for index, consumer in enumerate(_consumers(config)):
+        mappings[f"target:consumer:{index}"] = consumer
     provisional = vc.MappingSpec("VC/1.0", target_binding, mappings, "0" * 64, "vc-map/1")
     mapping = replace(provisional, mapping_digest=packages.mapping_digest(provisional))
     thresholds = {"validation": {"smoke": True}, "benchmark": {"minimum": 1}}

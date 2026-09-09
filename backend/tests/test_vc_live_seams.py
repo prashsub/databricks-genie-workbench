@@ -10,6 +10,7 @@ No live platform: only the lowest-level clients are faked. This pins the wiring
 the live integration step exercises credentials, not composition.
 """
 
+from datetime import UTC
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -193,11 +194,110 @@ def test_clock_satisfies_both_callable_and_now_contracts():
     """One `_Clock` backs the whole governed graph: CoordinationService calls
     `clock.now()`; the durable stores (DeltaCoordinationStore/DeltaRegistry) and
     DriftService call `clock()`. Both must return an aware UTC datetime."""
-    from datetime import timezone
 
     from backend.services.version_control.platform.live_seams import _Clock
 
     clock = _Clock()
     assert callable(clock)
     called, vianow = clock(), clock.now()
-    assert called.tzinfo == timezone.utc and vianow.tzinfo == timezone.utc
+    assert called.tzinfo == UTC and vianow.tzinfo == UTC
+
+
+def test_release_facts_reader_returns_release_kind_facts_for_operation():
+    """`get_request` yields an ApprovedOperation (request+approval, no release list), so the
+    reader must resolve the operation's binding then return only its RELEASE-kind facts:
+    other operations on the same binding are excluded and a missing request yields []."""
+    from unittest.mock import Mock
+
+    from backend.services.version_control.platform.live_seams import PlatformAdapters
+
+    binding = SimpleNamespace(binding_id="b-1")
+    rel = SimpleNamespace(operation_id="op-1", fact_kind=vc.FactKind.RELEASE)
+    other_op = SimpleNamespace(operation_id="op-2", fact_kind=vc.FactKind.RELEASE)
+    facts = Mock()
+    facts.get_request.return_value = SimpleNamespace(request=SimpleNamespace(binding=binding))
+    facts.binding_facts.return_value = (rel, other_op)
+    reader = PlatformAdapters.release_facts_reader(None, facts)  # self unused
+    assert reader("op-1") == [rel]
+    facts.binding_facts.assert_called_once_with("b-1", vc.FactKind.RELEASE)
+    facts.get_request.side_effect = LookupError  # no durable request yet
+    assert reader("op-1") == []
+
+
+def _adapters_with(monkeypatch, *, sql_rows=None, warehouse_acl=None, folder_acl=None):
+    """A PlatformAdapters whose executor client/sql are faked so the dependency
+    probes can be exercised offline (they otherwise build live WorkspaceClients)."""
+    from unittest.mock import Mock
+
+    from backend.services.version_control.platform.live_seams import PlatformAdapters
+
+    adapters = PlatformAdapters({"roles": {"executor": {"warehouse_id": "wh"}}})
+    client = Mock()
+
+    def do(method, path):
+        if path.startswith("/api/2.0/permissions/warehouses/"):
+            return warehouse_acl or {}
+        if path.startswith("/api/2.0/permissions/directories/"):
+            return folder_acl or {}
+        raise AssertionError(f"unexpected API call {path}")
+
+    client.api_client.do.side_effect = do
+    client.workspace.get_status.return_value = SimpleNamespace(object_id=99)
+    client.users.get.side_effect = Exception("not a user")
+    client.service_principals.list.return_value = []
+    monkeypatch.setattr(adapters, "client", lambda role: client)
+    monkeypatch.setattr(adapters, "sql", lambda role: (lambda stmt, params=None: sql_rows or []))
+    return adapters
+
+
+def test_dependency_grantees_reads_show_grants_and_accepts_all_privileges(monkeypatch):
+    """The table probe issues SHOW GRANTS ON TABLE and returns every principal
+    holding the required privilege OR ALL PRIVILEGES; other action types are dropped,
+    and column-name casing (Principal/ActionType vs principal/action_type) is tolerated."""
+    rows = [
+        {"Principal": "sel-sp", "ActionType": "SELECT", "ObjectType": "TABLE"},
+        {"principal": "all-sp", "action_type": "ALL PRIVILEGES", "ObjectType": "TABLE"},
+        {"Principal": "modify-sp", "ActionType": "MODIFY", "ObjectType": "TABLE"},
+    ]
+    adapters = _adapters_with(monkeypatch, sql_rows=rows)
+    checker = adapters.dependency_checker()
+    grantees = checker._grantees
+    assert grantees("cat.sch.tbl", "table", "SELECT") == frozenset({"sel-sp", "all-sp"})
+    # Unknown securable kind fails closed without a SQL call.
+    assert grantees("whatever", "made_up", "SELECT") == frozenset()
+
+
+def test_dependency_warehouse_and_folder_probes_filter_by_permission_level(monkeypatch):
+    """Warehouse membership requires CAN_USE/CAN_MANAGE; folder membership accepts any
+    read-and-above level. Principals with only unrelated permissions are excluded."""
+    warehouse_acl = {"access_control_list": [
+        {"service_principal_name": "use-sp", "all_permissions": [{"permission_level": "CAN_USE"}]},
+        {"user_name": "viewer@x", "all_permissions": [{"permission_level": "CAN_VIEW"}]},
+    ]}
+    folder_acl = {"access_control_list": [
+        {"service_principal_name": "read-sp", "all_permissions": [{"permission_level": "CAN_READ"}]},
+        {"group_name": "admins", "all_permissions": [{"permission_level": "CAN_MANAGE"}]},
+    ]}
+    adapters = _adapters_with(monkeypatch, warehouse_acl=warehouse_acl, folder_acl=folder_acl)
+    checker = adapters.dependency_checker()
+    assert checker._warehouse_users("wh-1") == frozenset({"use-sp"})
+    assert checker._folder_users("/Users/a") == frozenset({"read-sp", "admins"})
+
+
+def test_dependency_check_authorizes_executor_end_to_end(monkeypatch):
+    """The composed checker authorizes a principal that holds SELECT on the table,
+    CAN_USE on the warehouse, and a folder ACL entry -- exactly the preflight gate."""
+    adapters = _adapters_with(
+        monkeypatch,
+        sql_rows=[{"Principal": "exec-sp", "ActionType": "SELECT"}],
+        warehouse_acl={"access_control_list": [
+            {"service_principal_name": "exec-sp",
+             "all_permissions": [{"permission_level": "CAN_USE"}]}]},
+        folder_acl={"access_control_list": [
+            {"service_principal_name": "exec-sp",
+             "all_permissions": [{"permission_level": "CAN_MANAGE"}]}]})
+    checker = adapters.dependency_checker()
+    assert checker.check(None, None, "exec-sp", "table", "cat.sch.tbl") is True
+    assert checker.check(None, None, "exec-sp", "warehouse", "wh-1") is True
+    assert checker.check(None, None, "exec-sp", "folder", "/Users/a") is True
+    assert checker.check(None, None, "intruder-sp", "table", "cat.sch.tbl") is False

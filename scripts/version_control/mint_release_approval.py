@@ -38,9 +38,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from backend.services.version_control import contracts as vc
 from scripts.version_control.promotion_release import build_approval_inputs
+
+
+def _release_operation_id(actor: vc.ActorContext, key: str) -> str:
+    """The deterministic release operation id ReleaseCommands.create derives from
+    (workspace, actor, key). Recomputed here so the driver is resumable: if a prior
+    run already released this exact operation, we skip create (whose RELEASE fact is
+    immutable and would otherwise conflict on a fresh recorded_at) and resume."""
+    return str(uuid5(NAMESPACE_URL, vc.canonical_json_hash('vc-release-id/1', {
+        'workspace': actor.workspace_id, 'actor': actor.subject_id, 'key': key})))
 
 
 @dataclass(frozen=True)
@@ -89,11 +99,17 @@ def mint(surface: SimpleNamespace, plan: MintPlan, *,
         raise RuntimeError("Base observation unavailable; cannot pin promotion base")
     expected_base = base.captured_version.fingerprints.state_digest
 
-    # 2. create the immutable release + target-local request.
-    handle = surface.commands.create(
-        plan.source_version_id, plan.mapping, plan.policy, expected_base,
-        plan.source_profile, plan.target_profile, plan.key, plan.requester)
-    operation_id = handle.operation_id
+    # 2. create the immutable release + target-local request (resumable: the RELEASE
+    #    fact is immutable, so if a prior run already released this deterministic
+    #    operation id, reuse it instead of re-creating with a fresh recorded_at).
+    operation_id = _release_operation_id(plan.requester, plan.key)
+    try:
+        surface.promotion.releases.get(operation_id)
+    except LookupError:
+        handle = surface.commands.create(
+            plan.source_version_id, plan.mapping, plan.policy, expected_base,
+            plan.source_profile, plan.target_profile, plan.key, plan.requester)
+        operation_id = handle.operation_id
 
     # 3. validate: preflight + CONFIG_OBSERVED stage.
     surface.commands.validate(operation_id, plan.key, plan.requester)
