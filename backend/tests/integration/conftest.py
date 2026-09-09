@@ -283,3 +283,170 @@ def live_platform():
     if not location:
         pytest.fail("DEPLOYMENT BLOCKER: set VC_INTEGRATION_CONFIG for real nonproduction probes")
     return LivePlatform(json.loads(Path(location).read_text()))
+
+
+def _statement_parameters(parameters):
+    """Render a named-parameter dict into the SQL Statements API `parameters`
+    list with explicit types, so INSERTs land in the typed operations columns.
+
+    DeltaFactStore hands to_wire() values: strings, ints (BIGINT columns),
+    booleans, one ISO-8601 TIMESTAMP (`recorded_at`) and typed NULLs. The direct
+    SQL connector would bind these natively, but the workspace IP ACL blocks the
+    thrift warehouse endpoint, so we drive the REST Statements API instead."""
+    from datetime import datetime
+    rendered = []
+    for name, value in (parameters or {}).items():
+        if value is None:
+            rendered.append({"name": name, "value": None})  # typed NULL (VOID)
+        elif isinstance(value, bool):
+            rendered.append({"name": name, "value": str(value).lower(), "type": "BOOLEAN"})
+        elif isinstance(value, int):
+            rendered.append({"name": name, "value": str(value), "type": "BIGINT"})
+        elif name.endswith("_at"):
+            moment = datetime.fromisoformat(str(value))
+            rendered.append({"name": name,
+                             "value": moment.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                             "type": "TIMESTAMP"})
+        else:
+            rendered.append({"name": name, "value": str(value), "type": "STRING"})
+    return rendered
+
+
+class M06Platform:
+    """Real M08 platform surface for the audit/authorization deployment gate.
+
+    Builds the target-owned durable fact store (DeltaFactStore + M06
+    DurableOperationFacts) over live Databricks SQL warehouses authenticated as
+    the explicit role service principals. No mocks: every probe is a real commit,
+    read-back, or denial against the provisioned namespace. SQL flows through the
+    REST Statements API (the thrift warehouse endpoint is IP-ACL blocked).
+    """
+
+    def __init__(self, config):
+        self.config = config
+        namespace = config["namespace"]
+        self.catalog, self.control_schema = namespace.split(".")
+        self.operations_table = f"`{self.catalog}`.`{self.control_schema}`.`genie_space_operations`"
+        self.target_workspace_id = config["roles"]["executor"]["workspace_id"]
+        self._live = LivePlatform(config)
+
+    # -- live SQL (REST Statements API) -----------------------------------
+    def _execute(self, role, statement, parameters=None):
+        import time
+        self._live._verify_role(role)
+        body = {"warehouse_id": self.config["roles"][role]["warehouse_id"],
+                "statement": statement, "wait_timeout": "30s", "on_wait_timeout": "CONTINUE"}
+        rendered = _statement_parameters(parameters)
+        if rendered:
+            body["parameters"] = rendered
+        response = self._live.api(role, "post", "/api/2.0/sql/statements", body)
+        deadline = time.monotonic() + 180
+        while response["status"]["state"] in {"PENDING", "RUNNING"}:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("SQL statement timed out")
+            time.sleep(2)
+            response = self._live.api(role, "get", f"/api/2.0/sql/statements/{response['statement_id']}")
+        if response["status"]["state"] != "SUCCEEDED":
+            error = response["status"].get("error", {})
+            raise RuntimeError(f"{error.get('error_code', 'SQL_FAILED')}: {error.get('message', '')}")
+        return LivePlatform._rows(response)
+
+    def sql(self, role):
+        return lambda statement, parameters=None: self._execute(role, statement, parameters)
+
+    def _denying(self, role):
+        """Return a (statement, parameters) runner that converts any server-side
+        rejection (permission or delta.appendOnly) into PermissionError, so the
+        gate can assert denial uniformly."""
+        def run(statement, parameters=None):
+            try:
+                return self._execute(role, statement, parameters)
+            except Exception as exc:
+                raise PermissionError(str(exc)[:400]) from exc
+        return run
+
+    def target_sql(self, statement, parameters=None):
+        return self._denying("executor")(statement, parameters)
+
+    def source_sql(self, statement, parameters=None):
+        return self._denying("source")(statement, parameters)
+
+    # -- durable fact store (M06) -----------------------------------------
+    def operation_facts(self):
+        from backend.services.version_control.governance.delta import DeltaFactStore
+        from backend.services.version_control.governance.facts import (
+            DurableOperationFacts,
+        )
+
+        store = DeltaFactStore(self.sql("executor"), self.catalog, self.control_schema,
+                               self.target_workspace_id, writes_enabled=True,
+                               read_evidence=self._read_evidence)
+        return DurableOperationFacts(store.read, store.append, writes_enabled=True)
+
+    def _read_evidence(self, uri):
+        selection = self.config["roles"]["executor"]
+        script = (
+            "import sys\n"
+            "from databricks.sdk import WorkspaceClient\n"
+            "client = WorkspaceClient(profile=sys.argv[1])\n"
+            "sys.stdout.buffer.write(client.files.download(sys.argv[2]).contents.read())\n")
+        result = subprocess.run([sys.executable, "-c", script, selection["profile"], uri],
+                                env=self._live._environment(), capture_output=True, timeout=180, check=False)
+        if result.returncode:
+            raise PermissionError("Private evidence unreadable")
+        return result.stdout
+
+    def valid_fact(self):
+        from dataclasses import replace
+        from datetime import UTC, datetime
+        from uuid import NAMESPACE_URL, uuid4, uuid5
+
+        from backend.services.version_control.contracts import (
+            ActorContext,
+            BindingRef,
+            FactKind,
+            FactStatus,
+            OperationFact,
+            PatchStage,
+            RequestIdentity,
+            StageEvidence,
+        )
+        from backend.services.version_control.governance.facts import fact_key
+
+        ws = self.target_workspace_id
+        digest = "a" * 64
+        operation_id = str(uuid4())
+        now = datetime.now(UTC)
+        binding = BindingRef(str(uuid4()), 1, "audit-gate", ws, "physical-space", "dev")
+        actor = ActorContext("audit-actor@example.invalid", ws, "human")
+        provisional = OperationFact(
+            event_id=str(uuid4()), fact_kind=FactKind.OPERATION, operation_id=operation_id,
+            transition_sequence=0, event_key="", binding=binding,
+            request=RequestIdentity(operation_id, str(uuid4()), digest), operation_type="edit",
+            requester_id=actor.subject_id, actor=actor, status=FactStatus.REQUESTED,
+            evidence=StageEvidence("VC/1.0", PatchStage.CONFIG_PENDING, now, digest, None),
+            recorded_at=now)
+        key = fact_key(provisional)
+        return replace(provisional, event_key=key, event_id=str(uuid5(NAMESPACE_URL, key)))
+
+    def count_event(self, event_key):
+        rows = self._execute("executor",
+                             f"SELECT COUNT(*) AS n FROM {self.operations_table} WHERE event_key = :key",
+                             {"key": event_key})
+        return int(rows[0]["n"])
+
+    def close(self):
+        # REST Statements API is stateless; nothing to tear down.
+        pass
+
+
+@pytest.fixture
+def m06_platform():
+    location = os.environ.get("VC_INTEGRATION_CONFIG")
+    if not location:
+        pytest.fail("DEPLOYMENT BLOCKER: set VC_INTEGRATION_CONFIG for the M06/M08 audit gate")
+    platform = M06Platform(json.loads(Path(location).read_text()))
+    try:
+        yield platform
+    finally:
+        platform.close()
