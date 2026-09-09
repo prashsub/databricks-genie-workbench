@@ -277,6 +277,54 @@ except Exception as exc:
                 or "DELTA_CANNOT_MODIFY_APPEND_ONLY" in message
                 or "append only" in message.lower())
 
+    def _appendonly_rejected(self, role, probe):
+        status = self.sql(role, probe)["status"]
+        error = status.get("error", {})
+        message = error.get("message", "")
+        return (status["state"] == "FAILED"
+                and ("APPEND_ONLY" in error.get("error_code", "")
+                     or "DELTA_CANNOT_MODIFY_APPEND_ONLY" in message
+                     or "append only" in message.lower()))
+
+    def storage_capability_probe(self):
+        """SP-only live probe of STORAGE_CAPABILITIES against the provisioned
+        namespace.
+
+        Every call re-exercises the platform (a fresh non-owner runtime INSERT,
+        the append-only rejection of UPDATE/DELETE, the coordination isolation
+        level, and the serialized enrollment Job), so a capability outage flips
+        the corresponding key to False and `storage_write_ready` degrades closed —
+        an earlier positive is never reused. Returns the `{capability: bool}`
+        evidence map that `capabilities.capabilities_ready` consumes."""
+        fact = "genie_space_versions"
+        table = self.table(fact)
+        properties = table.get("properties", {}) or {}
+        insert_ok = self.sql("runtime", f"{fact}.insert")["status"]["state"] == "SUCCEEDED"
+        coordination = self.table("genie_ops_coordination")
+        job = self.api("provisioner", "get",
+                       f"/api/2.2/jobs/get?job_id={self.config['enrollment_job_id']}")
+        settings = job.get("settings", {})
+        run_as = settings.get("run_as", {}) or {}
+        return {
+            # Non-owner runtime SP holds fine-grained DML: it can append but never
+            # owns the table it writes.
+            "fine_grained_dml": insert_ok,
+            "nonowner_runtime": (insert_ok
+                                 and table.get("owner") != self.principal("runtime")),
+            # delta.appendOnly is set AND actually rejects UPDATE and DELETE.
+            "append_only": (properties.get("delta.appendOnly") == "true"
+                            and self._appendonly_rejected("runtime", f"{fact}.update")
+                            and self._appendonly_rejected("runtime", f"{fact}.delete")),
+            # CAS coordination is Serializable.
+            "serializable": (coordination.get("properties", {}) or {}).get(
+                "delta.isolationLevel") == "Serializable",
+            # Enrollment runs isolated as its own SP on a serialized, queued Job.
+            "enrollment_isolated": (
+                run_as.get("service_principal_name") == self.principal("enrollment")
+                and settings.get("max_concurrent_runs") == 1
+                and (settings.get("queue", {}) or {}).get("enabled") is True),
+        }
+
 
 @pytest.fixture
 def live_platform():
