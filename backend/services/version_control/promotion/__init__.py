@@ -188,7 +188,15 @@ class PromotionService:
         if selection.profile is not None and (not selection.profile.strip() or selection.profile.upper() == 'DEFAULT'):
             raise PermissionError('Explicit source profile or verified OBO required')
         executor = self.source_identity.executor(selection)
-        if (executor.workspace_id != self.source_binding.workspace_id or executor.workspace_id != selection.workspace_id
+        # M07 pulls immutable source inputs *into* a pre-enrolled target: the source
+        # version is imported (re-homed) under a target-workspace ledger binding
+        # (M02 `append_observation` only trusts the target workspace), so
+        # `source_binding.workspace_id` is the TARGET workspace in a genuine
+        # cross-workspace promotion. The source SP identity is therefore verified
+        # against the explicit source *selection* (its real source workspace/host/
+        # principal), never the target-homed ledger binding; the binding is tied to
+        # the read version by `version.context.binding == self.source_binding` below.
+        if (executor.workspace_id != selection.workspace_id
                 or canonical_host(executor.host) != canonical_host(selection.host)
                 or executor.principal_id != selection.principal_id):
             raise PermissionError('Source identity does not match selected immutable source')

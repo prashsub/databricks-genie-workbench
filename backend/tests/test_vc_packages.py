@@ -133,3 +133,32 @@ def test_package_rejects_implicit_source_profile(package_rig):
     with pytest.raises(PermissionError):
         rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
     assert not rig.store.files
+
+
+def test_package_pulls_source_across_workspaces_into_target_homed_binding(package_rig):
+    """M07 pulls the source version into a *target-homed* ledger binding (M02 only
+    trusts the target workspace), so in a genuine cross-workspace promotion the
+    source SP's workspace differs from `source_binding.workspace_id` (the target).
+    package() must verify the source identity against the source *selection*, not
+    the target-homed binding, and still tie the read version to that binding."""
+    rig = package_rig
+    # Re-home the ledger source binding to the TARGET workspace (as D2.5a's live
+    # import does), while the source SP stays in its real source workspace.
+    target_homed = replace(rig.source, workspace_id='target')
+    rig.service.source_binding = target_homed
+    rig.version = replace(rig.version, context=replace(rig.version.context, binding=target_homed))
+    rig.ledger.get_version.return_value = rig.version
+    # Source selection + verified executor remain in the source workspace.
+    assert rig.service.source_selection.workspace_id == 'source'
+    assert rig.service.source_identity.executor.return_value.workspace_id == 'source'
+
+    reference = rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
+    manifest = json.loads(rig.store.read(reference.manifest_uri))
+    assert manifest['source_version_id'] == rig.version.version_id
+    rig.ledger.get_version.assert_called_once_with(target_homed, rig.version.version_id)
+
+    # A source executor that does not match the source selection is still rejected.
+    rig.service.source_identity.executor.return_value = replace(
+        rig.service.source_identity.executor.return_value, principal_id='intruder-sp')
+    with pytest.raises(PermissionError, match='Source identity'):
+        rig.service.package(rig.version.version_id, rig.mapping, rig.policy)
