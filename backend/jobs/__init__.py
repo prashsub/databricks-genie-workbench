@@ -128,29 +128,89 @@ def assemble_provision_runtime(*, workspace_id, manifests, runner) -> VcJobRunti
     return VcJobRuntime(workspace_id=workspace_id, _provision=_run_provision)
 
 
-def _resolve_platform_ports(kind: str) -> dict:
+_PROVISION_CONFIG_KEYS = ("catalog", "control_schema", "warehouse_id", "principals")
+
+
+def resolve_provision_ports(*, config, execute) -> dict:
+    """Build the provisioning ports (manifests + owner runner) from explicit
+    config and a blocking SQL `execute` seam.
+
+    Pure and offline-testable: the reviewed owner DDL manifests and the
+    least-privilege grant matrix are assembled here and handed to an
+    `OwnerMigrationRunner` bound to `execute`. Fails closed if the explicit
+    catalog/control-schema/warehouse/principals config is incomplete.
+    """
+
+    from backend.services.version_control.platform.provisioning import (
+        OwnerMigrationRunner,
+        build_grant_matrix,
+        build_owner_manifests,
+    )
+
+    if not config or any(not config.get(key) for key in _PROVISION_CONFIG_KEYS):
+        raise PermissionError(
+            "VC provision runtime not integrated; explicit catalog, control "
+            "schema, warehouse and principals are required")
+    grants = build_grant_matrix(config["principals"])
+    runner = OwnerMigrationRunner(execute, config["catalog"], config["control_schema"], grants)
+    return {"workspace_id": config.get("workspace_id", ""),
+            "manifests": build_owner_manifests(), "runner": runner}
+
+
+def _build_warehouse_executor(config) -> Callable[[str], Any]:
+    """Platform seam: a blocking SQL executor bound to the provisioner identity.
+
+    Constructs an explicit-credential Databricks client lazily (on first call)
+    and runs one statement on the configured warehouse, raising on any
+    non-succeeded state. Never offline-exercised; the wiring that consumes it
+    (`resolve_provision_ports`) is tested with a fake `execute`.
+    """
+
+    warehouse_id = config["warehouse_id"]
+    state: dict[str, Any] = {}
+
+    def execute(statement: str) -> None:
+        client = state.get("client")
+        if client is None:
+            from databricks.sdk import WorkspaceClient
+
+            client = WorkspaceClient()
+            state["client"] = client
+        response = client.statement_execution.execute_statement(
+            warehouse_id=warehouse_id, statement=statement, wait_timeout="50s")
+        status = response.status
+        if status is None or status.state is None or status.state.value != "SUCCEEDED":
+            raise PermissionError(f"Provisioning statement failed: {statement}")
+
+    return execute
+
+
+def _resolve_platform_ports(kind: str, config=None) -> dict:
     """Construct durable target-local ports for `kind` from explicit workspace
     configuration and credentials.
 
-    Platform seam: this builds the Delta-backed operation facts, the mutation
-    gate graph (coordination/ledger/approvals/transport/canonicalizer), the
-    verified identity provider and explicit-credential SDK clients from the
-    provisioned target workspace, then returns the keyword bundle for
-    `assemble_vc_runtime`. It requires a fully provisioned, explicitly selected
-    non-production target (Delta tables, run-as service principal, warehouse and
-    deployed job ids) and is validated during the provisioning/integration
-    phase. Until then it fails closed.
+    `provision` is integrated: it resolves the reviewed owner migrations + grant
+    matrix and a warehouse-bound executor from explicit config. Every governed
+    mutation kind remains a fail-closed platform seam (Delta-backed operation
+    facts, the mutation gate graph, verified identity, explicit-credential SDK
+    clients) pending the provisioning/integration phase.
     """
 
+    if kind == "provision":
+        complete = bool(config) and all(config.get(key) for key in _PROVISION_CONFIG_KEYS)
+        # resolve_provision_ports fails closed on incomplete config before the
+        # executor is ever used, so a no-op executor is safe in that case.
+        execute = _build_warehouse_executor(config) if complete else (lambda _s: None)
+        return resolve_provision_ports(config=config or {}, execute=execute)
     raise PermissionError(
         f"VC {kind} runtime not integrated; target-local platform ports are "
         "unavailable (provision and validate the target workspace first)")
 
 
-def build_vc_runtime(kind: str) -> VcJobRuntime:
+def build_vc_runtime(kind: str, config=None) -> VcJobRuntime:
     if kind not in JOB_KINDS:
         raise PermissionError(f"VC {kind} runtime not integrated; unknown job kind")
-    ports = _resolve_platform_ports(kind)
+    ports = _resolve_platform_ports(kind, config)
     if kind == "provision":
         return assemble_provision_runtime(**ports)
     return assemble_vc_runtime(**ports)

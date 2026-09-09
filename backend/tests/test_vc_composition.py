@@ -1,12 +1,15 @@
 from pathlib import Path
-from unittest.mock import Mock
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import yaml
 
 from backend.services.version_control import contracts, platform
-from backend.services.version_control.platform.feature_flags import FeatureFlags, WRITE_SWITCHES
+from backend.services.version_control.platform.feature_flags import (
+    WRITE_SWITCHES,
+    FeatureFlags,
+)
 
 
 def test_modules_are_wired_once_with_write_switch_default_off():
@@ -70,7 +73,26 @@ def test_jobs_take_operation_id_and_retry_verification_not_mutation():
         task = job["tasks"][0]
         assert task["max_retries"] == (2 if kind == "verification" else 0)
         assert task["retry_on_timeout"] is False
-        assert task["python_wheel_task"]["parameters"] == ["--kind", kind, "--operation-id", "{{job.parameters.operation_id}}"]
+        params = task["python_wheel_task"]["parameters"]
+        head = ["--kind", kind, "--operation-id", "{{job.parameters.operation_id}}"]
+        assert params[:4] == head
+        if kind == "provision":
+            # Provisioning precedes the durable fact tables, so its explicit
+            # target config + least-privilege principals flow from reviewed
+            # bundle variables (not a durable request loaded by operation_id).
+            assert params[4:] == [
+                "--catalog", "${var.catalog}",
+                "--control-schema", "${var.control_schema}",
+                "--warehouse-id", "${var.warehouse_id}",
+                "--runtime-principal", "${var.vc_runtime_principal}",
+                "--executor-principal", "${var.vc_executor_principal}",
+                "--enrollment-principal", "${var.vc_enrollment_principal}",
+                "--observer-principal", "${var.vc_observer_principal}",
+                "--approval-principal", "${var.vc_approval_principal}",
+                "--source-principal", "${var.vc_source_principal}",
+            ]
+        else:
+            assert params == head
 
 
 def test_job_runtime_refuses_unintegrated_handlers_and_verifies_retries():
@@ -100,8 +122,11 @@ def test_job_runtime_refuses_unintegrated_handlers_and_verifies_retries():
 def test_first_write_enable_requires_every_safety_capability():
     container = platform.compose()
     assert callable(getattr(container, "enabled", None)), "Feature requests alone must not enable writes"
-    from backend.services.version_control.platform.capabilities import FIRST_WRITE_CAPABILITIES, REQUIRED_WRITER_PATHS
     from backend.services.version_control.platform import REQUIRED_WRITE_PORTS
+    from backend.services.version_control.platform.capabilities import (
+        FIRST_WRITE_CAPABILITIES,
+        REQUIRED_WRITER_PATHS,
+    )
     flags = FeatureFlags(**{name: True for name in WRITE_SWITCHES}, vc_history_enabled=True)
     probe = Mock(return_value={name: True for name in FIRST_WRITE_CAPABILITIES})
     factories = {port: Mock(return_value=object()) for port in REQUIRED_WRITE_PORTS}

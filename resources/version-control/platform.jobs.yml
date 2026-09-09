@@ -116,4 +116,30 @@ targets:
               python_wheel_task:
                 package_name: genie_workbench
                 entry_point: vc-platform
-                parameters: [--kind, provision, --operation-id, "{{job.parameters.operation_id}}"]
+                # Provisioning precedes the durable fact tables, so its explicit
+                # target config is passed from reviewed bundle variables (not a
+                # durable request). Owner migrations + the least-privilege grant
+                # matrix run as the provisioner SP.
+                parameters:
+                  - --kind
+                  - provision
+                  - --operation-id
+                  - "{{job.parameters.operation_id}}"
+                  - --catalog
+                  - ${var.catalog}
+                  - --control-schema
+                  - ${var.control_schema}
+                  - --warehouse-id
+                  - ${var.warehouse_id}
+                  - --runtime-principal
+                  - ${var.vc_runtime_principal}
+                  - --executor-principal
+                  - ${var.vc_executor_principal}
+                  - --enrollment-principal
+                  - ${var.vc_enrollment_principal}
+                  - --observer-principal
+                  - ${var.vc_observer_principal}
+                  - --approval-principal
+                  - ${var.vc_approval_principal}
+                  - --source-principal
+                  - ${var.vc_source_principal}

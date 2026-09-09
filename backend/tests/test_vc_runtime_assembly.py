@@ -187,3 +187,51 @@ def test_provision_runtime_rejects_governed_kinds():
 def test_build_vc_runtime_provision_fails_closed_offline():
     with pytest.raises(PermissionError, match="not integrated"):
         build_vc_runtime("provision")
+
+
+def _provision_config(**overrides):
+    config = {
+        "workspace_id": "target", "catalog": "sandbox_cat", "control_schema": "vc_ctl",
+        "warehouse_id": "wh-123", "principals": {
+            "runtime": "11111111-1111-4111-8111-111111111111",
+            "executor": "22222222-2222-4222-8222-222222222222",
+            "enrollment": "33333333-3333-4333-8333-333333333333",
+            "observer": "44444444-4444-4444-8444-444444444444",
+            "approval": "55555555-5555-4555-8555-555555555555",
+            "source": "66666666-6666-4666-8666-666666666666"}}
+    config.update(overrides)
+    return config
+
+
+def test_resolve_provision_ports_builds_runner_and_grants_from_config():
+    from backend.jobs import resolve_provision_ports
+    executed = []
+    ports = resolve_provision_ports(config=_provision_config(), execute=executed.append)
+    runtime = assemble_provision_runtime(**ports)
+    assert isinstance(runtime, VcJobRuntime)
+    runtime.run("provision", OP)
+    assert executed, "Owner migrations and grants must reach the SQL executor"
+    assert all("${" not in statement for statement in executed), "Templates fully rendered"
+    assert any("CREATE TABLE IF NOT EXISTS `sandbox_cat`.`vc_ctl`.genie_space_versions" in s
+               for s in executed)
+    assert any(s.startswith("GRANT SELECT, INSERT ON TABLE "
+                            "`sandbox_cat`.`vc_ctl`.genie_space_versions") for s in executed)
+
+
+def test_resolve_provision_ports_fails_closed_on_incomplete_config():
+    from backend.jobs import resolve_provision_ports
+    assert resolve_provision_ports(config=_provision_config(), execute=lambda _s: None)
+    for key in ("catalog", "control_schema", "warehouse_id", "principals"):
+        broken = {k: v for k, v in _provision_config().items() if k != key}
+        with pytest.raises(PermissionError, match="not integrated"):
+            resolve_provision_ports(config=broken, execute=lambda _s: None)
+
+
+def test_build_vc_runtime_provision_requires_config_offline():
+    # Without provisioning config the provision runtime fails closed.
+    with pytest.raises(PermissionError, match="not integrated"):
+        build_vc_runtime("provision", None)
+    for key in ("catalog", "control_schema", "warehouse_id", "principals"):
+        broken = {k: v for k, v in _provision_config().items() if k != key}
+        with pytest.raises(PermissionError, match="not integrated"):
+            build_vc_runtime("provision", broken)

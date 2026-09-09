@@ -12,7 +12,7 @@ _EXPORTS = {
     name: module
     for module, names in {
         "bundles": ("bundle_detection_evidence", "deployment_inventory", "guard_bundle", "preflight_deployment"),
-        "provisioning": ("OwnerMigrationRunner", "build_owner_manifests", "provision", "repeatable_sandbox_provision"),
+        "provisioning": ("OwnerMigrationRunner", "PROVISION_ROLES", "build_grant_matrix", "build_owner_manifests", "provision", "repeatable_sandbox_provision"),
         "permissions": ("verify_artifact_permissions", "verify_coordination_permissions", "verify_fact_permissions"),
         "capabilities": ("FIRST_WRITE_CAPABILITIES", "REQUIRED_WRITER_PATHS", "capabilities_ready", "storage_write_ready", "topology_read_ready"),
         "identity": ("PlatformIdentityProvider", "TrustedSnapshotReader", "verify_configured_job_run_as", "verify_job_run_as"),

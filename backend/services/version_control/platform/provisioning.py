@@ -128,6 +128,79 @@ class OwnerMigrationRunner:
             self._execute(self._render(grant))
 
 
+# --- Least-privilege grant matrix (M08-owned) ---------------------------------
+# Grants attach to the objects the owner migrations create. Principals are
+# already-resolved application ids, quoted with backticks; the only templates are
+# ${catalog}/${control_schema}, rendered by OwnerMigrationRunner. Denials are by
+# omission. Contract (contracts.md §"Grant boundaries and append semantics"):
+#   - Fact tables are append-only: SELECT+INSERT lets the runtime append while
+#     Delta rejects UPDATE/DELETE and non-ownership rejects ALTER/DROP/REPLACE.
+#     Never grant broad MODIFY.
+#   - Coordination is UPDATE-only for the executor and INSERT-only for the
+#     separate enrollment service (fine-grained DML; a deployment gate).
+#   - Each Volume has exactly one writer; designated consumers get READ only.
+PROVISION_ROLES = ("runtime", "executor", "enrollment", "observer", "approval", "source")
+_FACT_TABLES = ("genie_space_versions", "genie_space_registry", "genie_space_operations")
+_COORDINATION = "genie_ops_coordination"
+_VOLUME_WRITER = {
+    "vc_snapshots": "observer",
+    "vc_approval_evidence": "approval",
+    "vc_outbound_packages": "source",
+    "vc_target_receipts": "executor",
+}
+_VOLUME_READER = {
+    "vc_outbound_packages": ("executor",),
+    "vc_target_receipts": ("source",),
+}
+_PRINCIPAL = re.compile(r"[A-Za-z0-9._@-]+")
+
+
+def _quote_principal(appid):
+    if not appid or not _PRINCIPAL.fullmatch(appid):
+        raise ValueError(f"Unsafe or empty principal identifier: {appid!r}")
+    return f"`{appid}`"
+
+
+def build_grant_matrix(principals):
+    """Author the reviewed least-privilege grants for `principals` (role->appid).
+
+    Returns render-ready statements (``${catalog}``/``${control_schema}``
+    templates, backtick-quoted principals) in a deterministic order. Raises if a
+    role is missing or a principal is unsafe/empty.
+    """
+
+    missing = [role for role in PROVISION_ROLES if not principals.get(role)]
+    if missing:
+        raise ValueError(f"Grant matrix requires every role; missing: {missing}")
+    quoted = {role: _quote_principal(principals[role]) for role in PROVISION_ROLES}
+    table = "${catalog}.${control_schema}"
+    grants = []
+
+    # USE CATALOG / USE SCHEMA so denials are permission denials, not namespace
+    # errors. Deterministic by role order.
+    for role in PROVISION_ROLES:
+        grants.append(f"GRANT USE CATALOG ON CATALOG ${{catalog}} TO {quoted[role]}")
+        grants.append(f"GRANT USE SCHEMA ON SCHEMA {table} TO {quoted[role]}")
+
+    # Fact tables: runtime appends only.
+    for name in _FACT_TABLES:
+        grants.append(f"GRANT SELECT, INSERT ON TABLE {table}.{name} TO {quoted['runtime']}")
+
+    # Coordination: executor updates existing rows; enrollment alone inserts.
+    grants.append(f"GRANT SELECT, UPDATE ON TABLE {table}.{_COORDINATION} TO {quoted['executor']}")
+    grants.append(f"GRANT SELECT, INSERT ON TABLE {table}.{_COORDINATION} TO {quoted['enrollment']}")
+
+    # Volumes: one writer each (read+write), designated consumers read-only.
+    for volume, role in _VOLUME_WRITER.items():
+        grants.append(f"GRANT READ VOLUME, WRITE VOLUME ON VOLUME {table}.{volume} "
+                      f"TO {quoted[role]}")
+    for volume, readers in _VOLUME_READER.items():
+        for role in readers:
+            grants.append(f"GRANT READ VOLUME ON VOLUME {table}.{volume} TO {quoted[role]}")
+
+    return tuple(grants)
+
+
 def provision(manifests, runner) -> None:
     specs = {}
     for manifest in manifests:

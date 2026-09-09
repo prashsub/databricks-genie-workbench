@@ -5,7 +5,7 @@ from hashlib import sha256
 from uuid import UUID
 
 from ..contracts import OperationHandle, OperationStatus
-
+from .provisioning import PROVISION_ROLES
 
 JOB_KINDS = frozenset({"restore", "reconcile", "promotion", "polling", "optimizer_apply",
                        "enrollment", "recovery", "verification", "provision"})
@@ -72,8 +72,29 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--kind", required=True, choices=sorted(JOB_KINDS))
     parser.add_argument("--operation-id", required=True)
+    # Provisioning bootstrap config (populated by the vc-provision DAB task from
+    # reviewed bundle variables; ignored by every other kind, which loads a
+    # durable request instead). Provisioning precedes the fact tables, so its
+    # explicit target config cannot come from a durable request.
+    parser.add_argument("--catalog", default=None)
+    parser.add_argument("--control-schema", default=None)
+    parser.add_argument("--warehouse-id", default=None)
+    parser.add_argument("--workspace-id", default=None)
+    for role in PROVISION_ROLES:
+        parser.add_argument(f"--{role}-principal", default=None)
     args = parser.parse_args(argv)
     if str(UUID(args.operation_id)) != args.operation_id:
         raise ValueError("Canonical operation_id required")
+    config = None
+    if args.kind == "provision":
+        config = {
+            "workspace_id": args.workspace_id or "",
+            "catalog": args.catalog,
+            "control_schema": args.control_schema,
+            "warehouse_id": args.warehouse_id,
+            "principals": {role: getattr(args, f"{role}_principal") for role in PROVISION_ROLES},
+        }
+        if not all(config["principals"].values()):
+            config["principals"] = {}
     from backend.jobs import build_vc_runtime
-    return build_vc_runtime(args.kind).run(args.kind, args.operation_id)
+    return build_vc_runtime(args.kind, config).run(args.kind, args.operation_id)

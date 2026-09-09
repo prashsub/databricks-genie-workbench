@@ -280,6 +280,92 @@ def test_owner_migration_runner_rejects_tampered_specs_and_bad_identifiers():
             runner_cls(lambda _sql: None, "cat", bad, ())
 
 
+_MATRIX_PRINCIPALS = {
+    "runtime": "11111111-1111-4111-8111-111111111111",
+    "executor": "22222222-2222-4222-8222-222222222222",
+    "enrollment": "33333333-3333-4333-8333-333333333333",
+    "observer": "44444444-4444-4444-8444-444444444444",
+    "approval": "55555555-5555-4555-8555-555555555555",
+    "source": "66666666-6666-4666-8666-666666666666",
+}
+
+
+def test_grant_matrix_enforces_least_privilege_and_no_broad_modify():
+    build = getattr(platform, "build_grant_matrix", None)
+    assert callable(build), "M08 owns the least-privilege grant matrix"
+    assert set(platform.PROVISION_ROLES) == set(_MATRIX_PRINCIPALS)
+    grants = build(_MATRIX_PRINCIPALS)
+    joined = "\n".join(grants)
+    rt = _MATRIX_PRINCIPALS["runtime"]
+    ex = _MATRIX_PRINCIPALS["executor"]
+    en = _MATRIX_PRINCIPALS["enrollment"]
+
+    # Contract: no broad MODIFY fallback anywhere.
+    assert "MODIFY" not in joined
+    for grant in grants:
+        assert grant.startswith("GRANT ")
+        assert "${catalog}" in grant
+        assert " TO `" in grant
+
+    # Fact tables: runtime SELECT+INSERT only (append-only blocks UPDATE/DELETE;
+    # non-owner blocks ALTER/DROP/REPLACE). No UPDATE/DELETE grants exist.
+    for table in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
+        assert (f"GRANT SELECT, INSERT ON TABLE ${{catalog}}.${{control_schema}}.{table} "
+                f"TO `{rt}`") in grants
+    assert "UPDATE ON TABLE ${catalog}.${control_schema}.genie_space_versions" not in joined
+    assert "DELETE" not in joined
+
+    # Coordination: executor UPDATE-only, enrollment INSERT-only, separated.
+    assert (f"GRANT SELECT, UPDATE ON TABLE ${{catalog}}.${{control_schema}}.genie_ops_coordination "
+            f"TO `{ex}`") in grants
+    assert (f"GRANT SELECT, INSERT ON TABLE ${{catalog}}.${{control_schema}}.genie_ops_coordination "
+            f"TO `{en}`") in grants
+    assert not any("genie_ops_coordination" in g and "INSERT" in g and f"`{ex}`" in g for g in grants)
+    assert not any("genie_ops_coordination" in g and "UPDATE" in g and f"`{en}`" in g for g in grants)
+
+    # Volumes: exactly one writer each; designated readers are read-only.
+    writer_of = {"vc_snapshots": "observer", "vc_approval_evidence": "approval",
+                 "vc_outbound_packages": "source", "vc_target_receipts": "executor"}
+    for volume, role in writer_of.items():
+        appid = _MATRIX_PRINCIPALS[role]
+        assert (f"GRANT READ VOLUME, WRITE VOLUME ON VOLUME "
+                f"${{catalog}}.${{control_schema}}.{volume} TO `{appid}`") in grants
+    assert (f"GRANT READ VOLUME ON VOLUME ${{catalog}}.${{control_schema}}.vc_outbound_packages "
+            f"TO `{ex}`") in grants
+    assert (f"GRANT READ VOLUME ON VOLUME ${{catalog}}.${{control_schema}}.vc_target_receipts "
+            f"TO `{_MATRIX_PRINCIPALS['source']}`") in grants
+
+    # Source never touches the operations table (single grant boundary).
+    assert not any("genie_space_operations" in g and f"`{_MATRIX_PRINCIPALS['source']}`" in g
+                   for g in grants)
+
+    # USE CATALOG / USE SCHEMA for every role so denials are permission denials.
+    for appid in _MATRIX_PRINCIPALS.values():
+        assert f"GRANT USE CATALOG ON CATALOG ${{catalog}} TO `{appid}`" in grants
+        assert (f"GRANT USE SCHEMA ON SCHEMA ${{catalog}}.${{control_schema}} "
+                f"TO `{appid}`") in grants
+
+    # The runner accepts and fully renders every grant.
+    executed = []
+    runner = platform.OwnerMigrationRunner(executed.append, "cat", "ctl", grants)
+    runner.apply_grants()
+    assert len(executed) == len(grants)
+    assert all("${" not in statement for statement in executed)
+
+
+def test_grant_matrix_rejects_incomplete_or_unsafe_principals():
+    build = platform.build_grant_matrix
+    good = {role: f"{role}-appid" for role in platform.PROVISION_ROLES}
+    assert build(good)
+    with pytest.raises(ValueError):
+        build({role: appid for role, appid in good.items() if role != "source"})
+    with pytest.raises(ValueError):
+        build(dict(good, observer=""))
+    for bad in ("a`b", "a;b", "a b", "a`", "a)", "a'b"):
+        with pytest.raises(ValueError):
+            build(dict(good, runtime=bad))
+
+
 def test_fact_permissions_require_append_only_nonowner_and_no_modify():
     verify = getattr(platform, "verify_fact_permissions", None)
     assert callable(verify), "Effective fact-table grants must fail closed"
