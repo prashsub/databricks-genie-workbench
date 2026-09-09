@@ -20,10 +20,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from backend.services.version_control.platform.attempt import build_attempt_state
 from backend.services.version_control.platform.capabilities import (
     FIRST_WRITE_CAPABILITIES,
     capabilities_ready,
 )
+from backend.services.version_control.platform.feature_flags import FeatureFlags
 from backend.services.version_control.platform.jobs import JOB_KINDS, GovernedJobRuntime
 from backend.services.version_control.platform.provisioning import provision
 
@@ -155,6 +157,107 @@ def resolve_provision_ports(*, config, execute) -> dict:
     runner = OwnerMigrationRunner(execute, config["catalog"], config["control_schema"], grants)
     return {"workspace_id": config.get("workspace_id", ""),
             "manifests": build_owner_manifests(), "runner": runner}
+
+
+_GOVERNED_CONFIG_KEYS = ("workspace_id", "catalog", "control_schema", "warehouse_id", "principals")
+
+
+@dataclass(frozen=True)
+class GovernedSeams:
+    """Injected, credential/policy-heavy leaf constructors for the governed graph.
+
+    `resolve_governed_ports` fixes the dependency *order*, the fail-closed config
+    gating and the `verify_only`/`attempt_state` closures; the leaf ports that
+    need live credentials (Delta SQL, volumes, SDK clients) or admission policy
+    (the coordination service's authorization/enrollment/recovery callbacks) are
+    built by these seams. Offline tests inject fakes; the real factories are
+    supplied by `_resolve_platform_ports` and validated on the live platform.
+
+    Each seam receives the resolved `config` plus already-built collaborators as
+    keyword arguments, so the builder never reaches for ambient state.
+    """
+
+    facts: Callable[..., Any]
+    ledger: Callable[..., Any]
+    registry: Callable[..., Any]
+    canonicalizer: Callable[..., Any]
+    identity: Callable[..., Any]
+    executor: Callable[..., Any]
+    coordination: Callable[..., Any]
+    approvals: Callable[..., Any]
+    transport: Callable[..., Any]
+    gate: Callable[..., Any]
+    capability_probe: Callable[..., Any]
+    dispatcher: Callable[..., Any] | None = None
+    restore: Callable[..., Any] | None = None
+    optimizer: Callable[..., Any] | None = None
+    reconcile: Callable[..., Any] | None = None
+
+
+def resolve_governed_ports(*, config, seams: GovernedSeams) -> dict:
+    """Pure builder for the governed mutation runtime kwargs.
+
+    Assembles the target-local graph (facts -> ledger/registry -> coordination ->
+    approvals/transport -> gate -> handlers) in strict dependency order from
+    explicit `config` and the injected `seams`, then returns the exact kwargs
+    `assemble_vc_runtime` consumes. `verify_only` is pinned to the constructed
+    gate + executor and `attempt_state` to the durable facts so the job runtime
+    and the gate can never disagree. Fails closed if the explicit
+    workspace/catalog/control-schema/warehouse/principals config is incomplete;
+    the restore/optimizer/reconcile handlers are wired only when their seam is
+    provided (mirroring `assemble_vc_runtime`'s optional handlers).
+    """
+
+    if not config or any(not config.get(key) for key in _GOVERNED_CONFIG_KEYS):
+        raise PermissionError(
+            "VC governed runtime not integrated; explicit workspace, catalog, "
+            "control schema, warehouse and principals are required")
+
+    flags = FeatureFlags.from_config(config.get("flags", {}))
+
+    facts = seams.facts(config)
+    ledger = seams.ledger(config)
+    registry = seams.registry(config)
+    canonicalizer = seams.canonicalizer(config)
+    identity = seams.identity(config)
+    executor = seams.executor(config, identity=identity)
+    coordination = seams.coordination(
+        config, facts=facts, ledger=ledger, registry=registry, canonicalizer=canonicalizer)
+    approvals = seams.approvals(config, facts=facts, identity=identity, registry=registry)
+    transport = seams.transport(
+        config, executor=executor, coordination=coordination, registry=registry, flags=flags)
+    gate = seams.gate(
+        coordination=coordination, ledger=ledger, facts=facts, approvals=approvals,
+        transport=transport, canonicalizer=canonicalizer, flags=flags, registry=registry)
+    capability_probe = seams.capability_probe(config)
+
+    dispatcher = seams.dispatcher(
+        config, identity=identity, executor=executor, facts=facts) if seams.dispatcher else None
+
+    ports: dict[str, Any] = {
+        "workspace_id": config["workspace_id"],
+        "facts": facts,
+        "flags": flags,
+        "executor": executor,
+        "identity": identity,
+        "gate": gate,
+        "verify_only": (lambda operation_id: gate.verify_only(operation_id, executor)),
+        "attempt_state": build_attempt_state(facts),
+        "capability_probe": capability_probe,
+    }
+    if seams.restore is not None:
+        ports["restore_service"] = seams.restore(
+            facts=facts, ledger=ledger, gate=gate, dispatcher=dispatcher,
+            identity=identity, flags=flags)
+    if seams.optimizer is not None:
+        ports["optimizer_adapter"] = seams.optimizer(
+            gate=gate, flags=flags, facts=facts, identity=identity, approvals=approvals)
+    if seams.reconcile is not None:
+        ports["reconcile_service"] = seams.reconcile(
+            config, canonicalizer=canonicalizer, ledger=ledger, approvals=approvals,
+            identity=identity, facts=facts, gate=gate, coordination=coordination,
+            registry=registry, flags=flags, executor=executor, dispatcher=dispatcher)
+    return ports
 
 
 def _build_warehouse_executor(config) -> Callable[[str], Any]:
