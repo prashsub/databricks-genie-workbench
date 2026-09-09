@@ -162,7 +162,10 @@
   },
   "backlog": [
     "XMOD NB-2 (verify): confirm router maps CoordinationError/_RejectionReleased (recovery-closed pre-send history on retry) to HTTP 409 file-new-request, not 500. Fail-closed+correct per C5.5; only the surfacing changed.",
-    "XMOD NB-3 done inline (coupling comment). NB-1 done inline (arm-coverage tests)."
+    "XMOD NB-3 done inline (coupling comment). NB-1 done inline (arm-coverage tests).",
+    {
+      "integ-gate-glob-symmetry": "NON-BLOCKING (pre-existing, unreachable today): layout-pinning/conftest scans at test_vc_provisioning.py:461/:478 still use non-recursive glob while C made counting rglob. Future rglob+integration/-exclusion for symmetry. No test_*.py in any backend/tests subdir today."
+    }
   ],
   "compliance_note": "M07-blocker-fix (conv 6345) and M10-blocker-fix (conv 6415) ran on non-Astra gpt-5-6-sol (platform fallback during rate-limit churn). Per directive, discarded and redoing on Astra. Non-Astra work backed up to vc/m07-nonastra-ref (1491eac, incl F1/F2) and vc/m10-nonastra-ref (c52cc62) for reference/diff. Worktrees reset to compliant Astra bases: m07=d1163a3, m10=8bafb8f.",
   "m10_redo": {
@@ -187,7 +190,7 @@
   "infra_note": "codex Native terminal failed to start x3 (control-plane httpx.ReadTimeout in session-mirroring, NOT missing CLI, NOT Astra). Workaround: route Astra implement work to pi (headless, system.ai.gpt-6-astra) - still Astra-compliant. Both Astra endpoints also intermittently 429.",
   "integrated_head": "5c091f2",
   "integration_note_m10": "M10 integrated using FULL delta 6c5ae3a..vc/m10 (28 files, all owned-paths, databricks.yml untouched). Earlier 9-failure scare was wrong diff base (8bafb8f had tasks1-13; correct base is merge-base 6c5ae3a). Result: GSO 918 pass/6 deselected, backend 1101 pass, write switches default-off, integration collection 14.",
-  "status": "ALL 10 MODULES INTEGRATED + PUSHED to version-control-cicd @ 22411f0",
+  "status": "COMPLETE \u2014 all 10 modules + all backlog items integrated",
   "final_gates": {
     "backend_offline": "1239 passed / 15 deselected",
     "gso_package": "918 passed / 6 deselected",
@@ -221,11 +224,12 @@
   },
   "backlog_reviews": {
     "integ-gate-D": {
-      "status": "in-review",
+      "status": "DONE-integrated",
       "review_conversation_id": "2592456325593076",
-      "branch": "origin/vc/backlog-integ-gate",
-      "head": "537269f",
-      "note": "final re-review after budget restored; A/B/C/D committed, self-verified (deletion-regression RED confirmed); trunk at 5c091f2 has M07-nb+M05-F3 already integrated"
+      "verdict": "APPROVE",
+      "integrated_at": "c16e53d",
+      "note": "mutation-verified A/B/C/D genuine + non-tautological ratchet; test-only; 1330 offline pass, integration collect 15"
     }
-  }
+  },
+  "final_trunk": "c16e53d"
 }
