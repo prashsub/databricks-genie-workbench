@@ -214,7 +214,7 @@ def test_resolve_provision_ports_builds_runner_and_grants_from_config():
     assert all("${" not in statement for statement in executed), "Templates fully rendered"
     assert any("CREATE TABLE IF NOT EXISTS `sandbox_cat`.`vc_ctl`.genie_space_versions" in s
                for s in executed)
-    assert any(s.startswith("GRANT SELECT, INSERT ON TABLE "
+    assert any(s.startswith("GRANT SELECT, MODIFY ON TABLE "
                             "`sandbox_cat`.`vc_ctl`.genie_space_versions") for s in executed)
 
 

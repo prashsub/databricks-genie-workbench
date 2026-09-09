@@ -26,12 +26,20 @@ def verify_artifact_permissions(volumes, expected_writers, operation_writers, so
     return len(securables) == len(ARTIFACT_VOLUMES)
 
 
+# Unity Catalog tables expose only SELECT and MODIFY (no INSERT/UPDATE). The
+# effective-permission proofs therefore assert SELECT+MODIFY exactly; append-only
+# tables additionally require delta.appendOnly and a non-owner principal, and the
+# coordination write separation is enforced by the protocol (separate SPs, single
+# concurrent run, Serializable, CAS), not by DML-verb grants.
+_TABLE_WRITE = frozenset({"SELECT", "MODIFY"})
+
+
 def verify_coordination_permissions(proof) -> bool:
     principals = [proof.get(role) for role in ("owner", "executor", "enrollment")]
     return (
         all(principals) and len(set(principals)) == 3
-        and set(proof.get("executor_privileges", ())) == {"SELECT", "UPDATE"}
-        and set(proof.get("enrollment_privileges", ())) == {"SELECT", "INSERT"}
+        and frozenset(proof.get("executor_privileges", ())) == _TABLE_WRITE
+        and frozenset(proof.get("enrollment_privileges", ())) == _TABLE_WRITE
         and type(proof.get("max_concurrent_runs")) is int
         and proof["max_concurrent_runs"] == 1
         and proof.get("queue_enabled") is True
@@ -46,6 +54,6 @@ def verify_fact_permissions(facts) -> bool:
         fact.get("append_only") is True
         and bool(fact.get("owner")) and bool(fact.get("principal"))
         and fact["owner"] != fact["principal"]
-        and set(fact.get("privileges", ())) == {"SELECT", "INSERT"}
+        and frozenset(fact.get("privileges", ())) == _TABLE_WRITE
         for fact in facts.values()
     )

@@ -170,11 +170,18 @@ class OwnerMigrationRunner:
 # already-resolved application ids, quoted with backticks; the only templates are
 # ${catalog}/${control_schema}, rendered by OwnerMigrationRunner. Denials are by
 # omission. Contract (contracts.md §"Grant boundaries and append semantics"):
-#   - Fact tables are append-only: SELECT+INSERT lets the runtime append while
-#     Delta rejects UPDATE/DELETE and non-ownership rejects ALTER/DROP/REPLACE.
-#     Never grant broad MODIFY.
-#   - Coordination is UPDATE-only for the executor and INSERT-only for the
-#     separate enrollment service (fine-grained DML; a deployment gate).
+#   - Unity Catalog tables expose only SELECT and MODIFY (there is no INSERT or
+#     UPDATE privilege). Least privilege is therefore SELECT+MODIFY scoped to
+#     exactly the writer role on exactly its object, plus a table-level
+#     enforcement mechanism — never ALL PRIVILEGES / MANAGE / ownership.
+#   - Fact tables carry delta.appendOnly='true', so a non-owner runtime holding
+#     SELECT+MODIFY can only append: Delta rejects UPDATE/DELETE and non-ownership
+#     rejects ALTER/DROP/REPLACE. That is the append-only guarantee.
+#   - Coordination is mutable (Serializable). Executor and enrollment are distinct
+#     SPs that both hold SELECT+MODIFY; their INSERT-only/UPDATE-only separation is
+#     enforced by the coordination protocol (separate jobs, single concurrent run,
+#     Serializable isolation, compare-and-swap), not by DML-verb grants which UC
+#     cannot express. See contracts.md for this platform-forced deviation.
 #   - Each Volume has exactly one writer; designated consumers get READ only.
 PROVISION_ROLES = ("runtime", "executor", "enrollment", "observer", "approval", "source")
 _FACT_TABLES = ("genie_space_versions", "genie_space_registry", "genie_space_operations")
@@ -219,13 +226,17 @@ def build_grant_matrix(principals):
     # admin/catalog-owner authority and are granted during namespace setup
     # (scripts/version_control/provision_sandbox.py), never here.
 
-    # Fact tables: runtime appends only.
+    # Fact tables: runtime appends only. UC has no INSERT privilege, so grant
+    # SELECT+MODIFY; delta.appendOnly='true' + non-owner make it append-only.
     for name in _FACT_TABLES:
-        grants.append(f"GRANT SELECT, INSERT ON TABLE {table}.{name} TO {quoted['runtime']}")
+        grants.append(f"GRANT SELECT, MODIFY ON TABLE {table}.{name} TO {quoted['runtime']}")
 
-    # Coordination: executor updates existing rows; enrollment alone inserts.
-    grants.append(f"GRANT SELECT, UPDATE ON TABLE {table}.{_COORDINATION} TO {quoted['executor']}")
-    grants.append(f"GRANT SELECT, INSERT ON TABLE {table}.{_COORDINATION} TO {quoted['enrollment']}")
+    # Coordination (mutable): executor mutates rows, enrollment inserts them. UC
+    # cannot split UPDATE vs INSERT, so both hold SELECT+MODIFY as distinct SPs;
+    # the coordination protocol (separate jobs, single run, Serializable, CAS)
+    # enforces the write separation.
+    grants.append(f"GRANT SELECT, MODIFY ON TABLE {table}.{_COORDINATION} TO {quoted['executor']}")
+    grants.append(f"GRANT SELECT, MODIFY ON TABLE {table}.{_COORDINATION} TO {quoted['enrollment']}")
 
     # Volumes: one writer each (read+write), designated consumers read-only.
     for volume, role in _VOLUME_WRITER.items():

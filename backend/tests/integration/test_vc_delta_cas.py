@@ -10,7 +10,8 @@ Deployment-only setup (no default credentials, workspace, or production schema):
   service principals; the same-SP case opens A twice. Owner must be distinct.
   Profiles contain credentials outside the repository. Never print credentials.
 * The owner provisions disposable tables in the explicitly designated existing
-  schema and grants SELECT/UPDATE coordination and SELECT/INSERT artifacts.
+  schema and grants SELECT/MODIFY on coordination and artifact tables (UC has
+  no INSERT/UPDATE privilege; append-only is enforced by delta.appendOnly).
   Compute must support these fine-grained grants; no broad MODIFY fallback.
 
 Run: python -m pytest backend/tests/integration/test_vc_delta_cas.py -m integration
@@ -287,8 +288,8 @@ def delta(request):
         stack.callback(execute, owner, f'DROP TABLE {artifacts_table}')
         for principal in set(principals):
             grantee = '`' + principal.replace('`', '``') + '`'
-            execute(owner, f'GRANT SELECT, UPDATE ON TABLE {table} TO {grantee}')
-            execute(owner, f'GRANT SELECT, INSERT ON TABLE {artifacts_table} TO {grantee}')
+            execute(owner, f'GRANT SELECT, MODIFY ON TABLE {table} TO {grantee}')
+            execute(owner, f'GRANT SELECT, MODIFY ON TABLE {artifacts_table} TO {grantee}')
         for client in [owner, *clients]:
             detail = execute(client, f'DESCRIBE DETAIL {table}')
             assert len(detail) == 1 and detail[0]['format'].lower() == 'delta'

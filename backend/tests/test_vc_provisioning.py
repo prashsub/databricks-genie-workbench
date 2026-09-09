@@ -297,7 +297,7 @@ _MATRIX_PRINCIPALS = {
 }
 
 
-def test_grant_matrix_enforces_least_privilege_and_no_broad_modify():
+def test_grant_matrix_enforces_least_privilege_uc_select_modify():
     build = getattr(platform, "build_grant_matrix", None)
     assert callable(build), "M08 owns the least-privilege grant matrix"
     assert set(platform.PROVISION_ROLES) == set(_MATRIX_PRINCIPALS)
@@ -307,28 +307,31 @@ def test_grant_matrix_enforces_least_privilege_and_no_broad_modify():
     ex = _MATRIX_PRINCIPALS["executor"]
     en = _MATRIX_PRINCIPALS["enrollment"]
 
-    # Contract: no broad MODIFY fallback anywhere.
-    assert "MODIFY" not in joined
+    # Unity Catalog exposes only SELECT/MODIFY on tables — never INSERT/UPDATE
+    # (invalid privileges) nor broad ALL PRIVILEGES / MANAGE / ownership.
+    assert "INSERT" not in joined
+    assert "UPDATE" not in joined
+    assert "DELETE" not in joined
+    assert "ALL PRIVILEGES" not in joined
+    assert "MANAGE" not in joined
     for grant in grants:
         assert grant.startswith("GRANT ")
         assert "${catalog}" in grant
         assert " TO `" in grant
 
-    # Fact tables: runtime SELECT+INSERT only (append-only blocks UPDATE/DELETE;
-    # non-owner blocks ALTER/DROP/REPLACE). No UPDATE/DELETE grants exist.
+    # Fact tables: runtime SELECT+MODIFY only; delta.appendOnly + non-owner make
+    # this append-only (Delta blocks UPDATE/DELETE, non-ownership blocks ALTER).
     for table in ("genie_space_versions", "genie_space_registry", "genie_space_operations"):
-        assert (f"GRANT SELECT, INSERT ON TABLE ${{catalog}}.${{control_schema}}.{table} "
+        assert (f"GRANT SELECT, MODIFY ON TABLE ${{catalog}}.${{control_schema}}.{table} "
                 f"TO `{rt}`") in grants
-    assert "UPDATE ON TABLE ${catalog}.${control_schema}.genie_space_versions" not in joined
-    assert "DELETE" not in joined
 
-    # Coordination: executor UPDATE-only, enrollment INSERT-only, separated.
-    assert (f"GRANT SELECT, UPDATE ON TABLE ${{catalog}}.${{control_schema}}.genie_ops_coordination "
+    # Coordination (mutable): executor and enrollment are distinct SPs, both with
+    # SELECT+MODIFY; the write separation is protocol-enforced, not grant-enforced.
+    assert (f"GRANT SELECT, MODIFY ON TABLE ${{catalog}}.${{control_schema}}.genie_ops_coordination "
             f"TO `{ex}`") in grants
-    assert (f"GRANT SELECT, INSERT ON TABLE ${{catalog}}.${{control_schema}}.genie_ops_coordination "
+    assert (f"GRANT SELECT, MODIFY ON TABLE ${{catalog}}.${{control_schema}}.genie_ops_coordination "
             f"TO `{en}`") in grants
-    assert not any("genie_ops_coordination" in g and "INSERT" in g and f"`{ex}`" in g for g in grants)
-    assert not any("genie_ops_coordination" in g and "UPDATE" in g and f"`{en}`" in g for g in grants)
+    assert ex != en
 
     # Volumes: exactly one writer each; designated readers are read-only.
     writer_of = {"vc_snapshots": "observer", "vc_approval_evidence": "approval",
@@ -376,17 +379,19 @@ def test_grant_matrix_rejects_incomplete_or_unsafe_principals():
             build(dict(good, runtime=bad))
 
 
-def test_fact_permissions_require_append_only_nonowner_and_no_modify():
+def test_fact_permissions_require_append_only_nonowner_select_modify():
     verify = getattr(platform, "verify_fact_permissions", None)
     assert callable(verify), "Effective fact-table grants must fail closed"
+    # UC exposes only SELECT/MODIFY; append-only is enforced by delta.appendOnly
+    # plus a non-owner principal, not by a (nonexistent) INSERT privilege.
     facts = {name: {"append_only": True, "owner": "provisioner",
-                    "principal": "runtime", "privileges": {"SELECT", "INSERT"}}
+                    "principal": "runtime", "privileges": {"SELECT", "MODIFY"}}
              for name in ("genie_space_versions", "genie_space_registry", "genie_space_operations")}
     assert verify(facts) is True
     for field, value in (("append_only", False), ("owner", "runtime"),
-                         ("privileges", {"SELECT", "MODIFY"}),
-                         ("privileges", {"SELECT", "INSERT", "MANAGE"}),
-                         ("privileges", {"SELECT", "INSERT", "UPDATE"})):
+                         ("privileges", {"SELECT"}),
+                         ("privileges", {"SELECT", "MODIFY", "MANAGE"}),
+                         ("privileges", {"ALL PRIVILEGES"})):
         bad = {name: dict(row, **{field: value}) for name, row in facts.items()}
         assert verify(bad) is False
     assert verify({}) is False
@@ -394,15 +399,17 @@ def test_fact_permissions_require_append_only_nonowner_and_no_modify():
 
 def test_coordination_grants_require_separate_serialized_enrollment():
     verify = getattr(platform, "verify_coordination_permissions", None)
-    assert callable(verify), "Enrollment must be separate from UPDATE-only executors"
+    assert callable(verify), "Enrollment and executor must be distinct serialized SPs"
+    # UC cannot split UPDATE vs INSERT, so both hold SELECT+MODIFY; separation is
+    # via distinct SPs + single concurrent run + Serializable + CAS (protocol).
     proof = dict(owner="provisioner", executor="executor", enrollment="enrollment",
-                 executor_privileges={"SELECT", "UPDATE"},
-                 enrollment_privileges={"SELECT", "INSERT"},
+                 executor_privileges={"SELECT", "MODIFY"},
+                 enrollment_privileges={"SELECT", "MODIFY"},
                  max_concurrent_runs=1, queue_enabled=True, isolation="Serializable")
     assert verify(proof) is True
-    for key, value in (("executor_privileges", {"SELECT", "MODIFY"}),
-                       ("executor_privileges", {"SELECT", "UPDATE", "INSERT"}),
-                       ("enrollment_privileges", {"SELECT", "INSERT", "UPDATE"}),
+    for key, value in (("executor_privileges", {"SELECT"}),
+                       ("executor_privileges", {"SELECT", "MODIFY", "MANAGE"}),
+                       ("enrollment_privileges", {"SELECT"}),
                        ("enrollment", "executor"), ("owner", "executor"),
                        ("max_concurrent_runs", 2), ("queue_enabled", False),
                        ("isolation", "WriteSerializable")):
