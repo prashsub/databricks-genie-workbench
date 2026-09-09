@@ -3,10 +3,12 @@ targets:
     mode: production
     workspace:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    # Build hook only (mirrors root artifacts.default for the GSO wheel): the
+    # genie_workbench wheel lands in .build/, which is synced (root sync
+    # include) and referenced by each job environment's relative dependency
+    # path. A `type: whl` artifact here globs dist/ and fails on deploy.
     artifacts:
       vc_platform:
-        type: whl
-        path: ../..
         build: uv build --wheel --out-dir .build
     resources:
       jobs:
