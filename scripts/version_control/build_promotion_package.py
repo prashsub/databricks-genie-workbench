@@ -32,14 +32,38 @@ def _client(profile, host):
         os.environ.update(saved)
 
 
+def target_folder(config: dict) -> str:
+    """The promotion target parent folder (deterministic from the admin user).
+
+    Shared by the package builder and the D2.5b mint driver so both derive the
+    identical mapping (hence identical ``mapping_digest``)."""
+    admin = os.environ.get("VC_ADMIN_USER", "").strip()
+    return f"/Users/{admin}" if admin else "/Workspace"
+
+
+def build_mapping_policy(config: dict) -> tuple[vc.MappingSpec, vc.TestPolicy]:
+    """Build the exact source->target mapping + test policy the package was built
+    from. Kept as the single source of truth so the D2.5b release re-creates the
+    same request the pinned manifest describes (verified by ``mapping_digest``)."""
+    target_binding = vc.from_wire(vc.BindingRef, config["target_binding"])
+    mappings = {
+        config["source_table"]: config["target_table"],
+        "target:warehouse_id": config["target_warehouse_id"],
+        "target:parent_path": target_folder(config),
+    }
+    provisional = vc.MappingSpec("VC/1.0", target_binding, mappings, "0" * 64, "vc-map/1")
+    mapping = replace(provisional, mapping_digest=packages.mapping_digest(provisional))
+    thresholds = {"validation": {"smoke": True}, "benchmark": {"minimum": 1}}
+    policy = vc.TestPolicy("VC/1.0", packages.digest(thresholds["validation"]),
+                           packages.digest(thresholds["benchmark"]), thresholds)
+    return mapping, policy
+
+
 def main() -> None:
     path = os.environ["VC_TWO_WORKSPACE_CONFIG"]
     config = json.loads(Path(path).read_text())
     roles = config["roles"]
     src_role, tgt_role = roles["source"], roles["target"]
-    src_tbl, tgt_tbl = config["source_table"], config["target_table"]
-    target_folder = f"/Users/{os.environ.get('VC_ADMIN_USER', '')}".rstrip("/")
-
     canonicalizer = Canonicalizer()
     source = _client(src_role["profile"], src_role["host"])
     target = _client(tgt_role["profile"], tgt_role["host"])
@@ -59,16 +83,7 @@ def main() -> None:
 
     # 2. Mapping (source->target identifier + target environment) and policy.
     target_binding = vc.from_wire(vc.BindingRef, config["target_binding"])
-    mappings = {
-        src_tbl: tgt_tbl,
-        "target:warehouse_id": config["target_warehouse_id"],
-        "target:parent_path": target_folder or "/Workspace",
-    }
-    provisional = vc.MappingSpec("VC/1.0", target_binding, mappings, "0" * 64, "vc-map/1")
-    mapping = replace(provisional, mapping_digest=packages.mapping_digest(provisional))
-    thresholds = {"validation": {"smoke": True}, "benchmark": {"minimum": 1}}
-    policy = vc.TestPolicy("VC/1.0", packages.digest(thresholds["validation"]),
-                           packages.digest(thresholds["benchmark"]), thresholds)
+    mapping, policy = build_mapping_policy(config)
 
     # 3. Build the content-addressed package.
     manifest, files = packages.build(version, mapping, policy)

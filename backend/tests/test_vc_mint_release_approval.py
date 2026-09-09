@@ -98,3 +98,42 @@ def test_mint_fails_closed_when_base_observation_unavailable(monkeypatch, kind):
     with pytest.raises(RuntimeError, match="Base observation unavailable"):
         mint(surface, _plan())
     surface.commands.create.assert_not_called()
+
+
+def _plan_config(monkeypatch):
+    from scripts.version_control.build_promotion_package import build_mapping_policy
+    monkeypatch.setenv("VC_ADMIN_USER", "admin@example.com")
+    cfg = {
+        "target_binding": {
+            "binding_id": "3955d52f-0f53-44dd-b559-325060e0ec6e", "binding_revision": 1,
+            "space_key": "vc-promotion-gate", "workspace_id": "111",
+            "space_id": "01f1ac63c82c18389837b663f442e409", "environment": "prod"},
+        "source_table": "cat.src.orders", "target_table": "cat.tgt.orders",
+        "target_warehouse_id": "wh-123", "source_version_id": "ver-src"}
+    mapping, _ = build_mapping_policy(cfg)
+    cfg["mapping_digest"] = mapping.mapping_digest
+    approval = {"requester_principal_id": "enroll-sp",
+                "approvers": [{"id": "111aaa", "user_name": "a@x.com"},
+                              {"id": "222bbb", "user_name": "b@x.com"}]}
+    surface = SimpleNamespace(promotion=SimpleNamespace(
+        source_selection=SimpleNamespace(profile="src-profile"),
+        target_selection=SimpleNamespace(profile="tgt-profile")))
+    return surface, cfg, approval
+
+
+def test_plan_from_config_maps_real_identity_and_package_shapes(monkeypatch):
+    surface, cfg, approval = _plan_config(monkeypatch)
+    plan = driver._plan_from_config(surface, cfg, {"workspace_id": "111"}, approval)
+    assert plan.requester == vc.ActorContext("enroll-sp", "111", "service")
+    assert plan.approvers == (vc.ActorContext("111aaa", "111", "human"),
+                              vc.ActorContext("222bbb", "111", "human"))
+    assert plan.source_profile == "src-profile" and plan.target_profile == "tgt-profile"
+    assert plan.mapping.mappings["cat.src.orders"] == "cat.tgt.orders"
+    assert plan.source_version_id == "ver-src"
+
+
+def test_plan_from_config_fails_closed_on_mapping_digest_drift(monkeypatch):
+    surface, cfg, approval = _plan_config(monkeypatch)
+    cfg["mapping_digest"] = "0" * 64  # pretend the pinned package inputs drifted
+    with pytest.raises(SystemExit, match="mapping_digest"):
+        driver._plan_from_config(surface, cfg, {"workspace_id": "111"}, approval)

@@ -118,23 +118,28 @@ def mint(surface: SimpleNamespace, plan: MintPlan, *,
             "expected_base": expected_base}
 
 
-def _actor(identity: dict, workspace_id: str, kind: str) -> vc.ActorContext:
-    return vc.ActorContext(identity["principal_id"], workspace_id, kind)
+def _plan_from_config(surface: SimpleNamespace, cfg: dict, governed: dict,
+                      approval_identities: dict) -> MintPlan:
+    """Assemble the MintPlan from the two-workspace + governed + approval configs.
 
-
-def _plan_from_config(surface: SimpleNamespace, cfg: dict, governed: dict) -> MintPlan:
-    """Assemble the MintPlan from the two-workspace + governed configs.
-
-    The requester and human approver identities live under ``approval_identities``
-    in the two-workspace config; the mapping/policy come from the package inputs
-    persisted alongside it (byte-identical to D2.3)."""
-    from backend.services.version_control.promotion import packages
+    ``approval_identities`` (from ``VC_INTEGRATION_CONFIG``) carries the requester
+    SP application id and the two human approver SCIM ids provisioned for the audit
+    gate. The mapping/policy are re-derived from the shared ``build_mapping_policy``
+    (the single source of truth D2.3 used) and verified byte-for-byte against the
+    pinned ``mapping_digest`` so the release request matches the manifest exactly."""
+    from scripts.version_control.build_promotion_package import build_mapping_policy
 
     target_binding = vc.from_wire(vc.BindingRef, cfg["target_binding"])
     workspace_id = governed["workspace_id"]
-    approval = cfg["approval_identities"]
-    mapping = vc.from_wire(packages.PromotionMapping, cfg["mapping"])
-    policy = vc.from_wire(packages.PromotionPolicy, cfg["policy"])
+    mapping, policy = build_mapping_policy(cfg)
+    if mapping.mapping_digest != cfg["mapping_digest"]:
+        raise SystemExit(
+            f"Re-derived mapping_digest {mapping.mapping_digest} != pinned "
+            f"{cfg['mapping_digest']}; the package inputs drifted -- rebuild D2.3.")
+    # Requester is the enrollment SP (application id); approvers are human SCIM ids.
+    requester = vc.ActorContext(approval_identities["requester_principal_id"], workspace_id, "service")
+    approvers = tuple(vc.ActorContext(a["id"], workspace_id, "human")
+                      for a in approval_identities["approvers"])
     return MintPlan(
         target_binding=target_binding,
         source_version_id=cfg["source_version_id"],
@@ -142,9 +147,7 @@ def _plan_from_config(surface: SimpleNamespace, cfg: dict, governed: dict) -> Mi
         source_profile=surface.promotion.source_selection.profile,
         target_profile=surface.promotion.target_selection.profile,
         key=cfg.get("release_key", "vc-promotion-gate-d25b"),
-        requester=_actor(approval["requester"], workspace_id, "service"),
-        approvers=tuple(_actor(a, workspace_id, "human") for a in approval["approvers"]),
-    )
+        requester=requester, approvers=approvers)
 
 
 def main(argv=None) -> None:
@@ -155,12 +158,14 @@ def main(argv=None) -> None:
     from scripts.version_control.promotion_release import build_release_surface
 
     two_ws_path = os.environ.get("VC_TWO_WORKSPACE_CONFIG")
-    if not two_ws_path:
-        raise SystemExit("VC_TWO_WORKSPACE_CONFIG must point to the two-workspace config")
+    integration_path = os.environ.get("VC_INTEGRATION_CONFIG")
+    if not two_ws_path or not integration_path:
+        raise SystemExit("VC_TWO_WORKSPACE_CONFIG and VC_INTEGRATION_CONFIG must both be set")
     cfg = json.loads(Path(two_ws_path).read_text())
+    approval_identities = json.loads(Path(integration_path).read_text())["approval_identities"]
     governed = author(cfg, promotion_job_id=cfg.get("promotion_job_id"))
     surface = build_release_surface(governed)
-    plan = _plan_from_config(surface, cfg, governed)
+    plan = _plan_from_config(surface, cfg, governed, approval_identities)
     result = mint(surface, plan)
     print(json.dumps(result, indent=2))
 
