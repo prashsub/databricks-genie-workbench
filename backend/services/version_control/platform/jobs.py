@@ -104,8 +104,40 @@ def main(argv=None):
             config["principals"] = {}
     elif args.governed_config:
         config = _load_governed_config(args.governed_config)
+    if config and config.get("secret_bootstrap"):
+        _bootstrap_role_secrets(config["secret_bootstrap"])
     from backend.jobs import build_vc_runtime
     return build_vc_runtime(args.kind, config).run(args.kind, args.operation_id)
+
+
+def _bootstrap_role_secrets(bootstrap):
+    """Populate role M2M credential env vars from the target-workspace secret scope.
+
+    The Job's ambient run_as (executor, granted READ on the scope) reads each
+    secret via the REST Secrets API and sets ``os.environ`` so
+    ``PlatformAdapters.client`` can build each role's OAuth M2M client. Serverless
+    task ``environment_variables`` with ``{{secrets/...}}`` refs (Beta) is not
+    honored on the target workspace, so the Job self-bootstraps here. Existing
+    env vars are never overwritten (offline/local runs set them directly). Fails
+    closed: a missing scope key raises rather than leaving a role unauthenticated.
+    """
+    import base64
+    import os
+
+    scope, env = bootstrap["scope"], bootstrap["env"]
+    missing = {name: key for name, key in env.items() if not os.environ.get(name)}
+    if not missing:
+        return
+    from databricks.sdk import WorkspaceClient
+
+    client = WorkspaceClient()  # ambient run_as identity (has READ on the scope)
+    for name, key in missing.items():
+        response = client.api_client.do(
+            "GET", "/api/2.0/secrets/get", query={"scope": scope, "key": key})
+        value = response.get("value")
+        if not value:
+            raise PermissionError(f"Secret {scope}/{key} unavailable for {name}")
+        os.environ[name] = base64.b64decode(value).decode()
 
 
 def _load_governed_config(location):

@@ -100,7 +100,7 @@ def test_to_job_config_adds_m2m_auth_and_dedicated_directory_role():
     storage), keeps the profile as the identity routing key, and adds a dedicated
     directory role pinned via directory_role. The operator config is not mutated."""
     governed = author(_two_workspace_config(), promotion_job_id=987)
-    job = to_job_config(governed, directory=_DIRECTORY)
+    job = to_job_config(governed, directory=_DIRECTORY, secret_scope="vc-promotion")
 
     # Every runtime role now authenticates via injected M2M secrets, pinned to its
     # own host; the profile survives as the identity-provider routing key.
@@ -120,6 +120,17 @@ def test_to_job_config_adds_m2m_auth_and_dedicated_directory_role():
     assert "profile" not in directory  # never routed through executor()
     assert job["directory_role"] == "directory"
 
+    # Secret bootstrap maps each M2M env var to its scope key (Job self-reads them).
+    bootstrap = job["secret_bootstrap"]
+    assert bootstrap["scope"] == "vc-promotion"
+    assert bootstrap["env"]["VC_EXECUTOR_CLIENT_ID"] == "executor_client_id"
+    assert bootstrap["env"]["VC_DIRECTORY_CLIENT_SECRET"] == "directory_client_secret"
+    assert set(bootstrap["env"]) == {
+        "VC_EXECUTOR_CLIENT_ID", "VC_EXECUTOR_CLIENT_SECRET",
+        "VC_SOURCE_CLIENT_ID", "VC_SOURCE_CLIENT_SECRET",
+        "VC_APPROVAL_CLIENT_ID", "VC_APPROVAL_CLIENT_SECRET",
+        "VC_DIRECTORY_CLIENT_ID", "VC_DIRECTORY_CLIENT_SECRET"}
+
     # The operator config is untouched (deep copy).
     assert "auth" not in governed["roles"]["executor"]
     assert "directory" not in governed["roles"]
@@ -128,7 +139,7 @@ def test_to_job_config_adds_m2m_auth_and_dedicated_directory_role():
 def test_job_config_composes_the_real_promotion_graph():
     """The augmented in-Job config still composes end-to-end through the real graph."""
     governed = author(_two_workspace_config(), promotion_job_id=987)
-    job = to_job_config(governed, directory=_DIRECTORY)
+    job = to_job_config(governed, directory=_DIRECTORY, secret_scope="vc-promotion")
     runtime = build_vc_runtime("promotion", job, adapters=FakeAdapters())
     assert "promotion" in runtime._governed._handlers
 

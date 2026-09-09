@@ -51,21 +51,40 @@ def _m2m_auth(role: str, host: str) -> dict:
             "client_id_env": client_id_env, "client_secret_env": client_secret_env}
 
 
-def to_job_config(governed: dict, *, directory: dict) -> dict:
+def _secret_bootstrap(scope: str) -> dict:
+    """Map each role's M2M secret env var to its key in the target-workspace secret
+    scope. The Job's ambient run_as (executor, granted READ on the scope) reads
+    these via the Secrets API and populates ``os.environ`` before building the
+    runtime, so ``PlatformAdapters.client`` finds the M2M credentials.
+
+    Serverless task ``environment_variables`` (with ``{{secrets/...}}`` refs) is a
+    Beta that is not honored on the target workspace, so the Job self-bootstraps
+    from the scope instead -- the REST Secrets API returns values to a READ
+    principal.
+    """
+    env: dict[str, str] = {}
+    for role, (client_id_env, client_secret_env) in _ROLE_SECRET_ENV.items():
+        env[client_id_env] = f"{role}_client_id"
+        env[client_secret_env] = f"{role}_client_secret"
+    return {"scope": scope, "env": env}
+
+
+def to_job_config(governed: dict, *, directory: dict, secret_scope: str) -> dict:
     """Augment an ``author()`` config with in-Job OAuth M2M auth (governed
     credential storage) so ``PlatformAdapters.client`` never depends on a local
     profile inside the Job.
 
-    Every role client is built from Job-injected M2M secrets, including the
-    executor: the identity provider routes ``profile is None`` selections to the
-    OBO/PAT (human) branch, so the target-local *service* executor must present a
-    verified OAuth M2M identity, not ambient auth. The ``profile`` field is kept
-    verbatim as the identity-provider routing key (``_profiles``); the auth-first
-    ``client()`` uses the ``auth`` block and ignores it for construction.
+    Every role client is built from injected M2M secrets, including the executor:
+    the identity provider routes ``profile is None`` selections to the OBO/PAT
+    (human) branch, so the target-local *service* executor must present a verified
+    OAuth M2M identity, not ambient auth. The ``profile`` field is kept verbatim as
+    the identity-provider routing key (``_profiles``); the auth-first ``client()``
+    uses the ``auth`` block and ignores it for construction.
 
     A dedicated least-privileged ``directory`` role (SCIM group/actor resolution
     only) is added and pinned via ``directory_role`` so approver-group checks in
-    ``ApprovalService.authorize`` never run as the executor.
+    ``ApprovalService.authorize`` never run as the executor. A ``secret_bootstrap``
+    block tells the Job which scope keys back each M2M secret env var.
     """
     job = json.loads(json.dumps(governed))  # deep copy; never mutate the input
     for role in ("executor", "source", "approval"):
@@ -82,6 +101,7 @@ def to_job_config(governed: dict, *, directory: dict) -> dict:
         "auth": _m2m_auth("directory", directory["host"]),
     }
     job["directory_role"] = "directory"
+    job["secret_bootstrap"] = _secret_bootstrap(secret_scope)
     return job
 
 
