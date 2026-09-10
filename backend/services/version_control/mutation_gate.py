@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 from dataclasses import replace
-from uuid import uuid4
 
 from backend.services.version_control import contracts as vc
 
@@ -96,13 +95,20 @@ class MutationGate:
         if history.facts:
             return vc.OperationResult(request.identity.operation_id, vc.OperationStatus.APPLIED_UNVERIFIED,
                                       None, None, True, ("Audited orphan resolution required; never replay create",))
-        intent = vc.CreateIntentRef(str(uuid4()), request.identity.operation_id,
-            request.binding.binding_id, request.binding.binding_revision, request.identity.request_digest)
         actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
-        self.facts.append(vc.OperationFact(intent.event_id, vc.FactKind.CREATE_INTENT,
-            request.identity.operation_id, 0, f"{request.identity.operation_id}:create-intent",
+        # CREATE_INTENT evidence embeds its own event_id, so seal a draft first to
+        # derive the deterministic key/id, then build the intent around that id.
+        draft = vc.OperationFact(request.identity.operation_id, vc.FactKind.CREATE_INTENT,
+            request.identity.operation_id, 0, "",
             request.binding, request.identity, "create", executor.principal_id, actor,
-            vc.FactStatus.REQUESTED, intent, datetime.now(timezone.utc)))
+            vc.FactStatus.REQUESTED,
+            vc.CreateIntentRef(request.identity.operation_id, request.identity.operation_id,
+                request.binding.binding_id, request.binding.binding_revision, request.identity.request_digest),
+            datetime.now(timezone.utc))
+        sealed = vc.seal_fact(draft)
+        intent = vc.CreateIntentRef(sealed.event_id, request.identity.operation_id,
+            request.binding.binding_id, request.binding.binding_revision, request.identity.request_digest)
+        self.facts.append(replace(sealed, evidence=intent))
         committed = self.facts.lookup_request(request.binding, request.identity.idempotency_key)
         if committed.ambiguous or not any(fact.evidence == intent for fact in committed.facts):
             raise RuntimeError("Create intent was not durably committed")
@@ -206,15 +212,15 @@ class MutationGate:
                                     datetime.now(timezone.utc),
                                     postimage.state_digest if postimage else request.identity.request_digest,
                                     postimage)
-        self.facts.append(vc.OperationFact(
-            str(uuid4()), vc.FactKind.OPERATION, request.identity.operation_id, 100,
-            f"{claim.attempt_id}:{status.value}", request.binding, request.identity,
+        self.facts.append(vc.seal_fact(vc.OperationFact(
+            request.identity.operation_id, vc.FactKind.OPERATION, request.identity.operation_id, 100,
+            "", request.binding, request.identity,
             request.operation_type, executor.principal_id,
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
             vc.FactStatus(status.value), evidence, datetime.now(timezone.utc),
             attempt_id=claim.attempt_id, generation=claim.generation,
             pre_version_id=preimage.version_id if isinstance(preimage, vc.ObservationRef) else None,
-            post_version_id=postimage.version_id if postimage else None))
+            post_version_id=postimage.version_id if postimage else None)))
 
     def _capture(self, request, executor, fence, snapshot, reason, parent=None):
         context = vc.CaptureContext(

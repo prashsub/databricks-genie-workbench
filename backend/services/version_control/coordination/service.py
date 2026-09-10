@@ -33,6 +33,24 @@ def _rejected_subject(executor):
                           None, None, None)
 
 
+# Deterministic transition-sequence categories for coordination-authored facts.
+# `fact_key` includes (kind, sequence), so these keep the facts that can coexist for
+# one (operation, attempt, generation) in distinct durable slots. All are < the gate's
+# terminal OPERATION sequence (100), so M07's `max(by transition_sequence)` still selects
+# the gate's lineage-bearing terminal fact when minting a DeploymentReceipt.
+#
+# The terminal *closure* fact replaces the coordination RECEIPT of earlier drafts:
+# `FactKind.RECEIPT` is reserved for the target-written `DeploymentReceipt` (contracts §6;
+# `promotion/receipts.existing` rejects any RECEIPT whose evidence is not a DeploymentReceipt).
+# Coordination's completion/closure marker is therefore an OPERATION fact authored by
+# `operation_type == 'coordination'` at `_SEQ_CLOSURE`, and `reserve` keys idempotency and
+# terminal-conflict detection off exactly that marker.
+_SEQ_REJECT = 1      # pre-send / CAS-loss rejection (CONFLICTED / FAILED)
+_SEQ_QUARANTINE = 2  # unresolved quarantine marker (QUARANTINED)
+_SEQ_CLOSURE = 3     # terminal closure receipt-equivalent (finish / recover)
+_SEQ_RECOVERY = 4    # recovery audit (RECOVERY kind)
+
+
 class CoordinationError(RuntimeError):
     """No write authority may be inferred from a failed coordination call."""
 
@@ -179,8 +197,13 @@ class CoordinationService:
                             row.attempt_id, row.generation, row.row_version)
 
     def _fact(self, row, request, status, *, evidence=None, kind=c.FactKind.OPERATION,
-              post_version_id=None, subject=None):
-        """`subject` names the attempt this fact is ABOUT; None means row's own attempt."""
+              post_version_id=None, subject=None, sequence=_SEQ_REJECT):
+        """`subject` names the attempt this fact is ABOUT; None means row's own attempt.
+
+        `sequence` selects the deterministic transition-sequence category (`_SEQ_*`) so
+        the sealed `event_key` slots facts that can coexist for one attempt (e.g. a
+        quarantine marker and its later recovery closure) without colliding.
+        """
         stage = row.mutation_stage or c.PatchStage.CONFIG_PENDING
         subject = subject or AttemptSubject(row.attempt_id, row.generation, row.holder,
                                             row.executor_kind, row.pre_version_id,
@@ -190,15 +213,24 @@ class CoordinationService:
                 c.canonical_json_hash('vc-coordination/1', {
                     'status': status.value, 'kind': kind.value,
                     'attempt': subject.attempt_id, 'row_version': row.row_version}), None)
-        key = f'{request.operation_id}:{subject.attempt_id}:{kind.value}:{status.value}'
-        fact = c.OperationFact(str(uuid4()), kind, request.operation_id,
-            row.row_version, key, row.binding, request, 'coordination',
+        fact = c.seal_fact(c.OperationFact(request.operation_id, kind, request.operation_id,
+            sequence, '', row.binding, request, 'coordination',
             subject.holder or 'coordination',
             c.ActorContext(subject.holder or 'coordination', row.binding.workspace_id,
                            subject.executor_kind or 'service'), status, evidence,
             self.clock.now(), attempt_id=subject.attempt_id, generation=subject.generation,
             pre_version_id=subject.pre_version_id, post_version_id=post_version_id,
-            approval_id=subject.approval_id, approval_digest=subject.approval_digest)
+            approval_id=subject.approval_id, approval_digest=subject.approval_digest))
+        # Idempotent replay: a coordination fact carries a wall-clock recorded_at, so a
+        # second write of the same logical slot (same deterministic key) would not be
+        # byte-identical and the strict durable validator fails such conflicts closed.
+        # Query the key first and return the existing durable reference (contracts §"Logical
+        # uniqueness ... retrying an ambiguous append first queries its key").
+        prior = next((f for f in self._history_raw(row, request.idempotency_key).facts
+                      if f.event_key == fact.event_key), None)
+        if prior is not None:
+            return c.FactRef(prior.event_id, prior.event_key,
+                             c.canonical_json_hash('vc-fact-evidence/1', c.to_wire(prior.evidence)))
         return self._io(self.facts.append, fact)
 
     def reserve(self, binding: c.BindingRef, operation: c.RequestIdentity,
@@ -223,8 +255,14 @@ class CoordinationService:
                        subject=_rejected_subject(executor))
             raise
         history = self._history(row, operation)
-        receipts = [f for f in history.facts if f.fact_kind == c.FactKind.RECEIPT]
-        completed = [f for f in receipts
+        # Terminal closure markers authored by coordination (finish/recover), keyed by the
+        # OPERATION/_SEQ_CLOSURE slot. FactKind.RECEIPT (DeploymentReceipt) is not a
+        # coordination completion signal and is intentionally not scanned here.
+        closures = [f for f in history.facts
+                    if f.fact_kind == c.FactKind.OPERATION
+                    and f.operation_type == 'coordination'
+                    and f.transition_sequence == _SEQ_CLOSURE]
+        completed = [f for f in closures
                      if f.status in {c.FactStatus.CONFIRMED, c.FactStatus.NOOP}]
         if completed:
             identities = {(f.operation_id, f.status, f.post_version_id) for f in completed}
@@ -232,7 +270,7 @@ class CoordinationService:
                 raise CoordinationError('Ambiguous completed receipts')
             self._release(row)  # This reservation never acquired write authority.
             raise ExistingReceipt(completed[0])
-        if receipts:
+        if closures:
             # Terminal non-success: a conflict for the request, not a completion.
             self._reject(row, operation,
                          'Request already terminated non-successfully; file a new governed request')
@@ -467,8 +505,11 @@ class CoordinationService:
                     status=c.FactStatus.FAILED)
             raise CoordinationError('Successful completion requires committed postimage')
         row = self._publish_consumption(claim, row)
+        # Terminal closure marker (receipt-equivalent). Not FactKind.RECEIPT: that kind is
+        # reserved for the target-written DeploymentReceipt. This is a coordination-authored
+        # OPERATION fact at _SEQ_CLOSURE, which reserve() keys idempotency/terminal detection on.
         ref = self._fact(row, claim.request, c.FactStatus(result.status.value),
-                         kind=c.FactKind.RECEIPT,
+                         kind=c.FactKind.OPERATION, sequence=_SEQ_CLOSURE,
                          post_version_id=result.postimage.version_id if result.postimage else None)
         history = self._history(row, claim.request)
         if not any(f.event_id == ref.event_id for f in history.facts):
@@ -499,7 +540,7 @@ class CoordinationService:
                         state=c.CoordinationState.QUARANTINED, unresolved=True,
                         quarantine_reason=reason)
         if row.active_operation_id is not None:
-            self._fact(row, self._request(row), c.FactStatus.QUARANTINED)
+            self._fact(row, self._request(row), c.FactStatus.QUARANTINED, sequence=_SEQ_QUARANTINE)
         return row
 
     def quarantine(self, claim: c.FenceToken, reason: str) -> None:
@@ -540,9 +581,9 @@ class CoordinationService:
         # the same idempotency key cannot be re-admitted (C5.5, C5.7). CONFLICTED,
         # never CONFIRMED/NOOP — recovery proves the executor is dead, not success.
         ref = self._fact(row, request, c.FactStatus.CONFLICTED,
-                         evidence=evidence, kind=c.FactKind.RECOVERY)
+                         evidence=evidence, kind=c.FactKind.RECOVERY, sequence=_SEQ_RECOVERY)
         receipt = self._fact(row, request, c.FactStatus.CONFLICTED,
-                             evidence=evidence, kind=c.FactKind.RECEIPT)
+                             evidence=evidence, kind=c.FactKind.OPERATION, sequence=_SEQ_CLOSURE)
         history = self._history_raw(row, request.idempotency_key)
         if not {ref.event_id, receipt.event_id} <= {f.event_id for f in history.facts}:
             raise AuthorityUnavailable(

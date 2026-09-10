@@ -9,7 +9,8 @@ import pytest
 
 from backend.services.version_control import contracts as c
 from backend.services.version_control.coordination import CoordinationService, CoordinationError
-from backend.services.version_control.coordination.service import AuthorityUnavailable, OwnershipError
+from backend.services.version_control.coordination.service import (
+    AuthorityUnavailable, OwnershipError, _SEQ_CLOSURE)
 from backend.tests.vc_fakes.fixtures import binding_fixture, executor_fixture
 from backend.tests.vc_fakes.stores import (
     CoordinationRow, FakeCoordinationStore, FakeFactStore, ManualClock,
@@ -1130,7 +1131,12 @@ def test_crashes_between_evidence_cas_consumption_patch_and_release_remain_safe(
             reserve(h)
     else:
         assert point == 'release'
-        assert any(r.payload['fact_kind'] == 'receipt' for r in h.durable.state.rows)
+        # The terminal closure marker (receipt-equivalent) is a coordination OPERATION
+        # fact at _SEQ_CLOSURE; FactKind.RECEIPT is reserved for the DeploymentReceipt.
+        assert any(r.payload['fact_kind'] == 'operation'
+                   and r.payload.get('operation_type') == 'coordination'
+                   and r.payload['transition_sequence'] == _SEQ_CLOSURE
+                   for r in h.durable.state.rows)
 
 
 def test_consumption_and_termination_columns_are_truthful(h):

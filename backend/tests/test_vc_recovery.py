@@ -6,7 +6,15 @@ import pytest
 
 from backend.services.version_control import contracts as c
 from backend.services.version_control.coordination import CoordinationError
+from backend.services.version_control.coordination.service import _SEQ_CLOSURE
 from backend.tests.test_vc_coordination import h, enroll, reserve, admit, durable_facts, uid
+
+
+def _closures(facts):
+    """Coordination-authored terminal closure markers (the receipt-equivalent that
+    replaced FactKind.RECEIPT: OPERATION facts at _SEQ_CLOSURE from finish/recover)."""
+    return [f for f in facts if f.fact_kind == c.FactKind.OPERATION
+            and f.operation_type == 'coordination' and f.transition_sequence == _SEQ_CLOSURE]
 
 
 @pytest.mark.parametrize('entry', ['reserve', 'renew', 'assert_owner'])
@@ -258,11 +266,11 @@ def test_recovery_closes_the_operation_and_forbids_a_second_admission(h, path):
     # 1. baseline.
     assert result.status == c.OperationStatus.CONFLICTED and not result.unresolved
 
-    # 2/3. both a RECOVERY and a RECEIPT fact exist for the key, CONFLICTED.
+    # 2/3. both a RECOVERY audit and a terminal closure marker exist for the key, CONFLICTED.
     hist = h.facts.lookup_request(h.binding, claim.request.idempotency_key)
     assert not hist.ambiguous
     recov = [f for f in hist.facts if f.fact_kind == c.FactKind.RECOVERY]
-    receipts = [f for f in hist.facts if f.fact_kind == c.FactKind.RECEIPT]
+    receipts = _closures(hist.facts)
     assert len(recov) == 1 and len(receipts) == 1
     for f in (recov[0], receipts[0]):
         assert f.status == c.FactStatus.CONFLICTED
@@ -301,7 +309,8 @@ def test_recovery_publication_failure_keeps_row_quarantined(h):
 
     def append_then_break(fact):
         ref = real_append(fact)
-        if fact.fact_kind == c.FactKind.RECEIPT:
+        if (fact.fact_kind == c.FactKind.OPERATION and fact.operation_type == 'coordination'
+                and fact.transition_sequence == _SEQ_CLOSURE):
             h.facts.lookup_request.side_effect = OSError('receipt read-back unavailable')
         return ref
 

@@ -17,19 +17,10 @@ from backend.services.version_control.contracts import (
     RequestHistory,
     canonical_json_hash, from_wire, to_wire,
 )
-
-
-def fact_key(fact: OperationFact) -> str:
-    payload = {
-        'binding': to_wire(fact.binding), 'operation_id': fact.operation_id,
-        'kind': fact.fact_kind.value, 'sequence': fact.transition_sequence,
-        'attempt_id': fact.attempt_id, 'generation': fact.generation,
-    }
-    if fact.fact_kind == FactKind.APPROVAL_VOTE:
-        payload['voter'] = fact.actor.subject_id
-    if fact.fact_kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY) and fact.approval_reference is not None:
-        payload['approval_reference'] = fact.approval_reference
-    return canonical_json_hash('vc-fact-key/1', payload)
+# Deterministic fact identity is a shared VC/1.0 contract (contracts.py): every
+# writer stamps `event_key == fact_key(fact)`. Re-exported here for existing M06/M07
+# importers; M03 imports it from `contracts` directly (M03 §4 forbids M03 → M06).
+from backend.services.version_control.contracts import fact_key  # noqa: F401
 
 
 def validate_evidence(fact):

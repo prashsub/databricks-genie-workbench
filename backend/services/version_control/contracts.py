@@ -14,7 +14,7 @@ and AuthorizationGrant are internal capabilities and are never wire inputs/outpu
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from hashlib import sha256
@@ -23,7 +23,7 @@ import math
 import re
 from types import MappingProxyType, UnionType
 from typing import Annotated, Generic, Literal, Protocol, TypeVar, Union, get_args, get_origin, get_type_hints
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 
 UUIDString = Annotated[str, "uuid"]
@@ -890,6 +890,48 @@ class OperationFact(WireValue):
 class RequestHistory(WireValue):
     facts: tuple[OperationFact, ...]
     ambiguous: bool
+
+
+def fact_key(fact: "OperationFact") -> str:
+    """The deterministic logical identity of an operation fact.
+
+    Shared by every fact writer (M03 coordination, M04 gate, M06 governance,
+    M07 receipts) so the durable-lookup-before-append dedup contract holds and no
+    writer needs to import another module's fact implementation (M03 §4 forbids
+    M03 → M06). The key intentionally excludes `event_id`, `evidence`,
+    `event_key`, timestamps and `status`: it is the *slot* a fact occupies, keyed
+    by binding, operation, kind and the transition-sequence category, plus the
+    attempt/generation fence. Two facts that share a key must be byte-identical
+    (`DurableOperationFacts._append` fails closed otherwise).
+    """
+    payload = {
+        "binding": to_wire(fact.binding), "operation_id": fact.operation_id,
+        "kind": fact.fact_kind.value, "sequence": fact.transition_sequence,
+        "attempt_id": fact.attempt_id, "generation": fact.generation,
+    }
+    if fact.fact_kind == FactKind.APPROVAL_VOTE:
+        payload["voter"] = fact.actor.subject_id
+    if fact.fact_kind in (FactKind.ACKNOWLEDGEMENT, FactKind.RECOVERY) and fact.approval_reference is not None:
+        payload["approval_reference"] = fact.approval_reference
+    return canonical_json_hash("vc-fact-key/1", payload)
+
+
+def deterministic_event_id(event_key: str) -> str:
+    """The event UUID a durable fact must carry, derived from its logical key."""
+    return str(uuid5(NAMESPACE_URL, event_key))
+
+
+def seal_fact(fact: "OperationFact") -> "OperationFact":
+    """Stamp the deterministic `event_key`/`event_id` onto an assembled fact.
+
+    Writers construct a fact with the correct binding/kind/sequence/fence and
+    provisional identity, then seal it so `event_key == fact_key(fact)` and
+    `event_id == deterministic_event_id(event_key)` — exactly what
+    `DurableOperationFacts._append` verifies. Facts whose evidence embeds the
+    event_id (CREATE_INTENT) compute the key first and build evidence around it.
+    """
+    key = fact_key(fact)
+    return replace(fact, event_key=key, event_id=deterministic_event_id(key))
 
 
 @dataclass(frozen=True)
