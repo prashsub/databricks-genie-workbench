@@ -647,7 +647,7 @@ def test_terminal_non_success_receipt_is_a_conflict_not_a_completion(h, terminal
     # 4. no quarantine on expiry.
     h.request = c.RequestIdentity(uid(), 'key-later', 'a' * 64)
     fresh = h.service.reserve(h.binding, h.request, h.executor)
-    h.clock.advance(timedelta(seconds=61))
+    h.clock.advance(h.service._LEASE_TTL + timedelta(seconds=1))
     with pytest.raises(CoordinationError):
         h.service.renew(fresh.fence)
     # the fresh reserve genuinely expired -> quarantined; but the terminal path

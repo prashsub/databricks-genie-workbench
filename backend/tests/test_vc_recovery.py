@@ -14,7 +14,7 @@ def test_expired_lease_quarantines_without_takeover(h, entry):
     enroll(h)
     claim = admit(h)
     before = h.store.read(h.binding.binding_id)
-    h.clock.advance(timedelta(seconds=61))
+    h.clock.advance(h.service._LEASE_TTL + timedelta(seconds=1))
     with pytest.raises(CoordinationError):
         if entry == 'reserve':
             reserve(h)
@@ -35,7 +35,7 @@ def test_expired_observation_lease_is_reclaimed_and_never_quarantines_binding(h,
     from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
     enroll(h)
     lease = h.service.observe_exclusively(h.binding, h.executor)
-    h.clock.advance(timedelta(seconds=61))
+    h.clock.advance(h.service._LEASE_TTL + timedelta(seconds=1))
     if entry == 'reserve':
         h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
         # reserve succeeded on the reclaimed binding; re-read after.
@@ -59,7 +59,7 @@ def test_expired_observation_lease_is_reclaimed_and_never_quarantines_binding(h,
 def test_expired_observation_lease_full_reclaim_semantics(h):
     enroll(h)
     lease = h.service.observe_exclusively(h.binding, h.executor)
-    h.clock.advance(timedelta(seconds=61))
+    h.clock.advance(h.service._LEASE_TTL + timedelta(seconds=1))
     # Trigger reclaim via reserve, then inspect.
     fresh = h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
     row = h.store.read(h.binding.binding_id)
@@ -84,7 +84,7 @@ def test_reclaim_refuses_observing_row_that_carries_mutation_authority(h):
     row = h.store.read(h.binding.binding_id)
     # Corrupt the row: OBSERVING but carrying an approval (mutation authority).
     h.store.state.rows[:] = [replace(row, approval_id=uid())]
-    h.clock.advance(timedelta(seconds=61))
+    h.clock.advance(h.service._LEASE_TTL + timedelta(seconds=1))
     with pytest.raises(CoordinationError):
         h.service.reserve(h.binding, c.RequestIdentity(uid(), 'k', 'a' * 64), h.executor)
     after = h.store.read(h.binding.binding_id)
@@ -95,7 +95,7 @@ def test_expired_admitted_lease_still_quarantines(h):
     durable_facts(h)
     enroll(h)
     claim = admit(h)
-    h.clock.advance(timedelta(seconds=61))
+    h.clock.advance(h.service._LEASE_TTL + timedelta(seconds=1))
     with pytest.raises(CoordinationError):
         reserve(h)
     row = h.store.read(h.binding.binding_id)

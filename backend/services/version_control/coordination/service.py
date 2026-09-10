@@ -58,6 +58,12 @@ class ExistingReceipt(CoordinationError):
 
 
 class CoordinationService:
+    # Lease TTL for observation/reservation/admission windows. Sized for live-platform
+    # latency: a governed mutation renews this lease at admit and at every checkpoint
+    # heartbeat, so it need only cover a single phase (SCIM group resolution, a Genie
+    # GET/PATCH round-trip, or a ledger commit) rather than the whole operation.
+    _LEASE_TTL = timedelta(seconds=300)
+
     def __init__(self, *, store, facts: c.OperationFacts, ledger: c.VersionLedger,
                  clock, resolve_binding, verify_enrollment, insert_enrolled,
                  validate_authorization, verify_create_intent,
@@ -209,7 +215,7 @@ class CoordinationService:
                 generation=row.generation + 1, attempt_id=str(uuid4()),
                 holder=executor.principal_id, executor_kind=executor.actor_kind,
                 executor_ref=executor.execution_ref,
-                lease_expires_at=self.clock.now() + timedelta(seconds=60),
+                lease_expires_at=self.clock.now() + self._LEASE_TTL,
                 active_operation_id=operation.operation_id,
                 idempotency_key=operation.idempotency_key, request_digest=operation.request_digest)
         except OwnershipError:
@@ -251,7 +257,7 @@ class CoordinationService:
     def renew(self, claim: c.FenceToken) -> c.FenceToken:
         row = self._owned(claim)
         updated = self._cas(row, lambda r: r.attempt_id == claim.attempt_id,
-                           lease_expires_at=self.clock.now() + timedelta(seconds=60))
+                           lease_expires_at=self.clock.now() + self._LEASE_TTL)
         return self._fence(updated)
 
     def assert_owner(self, claim: c.FenceToken) -> None:
@@ -324,7 +330,13 @@ class CoordinationService:
             request_digest=reservation.request.request_digest,
             approval_id=authorization.approval_id, approval_digest=authorization.approval_digest,
             expected_base_fingerprint=authorization.expected_base_fingerprints.state_digest,
-            admitted_at=self.clock.now(), mutation_stage=c.PatchStage.CONFIG_PENDING,
+            admitted_at=self.clock.now(),
+            # Renew the lease for the mutation phase. Admission itself (authorization
+            # re-validation, SCIM group resolution, ledger verification) can consume most of
+            # the reserve-time lease on a live platform, so the mutation must start with a
+            # fresh window rather than the residue of the reservation lease.
+            lease_expires_at=self.clock.now() + self._LEASE_TTL,
+            mutation_stage=c.PatchStage.CONFIG_PENDING,
             checkpoint={'schema_version': 'VC/1.0', 'preimage': c.to_wire(preimage),
                         'stages': [s.value for s in self._planned_stages(authorization)]},
             **evidence)
@@ -620,9 +632,13 @@ class CoordinationService:
             resume_classification=('read-only-possible-send' if stage in {
                 c.PatchStage.CONFIG_IN_FLIGHT, c.PatchStage.DESCRIPTION_IN_FLIGHT}
                 else 'read-only-unless-next-stage-proven-unsent'))
+        # Heartbeat: each proven stage advance renews the mutation lease, so a multi-stage
+        # mutation making forward progress never expires mid-flight. The lease then only has
+        # to cover the gap between two consecutive checkpoints, not the whole operation.
         self._cas(row, lambda r: (r.attempt_id == claim.attempt_id
                                   and r.mutation_stage == row.mutation_stage),
-                  mutation_stage=stage, checkpoint=checkpoint)
+                  mutation_stage=stage, checkpoint=checkpoint,
+                  lease_expires_at=self.clock.now() + self._LEASE_TTL)
 
     def observe_exclusively(self, binding: c.BindingRef,
                             executor: c.ExecutorContext) -> c.ObservationLease:
@@ -634,7 +650,7 @@ class CoordinationService:
             state=c.CoordinationState.OBSERVING, unresolved=True,
             generation=row.generation + 1, attempt_id=str(uuid4()), holder=executor.principal_id,
             executor_kind=executor.actor_kind, executor_ref=executor.execution_ref,
-            lease_expires_at=self.clock.now() + timedelta(seconds=60),
+            lease_expires_at=self.clock.now() + self._LEASE_TTL,
             observed_sequence=row.observed_sequence + 1)
         return c.ObservationLease(self._fence(row), row.observed_sequence, row.lease_expires_at)
 
