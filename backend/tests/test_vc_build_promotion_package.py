@@ -10,6 +10,7 @@ from backend.services.version_control import contracts as vc
 from scripts.version_control.build_promotion_package import (
     _consumers,
     build_mapping_policy,
+    source_space_key,
     target_folder,
 )
 
@@ -54,6 +55,18 @@ def test_mapping_declares_target_consumers_for_preflight_dependency_checks(monke
     # No consumer source -> no consumer keys (preflight would then fail closed live).
     assert _consumers(_CONFIG) == ()
     assert not any(k.startswith("target:consumer:") for k in build_mapping_policy(_CONFIG)[0].mappings)
+
+
+def test_source_space_key_binds_to_the_source_not_the_target():
+    """Regression: the manifest ownership.space_key must be the SOURCE space_key, so
+    the D2.3 fixture package_digest matches the real released package the mint builds
+    from the ledger's source-bound version. Falls back to target only when unset."""
+    with_source = {**_CONFIG, "source_binding": {"space_key": "vc-promotion-gate-source"}}
+    assert source_space_key(with_source) == "vc-promotion-gate-source"
+    # Distinct from the target space_key so ownership (hence package_digest) differs.
+    assert source_space_key(with_source) != _CONFIG["target_binding"]["space_key"]
+    # No source binding -> conservative fallback to the target space_key.
+    assert source_space_key(_CONFIG) == "vc-promotion-gate"
 
 
 def test_target_folder_falls_back_to_workspace_without_admin(monkeypatch):

@@ -41,6 +41,17 @@ def target_folder(config: dict) -> str:
     return f"/Users/{admin}" if admin else "/Workspace"
 
 
+def source_space_key(config: dict) -> str:
+    """The source space_key the immutable version binds to.
+
+    This flows into the package manifest's ``ownership.space_key`` (and hence the
+    ``package_digest``). It MUST match the ledger version the mint driver releases
+    from -- that version is bound to the *source* space, not the target -- or the
+    D2.3 fixture package diverges from the real released package by ownership alone.
+    Falls back to the target space_key only when no source binding is configured."""
+    return config.get("source_binding", {}).get("space_key") or config["target_binding"]["space_key"]
+
+
 def _consumers(config: dict) -> tuple[str, ...]:
     """Principals declared as consumers of the promoted target space. Explicit
     ``consumers`` in the config wins; otherwise default to the target executor SP
@@ -90,7 +101,7 @@ def main() -> None:
         "GET", f"/api/2.0/genie/spaces/{config['source_space_id']}",
         query={"include_serialized_space": "true"})
     snapshot = canonicalizer.observe(src_envelope)
-    source_binding = vc.BindingRef(str(uuid4()), 1, config["target_binding"]["space_key"],
+    source_binding = vc.BindingRef(str(uuid4()), 1, source_space_key(config),
                                    src_role["workspace_id"], config["source_space_id"], "dev")
     # Reuse the pinned source_version_id if the ledger was already seeded (D2.5a):
     # the manifest embeds only the version id + content digests (not the binding),
