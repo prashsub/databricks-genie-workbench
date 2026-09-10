@@ -157,7 +157,7 @@ def build_governed_seams(config: dict, *, adapters: Any = None):
             # Late-bound: the approval service is built after coordination but the
             # grant is only re-validated at admission time, once the graph exists.
             validate_authorization=lambda grant, executor: policies.validate_authorization(
-                state["approvals"])(grant, executor),
+                state["approvals"], facts)(grant, executor),
             verify_create_intent=policies.verify_create_intent(facts),
             termination=termination,
             authorize_human_recovery=policies.authorize_human_recovery,

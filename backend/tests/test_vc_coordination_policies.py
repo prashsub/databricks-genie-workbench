@@ -70,10 +70,27 @@ def _grant():
         uid(4), "f" * 64)
 
 
-def test_validate_authorization_true_when_reauthorize_matches():
+def test_validate_authorization_reauthorizes_the_durable_request_not_the_grant_identity():
+    # The grant only carries a RequestIdentity; the policy must re-derive the
+    # durable MutationRequest from facts (keyed on operation_id) and re-run the
+    # full ApprovalService policy against it.
     grant = _grant()
-    approvals = SimpleNamespace(authorize=lambda request, executor: grant)
-    assert policies.validate_authorization(approvals)(grant, _EXEC) is True
+    mutation_request = object()
+    seen = {}
+
+    def get_request(operation_id):
+        seen["op"] = operation_id
+        return SimpleNamespace(request=mutation_request)
+
+    def authorize(request, executor):
+        seen["authorized"] = request
+        return grant
+
+    facts = SimpleNamespace(get_request=get_request)
+    approvals = SimpleNamespace(authorize=authorize)
+    assert policies.validate_authorization(approvals, facts)(grant, _EXEC) is True
+    assert seen["op"] == grant.request.operation_id
+    assert seen["authorized"] is mutation_request
 
 
 def test_validate_authorization_false_when_grant_differs():
@@ -81,15 +98,26 @@ def test_validate_authorization_false_when_grant_differs():
     other = vc.AuthorizationGrant(grant.binding, grant.request, "different", grant.expected_base_fingerprints,
                                   grant.rendered_target_digest, grant.expires_at, grant.approval_id,
                                   grant.approval_digest)
+    facts = SimpleNamespace(get_request=lambda op: SimpleNamespace(request=object()))
     approvals = SimpleNamespace(authorize=lambda request, executor: other)
-    assert policies.validate_authorization(approvals)(grant, _EXEC) is False
+    assert policies.validate_authorization(approvals, facts)(grant, _EXEC) is False
 
 
 def test_validate_authorization_false_when_revoked_raises():
     def authorize(request, executor):
         raise PermissionError("Approver policy membership revoked")
 
-    assert policies.validate_authorization(SimpleNamespace(authorize=authorize))(_grant(), _EXEC) is False
+    facts = SimpleNamespace(get_request=lambda op: SimpleNamespace(request=object()))
+    assert policies.validate_authorization(SimpleNamespace(authorize=authorize), facts)(_grant(), _EXEC) is False
+
+
+def test_validate_authorization_false_when_request_absent():
+    def get_request(operation_id):
+        raise KeyError(operation_id)
+
+    approvals = SimpleNamespace(authorize=lambda request, executor: _grant())
+    facts = SimpleNamespace(get_request=get_request)
+    assert policies.validate_authorization(approvals, facts)(_grant(), _EXEC) is False
 
 
 # -- verify_create_intent ----------------------------------------------------

@@ -68,11 +68,15 @@ def insert_enrolled(store) -> Callable[[Any], Any]:
     return insert
 
 
-def validate_authorization(approvals) -> Callable[[Any, Any], bool]:
+def validate_authorization(approvals, facts) -> Callable[[Any, Any], bool]:
     def validate(authorization, executor) -> bool:
         try:
-            return approvals.authorize(authorization.request, executor) == authorization
-        except (PermissionError, ValueError):
+            # The grant carries only the RequestIdentity; re-derive the durable
+            # MutationRequest from facts so ApprovalService re-runs the full policy
+            # against the immutable approved request (it keys on request.approval_id).
+            request = facts.get_request(authorization.request.operation_id).request
+            return approvals.authorize(request, executor) == authorization
+        except (KeyError, PermissionError, ValueError):
             return False
 
     return validate

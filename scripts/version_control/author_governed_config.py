@@ -220,6 +220,13 @@ def main(argv=None):
     cfg = json.loads(Path(location).read_text())
     job_id = argv[0] if argv else None
     governed = author(cfg, promotion_job_id=job_id)
+    # In-Job realization: when the operator config pins a dedicated directory
+    # reader and the target-workspace secret scope, emit the Job config (M2M auth
+    # blocks + directory role + secret_bootstrap) so the runtime authenticates
+    # each role from injected/self-read credentials rather than a local profile.
+    directory, secret_scope = cfg.get("directory"), cfg.get("secret_scope")
+    if directory and secret_scope:
+        governed = to_job_config(governed, directory=directory, secret_scope=secret_scope)
     json.dump(governed, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
 
