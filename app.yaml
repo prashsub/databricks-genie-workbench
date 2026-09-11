@@ -33,17 +33,18 @@ env:
   # ---------------------------------------------------------------------------
   # Version Control feature flags
   #
-  # These gate the observe-only VC surface. Capture (append a version) requires
-  # VC_WRITES_ENABLED=true; the history reads require VC_HISTORY_ENABLED=true.
-  # Restore/reconcile/promotion stay OFF (reads-only scope; restore is also
-  # fail-closed in code regardless of the flag). The whole surface only mounts
-  # when the VC_OBSERVE_* control-plane vars below are ALL set — otherwise the
-  # app behaves exactly as before (no routes, no behavior change).
+  # SHIPPED DEFAULT IS FAIL-CLOSED: every write switch is "false" here and stays
+  # that way in the committed file (test_vc_composition enforces this). Observe
+  # capture is a governed write, so deploy.sh flips VC_WRITES_ENABLED to "true"
+  # in the DEPLOYED app.yaml only when the observe surface is actually wired
+  # (VC_OBSERVE_* resolved). VC_HISTORY_ENABLED is a READ switch (not a write
+  # switch) so it ships enabled. Restore/reconcile/promotion stay OFF (reads-only
+  # scope; restore is also fail-closed in code regardless of the flag).
   # ---------------------------------------------------------------------------
   - name: VC_HISTORY_ENABLED
     value: "true"
   - name: VC_WRITES_ENABLED
-    value: "true"
+    value: "false"
   - name: VC_RESTORE_ENABLED
     value: "false"
   - name: VC_PROMOTION_ENABLED

@@ -492,6 +492,21 @@ sed -i.bak "s|__VC_OBSERVE_CATALOG__|${CATALOG}|" "$PATCHED_APP_YAML"
 sed -i.bak "s|__VC_OBSERVE_CONTROL_SCHEMA__|${GSO_SCHEMA}|" "$PATCHED_APP_YAML"
 sed -i.bak "s|__VC_OBSERVE_SP_PRINCIPAL_ID__|${SP_CLIENT_ID}|" "$PATCHED_APP_YAML"
 
+# Observe capture is a governed write. The committed app.yaml ships every write
+# switch "false" (fail-closed default; test_vc_composition enforces it). Enable
+# VC_WRITES_ENABLED in the DEPLOYED app.yaml only when the observe surface is
+# actually wired (workspace id resolved). Restore/promotion/etc. stay false.
+if [ -n "$VC_WS_ID" ]; then
+    python3 - "$PATCHED_APP_YAML" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+text = text.replace('  - name: VC_WRITES_ENABLED\n    value: "false"',
+                    '  - name: VC_WRITES_ENABLED\n    value: "true"')
+open(path, "w").write(text)
+PY
+fi
+
 rm -f "${PATCHED_APP_YAML}.bak"
 
 # Validate all placeholders were resolved. A half-configured app.yaml (e.g. an
