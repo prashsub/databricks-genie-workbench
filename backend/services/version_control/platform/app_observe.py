@@ -57,6 +57,7 @@ def observe_config_from_env(env: Any) -> dict | None:
         "warehouse_id": warehouse_id,
         "target_warehouse_id": warehouse_id,
         "target_selection": selection,
+        "environment": env.get("VC_OBSERVE_ENVIRONMENT") or "prod",
         "roles": {"executor": {"warehouse_id": warehouse_id, "host": host, "profile": profile}},
         "flags": {
             "vc_history_enabled": _flag(env, "VC_HISTORY_ENABLED"),

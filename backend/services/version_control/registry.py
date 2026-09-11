@@ -87,6 +87,14 @@ class DeltaRegistry:
         return BindingRef(row["binding_id"], row["binding_revision"], row["space_key"],
                           row["workspace_id"], row["space_id"], row["environment"])
 
+    def find_active_by_space_key(self, space_key) -> BindingRef | None:
+        """Public read: the current non-tombstoned binding for a space_key, or None.
+
+        Used by the observe-only auto-enroll path to resolve an already-enrolled space
+        before enrolling a new provisional binding (enroll refuses a duplicate live key).
+        """
+        return self._active_binding_for_space_key(space_key)
+
     def _active_binding_for_space_key(self, space_key):
         rows = self.sql(
             f"SELECT * FROM {self.table} WHERE space_key = :space_key "

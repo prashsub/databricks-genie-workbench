@@ -72,6 +72,7 @@ class ObserveRuntime:
     flags: FeatureFlags
     workspace_id: str
     actor: vc.ActorContext
+    environment: str
 
 
 def _deny_authorization(_grant: Any, _executor: Any) -> bool:
@@ -163,7 +164,8 @@ def build_observe_runtime(config: dict, *, adapters: Any = None,
         observer=observer, ledger=ledger, registry=registry, facts=facts, identity=identity,
         coordination=coordination, canonicalizer=canonicalizer, transport=transport,
         reader_selection=selection, authorize_history=authorize_history, flags=flags,
-        workspace_id=workspace_id, actor=actor)
+        workspace_id=workspace_id, actor=actor,
+        environment=str(config.get("environment") or "prod"))
 
 
 def resolve_observe_runtime(config: dict | None, *, adapters: Any = None,

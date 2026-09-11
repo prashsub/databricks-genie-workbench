@@ -1746,6 +1746,16 @@ async def trigger(body: TriggerRequest, request: Request):
     except Exception:
         logger.warning("Could not read join advice for space %s", body.space_id, exc_info=True)
 
+    # Observe-only Version Control: snapshot the pre-run serialized space (best-effort
+    # and flag-gated; a no-op unless the VC observe surface is integrated and writes are
+    # enabled). This never alters or blocks the optimizer run — capture_before swallows
+    # its own failures.
+    observe = getattr(request.app.state, "vc_observe", None)
+    if observe is not None:
+        from backend.services.version_control.observe_optimizer import capture_before
+
+        await asyncio.to_thread(capture_before, observe, space_id=body.space_id)
+
     try:
         result = trigger_optimization(
             space_id=body.space_id,
@@ -1771,6 +1781,20 @@ async def trigger(body: TriggerRequest, request: Request):
         # can confirm what the run will use without re-reading the job config.
         resolved_target = body.target_accuracy if body.target_accuracy is not None else _DEFAULT_TARGET_ACCURACY
         resolved_max_attempts = body.max_attempts if body.max_attempts is not None else _DEFAULT_MAX_ATTEMPTS
+
+        # Observe-only VC: after the optimizer Job run settles, record the after-state
+        # stamped with the run id. Runs in the background (the Job can take hours) and is
+        # fully fail-safe; the passive UI capture_on_open is the other backstop.
+        if observe is not None:
+            from backend.services.version_control.observe_optimizer import (
+                capture_after_when_complete,
+            )
+
+            asyncio.create_task(asyncio.to_thread(
+                capture_after_when_complete, observe,
+                space_id=body.space_id, run_id=result.run_id, job_run_id=result.job_run_id,
+                get_run=lambda rid: sp_ws.jobs.get_run(run_id=rid)))
+
         return {
             "runId": result.run_id,
             "jobRunId": result.job_run_id,
