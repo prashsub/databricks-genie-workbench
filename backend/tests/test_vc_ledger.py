@@ -228,6 +228,16 @@ def test_history_pagination_is_stable_across_cursor():
     assert second.next_cursor is None
 
 
+def test_history_casts_limit_to_int_for_databricks_sql():
+    """The Statements API binds Python ints as BIGINT, but Databricks SQL requires LIMIT to
+    be INT (INVALID_LIMIT_LIKE_EXPRESSION.DATA_TYPE). The bound limit must be cast to INT."""
+    ledger, sql = make_ledger(ids=[uid(1)])
+    ledger.history(binding_fixture(), None, 25)
+    statement, parameters = sql.calls[-1]
+    assert "LIMIT CAST(:limit AS INT)" in statement
+    assert parameters["limit"] == 26  # limit + 1 for the next-cursor probe
+
+
 def test_get_version_roundtrips_snapshot_and_full_context():
     ledger, _ = make_ledger(ids=[uid(42)])
     context = ctx("k1", origin=Origin.OPTIMIZER, parent_version_id=uid(7),

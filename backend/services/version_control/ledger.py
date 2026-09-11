@@ -243,7 +243,9 @@ class DeltaVersionLedger:
             parameters.update({"cursor_at": observed_at, "cursor_version": cursor_version})
         rows = self.sql(
             f"SELECT {_SUMMARY_COLUMNS} FROM {self.table} WHERE binding_id = :binding_id "
-            f"{predicate}ORDER BY observed_at DESC, version_id DESC LIMIT :limit",
+            # LIMIT must be INT in Databricks SQL; the Statements API binds Python ints as
+            # BIGINT (INVALID_LIMIT_LIKE_EXPRESSION.DATA_TYPE), so cast the bound parameter.
+            f"{predicate}ORDER BY observed_at DESC, version_id DESC LIMIT CAST(:limit AS INT)",
             parameters)
         page, next_cursor = rows[:limit], None
         if len(rows) > limit:
