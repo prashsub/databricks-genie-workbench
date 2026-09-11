@@ -111,6 +111,31 @@ def test_unchanged_capture_returns_observed_head_as_base_preserving_drift(observ
     rig.ledger.append_observation.assert_called_once()  # no second append on unchanged
 
 
+def test_capture_stamps_optimizer_run_id_and_champion(observer_rig):
+    """An after-run capture carries optimizer provenance on both the appended
+    CaptureContext and the returned VersionSummary (origin stays EXTERNAL — the
+    optimizer authored the change outside VC governance)."""
+    rig, observer, viewer, status, identity = observer_rig
+    result = observer.capture(rig.binding, "optimizer_after", rig.executor,
+                              optimizer_run_id="run-123", champion_id="champ-9")
+    assert result.captured_version is not None
+    assert result.captured_version.optimizer_run_id == "run-123"
+    assert result.captured_version.champion_id == "champ-9"
+    context = rig.ledger.append_observation.call_args.args[1]
+    assert context.optimizer_run_id == "run-123"
+    assert context.champion_id == "champ-9"
+    assert context.origin == vc.Origin.EXTERNAL
+
+
+def test_capture_on_open_leaves_optimizer_provenance_empty(observer_rig):
+    rig, observer, viewer, status, identity = observer_rig
+    result = observer.capture_on_open(rig.binding, viewer)
+    assert result.captured_version.optimizer_run_id is None
+    assert result.captured_version.champion_id is None
+    context = rig.ledger.append_observation.call_args.args[1]
+    assert context.optimizer_run_id is None and context.champion_id is None
+
+
 @pytest.mark.parametrize("failure", ["append_observation", "verify_committed", "advance_heads"])
 def test_capture_persistence_failure_returns_stale_and_disables_actions(observer_rig, failure):
     rig, observer, viewer, status, identity = observer_rig

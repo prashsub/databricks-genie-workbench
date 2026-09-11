@@ -22,9 +22,10 @@ class Observer:
         executor = self.identity.executor(self.reader_selection)
         return self._capture(binding, "open", executor, status)
 
-    def capture(self, binding, reason, executor):
+    def capture(self, binding, reason, executor, *, optimizer_run_id=None, champion_id=None):
         actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
-        return self._capture(binding, reason, executor, self.status_reader(binding, actor))
+        return self._capture(binding, reason, executor, self.status_reader(binding, actor),
+                             optimizer_run_id=optimizer_run_id, champion_id=champion_id)
 
     @staticmethod
     def _summary_of(version) -> vc.VersionSummary:
@@ -37,14 +38,16 @@ class Observer:
             context.restored_from_version_id, version.snapshot.fingerprints,
             context.optimizer_run_id, context.champion_id)
 
-    def _capture(self, binding, reason, executor, status):
+    def _capture(self, binding, reason, executor, status, *, optimizer_run_id=None, champion_id=None):
         try:
-            return self._capture_committed(binding, reason, executor, status)
+            return self._capture_committed(binding, reason, executor, status,
+                                           optimizer_run_id=optimizer_run_id, champion_id=champion_id)
         except Exception:
             return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
                 reasons=(*status.reasons, "Observation evidence unavailable")), None, True)
 
-    def _capture_committed(self, binding, reason, executor, status):
+    def _capture_committed(self, binding, reason, executor, status, *,
+                           optimizer_run_id=None, champion_id=None):
         try:
             lease = self.coordination.observe_exclusively(binding, executor)
         except Exception:
@@ -70,14 +73,15 @@ class Observer:
             datetime.now(timezone.utc), reason,
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
             vc.Origin.EXTERNAL, parent_version_id=status.heads.observed,
-            attempt_id=lease.fence.attempt_id, generation=lease.fence.generation)
+            attempt_id=lease.fence.attempt_id, generation=lease.fence.generation,
+            optimizer_run_id=optimizer_run_id, champion_id=champion_id)
         observation = self.ledger.append_observation(snapshot, context)
         if not self.ledger.verify_committed(observation):
             raise RuntimeError("Observation persistence unavailable")
         heads = self.coordination.advance_heads(lease.fence, vc.HeadUpdate(observation.version_id, None, None, None))
         summary = vc.VersionSummary(observation.version_id, binding.binding_id, context.observed_at,
             context.origin, context.actor.subject_id, context.parent_version_id, None,
-            snapshot.fingerprints, None, None)
+            snapshot.fingerprints, optimizer_run_id, champion_id)
         return vc.ObservationResult(replace(status, heads=heads, observed_at=context.observed_at,
             projection_as_of=context.observed_at, drift=vc.DriftState.UNKNOWN,
             stale=False, allowed_actions=()), summary, False)

@@ -295,16 +295,17 @@ integration, larger than §6 first implied, and its live path is **deploy-only-v
 - Source `binding_id` from the space's binding (via overview/status) rather than the demo
   shell; decide the mount location (see decisions).
 
-### 15.4 Open decisions (Step 6)
-- **UI mount:** add a per-agent "Version Control" tab in `SpaceDetail`, or keep a top-level
-  view? (Recommend: SpaceDetail tab, since observe is per-space.)
-- **Binding lifecycle:** auto-enroll a space on first optimizer trigger (implicit), or
-  require explicit enrollment? (Recommend: auto-enroll on trigger, behind the write flag.)
+### 15.4 Decisions (Step 6) — RESOLVED
+- **UI mount: BOTH** — a per-agent "Version Control" tab in `SpaceDetail` **and** the
+  top-level overview (promote `VersionControlWorkbench` to a real nav destination).
+- **Binding lifecycle: AUTO-enroll on first optimizer trigger** — `/trigger` resolves-or-
+  enrolls the space's binding, then captures. Enrollment writes are gated behind the VC
+  write flag (no-op until enabled at deploy).
 - **Live config/identity:** catalog/control-schema/warehouse for the versions table +
   Volume, and the trusted SP identity — provided at deploy (Step 7); offline stays
   fail-closed.
-- **History/diff endpoints:** add now (fuller UI) vs. defer diff and drive history from
-  observe/status only.
+- **History/diff endpoints:** add the history-list endpoint now; **defer semantic `diff`**
+  (drive history/detail from `ledger.history`/`get_version`).
 
 ### 15.5 Sequence (Step 6)
 a. Observer run-id capture variant + offline test.
