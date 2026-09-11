@@ -117,3 +117,32 @@ def test_history_requires_vc_auth_when_mounted():
     binding_id = "00000000-0000-4000-8000-000000000001"
     response = TestClient(app).get(f"/api/version-control/bindings/{binding_id}/versions")
     assert response.status_code == 401
+
+
+def test_obo_middleware_sets_vc_auth_on_api_version_control_path():
+    """Regression: the real OBOAuthMiddleware must derive request.state.vc_auth on the
+    /api/ path (every VC route is under /api/version-control). A prior bug placed the
+    derivation in the non-/api else branch, so VC requests always 401'd in production."""
+    from types import SimpleNamespace
+
+    from fastapi import Request
+
+    from backend.main import OBOAuthMiddleware
+
+    app = FastAPI()
+    app.add_middleware(OBOAuthMiddleware)
+    app.state.vc_observe = SimpleNamespace(workspace_id="ws-1")
+
+    @app.get("/api/version-control/probe")
+    def probe(request: Request):
+        auth = getattr(request.state, "vc_auth", None)
+        return {"ref": None if auth is None else auth.authentication_reference,
+                "ws": None if auth is None else auth.workspace_id}
+
+    client = TestClient(app)
+    hit = client.get("/api/version-control/probe", headers={"X-Forwarded-Email": "u@x"})
+    assert hit.status_code == 200
+    assert hit.json() == {"ref": "u@x", "ws": "ws-1"}
+    # No forwarded identity -> no vc_auth (routers then fail closed with 401).
+    anon = client.get("/api/version-control/probe")
+    assert anon.json() == {"ref": None, "ws": None}

@@ -110,12 +110,11 @@ class OBOAuthMiddleware(BaseHTTPMiddleware):
             else:
                 logger.info("OBO: no x-forwarded-access-token, using SP for %s", request.url.path)
             request.state.user_token = token
-        else:
-            request.state.user_token = ""
 
             # Version Control observe surface: derive the per-request VC actor from
             # the Databricks Apps forwarded-identity headers, only when the observe
-            # runtime is integrated (else the VC routers are not mounted at all).
+            # runtime is integrated (else the VC routers are not mounted at all). This
+            # MUST run on the /api/ path — every VC route is under /api/version-control.
             observe = getattr(request.app.state, "vc_observe", None)
             if observe is not None:
                 from backend.services.version_control.platform.app_observe import (
@@ -127,6 +126,8 @@ class OBOAuthMiddleware(BaseHTTPMiddleware):
                     dev_email=os.environ.get("DEV_USER_EMAIL"))
                 if vc_auth is not None:
                     request.state.vc_auth = vc_auth
+        else:
+            request.state.user_token = ""
 
         response = await call_next(request)
 
