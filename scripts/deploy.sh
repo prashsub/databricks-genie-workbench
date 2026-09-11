@@ -479,6 +479,19 @@ if [ -n "$JOB_ID" ]; then
     sed -i.bak "s|__GSO_JOB_ID__|$JOB_ID|" "$PATCHED_APP_YAML"
 fi
 
+# Version Control observe surface: wire VC_OBSERVE_* to THIS workspace + the GSO
+# schema (the VC control tables are colocated there — see grant_permissions.py).
+# VC_OBSERVE_SP_PRINCIPAL_ID is the app SP resolved above. If host/workspace-id
+# cannot be resolved we substitute EMPTY (not a placeholder), so the observe
+# runtime stays fail-closed at startup and never blocks the core deploy.
+VC_WS_HOST=$(databricks auth env --profile "$PROFILE" 2>/dev/null | grep DATABRICKS_HOST | head -1 | sed -E 's/.*: *"([^"]+)".*/\1/' || true)
+VC_WS_ID=$(databricks auth env --profile "$PROFILE" 2>/dev/null | grep DATABRICKS_WORKSPACE_ID | head -1 | sed -E 's/.*: *"([^"]+)".*/\1/' || true)
+sed -i.bak "s|__VC_OBSERVE_WORKSPACE_ID__|${VC_WS_ID}|" "$PATCHED_APP_YAML"
+sed -i.bak "s|__VC_OBSERVE_HOST__|${VC_WS_HOST}|" "$PATCHED_APP_YAML"
+sed -i.bak "s|__VC_OBSERVE_CATALOG__|${CATALOG}|" "$PATCHED_APP_YAML"
+sed -i.bak "s|__VC_OBSERVE_CONTROL_SCHEMA__|${GSO_SCHEMA}|" "$PATCHED_APP_YAML"
+sed -i.bak "s|__VC_OBSERVE_SP_PRINCIPAL_ID__|${SP_CLIENT_ID}|" "$PATCHED_APP_YAML"
+
 rm -f "${PATCHED_APP_YAML}.bak"
 
 # Validate all placeholders were resolved. A half-configured app.yaml (e.g. an
@@ -496,7 +509,7 @@ fi
 
 databricks workspace import "$WS_PATH/app.yaml" \
     --profile "$PROFILE" --file "$PATCHED_APP_YAML" --format AUTO --overwrite 2>/dev/null && \
-echo "  ✓ app.yaml patched (WAREHOUSE=$WAREHOUSE_ID, GSO_CATALOG=$CATALOG, GSO_JOB_ID=${JOB_ID:-<none>}, LAKEBASE_INSTANCE=$LAKEBASE_INSTANCE, LLM_MODEL=$LLM_MODEL, MLFLOW=${MLFLOW_EXPERIMENT_ID:-<disabled>})" || \
+echo "  ✓ app.yaml patched (WAREHOUSE=$WAREHOUSE_ID, GSO_CATALOG=$CATALOG, GSO_JOB_ID=${JOB_ID:-<none>}, LAKEBASE_INSTANCE=$LAKEBASE_INSTANCE, LLM_MODEL=$LLM_MODEL, MLFLOW=${MLFLOW_EXPERIMENT_ID:-<disabled>}, VC_OBSERVE=${VC_WS_ID:+enabled}${VC_WS_ID:-fail-closed}@${CATALOG}.${GSO_SCHEMA})" || \
 echo "  ⚠ Could not patch app.yaml — config may not be set"
 
 # Ensure app compute is running before deploying

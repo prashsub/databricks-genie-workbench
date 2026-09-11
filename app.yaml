@@ -57,12 +57,13 @@ env:
   # Version Control observe runtime (control plane)
   #
   # ALL of these must be set for the observe surface to mount (fail-closed).
-  # They point at the trusted target workspace + the UC namespace that holds the
-  # VC control tables/Volume (provisioned once — see scripts/version_control and
-  # backend/version_control_ddl). The app SP is the ambient identity, so it must
-  # hold SELECT+MODIFY on the four control tables and READ/WRITE on vc_snapshots.
-  #
-  # Replace the __VC_OBSERVE_*__ placeholders with real values before deploy.
+  # deploy.sh patches every __VC_OBSERVE_*__ token automatically from values it
+  # already resolves: WORKSPACE_ID/HOST from the deploy profile, CATALOG +
+  # CONTROL_SCHEMA from the GSO location (the VC control tables are colocated in
+  # the GSO schema — grant_permissions.py creates them and the app SP's
+  # schema-level grants cover them), and SP_PRINCIPAL_ID from the created app SP.
+  # If host/workspace-id cannot be resolved, deploy.sh substitutes EMPTY so the
+  # observe runtime stays fail-closed rather than blocking the core deploy.
   # ---------------------------------------------------------------------------
   - name: VC_OBSERVE_WORKSPACE_ID
     value: "__VC_OBSERVE_WORKSPACE_ID__"
