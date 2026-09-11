@@ -30,8 +30,20 @@ user_api_scopes:
   - "files.files"
 
 env:
+  # ---------------------------------------------------------------------------
+  # Version Control feature flags
+  #
+  # These gate the observe-only VC surface. Capture (append a version) requires
+  # VC_WRITES_ENABLED=true; the history reads require VC_HISTORY_ENABLED=true.
+  # Restore/reconcile/promotion stay OFF (reads-only scope; restore is also
+  # fail-closed in code regardless of the flag). The whole surface only mounts
+  # when the VC_OBSERVE_* control-plane vars below are ALL set — otherwise the
+  # app behaves exactly as before (no routes, no behavior change).
+  # ---------------------------------------------------------------------------
+  - name: VC_HISTORY_ENABLED
+    value: "true"
   - name: VC_WRITES_ENABLED
-    value: "false"
+    value: "true"
   - name: VC_RESTORE_ENABLED
     value: "false"
   - name: VC_PROMOTION_ENABLED
@@ -40,6 +52,32 @@ env:
     value: "false"
   - name: VC_RECONCILE_ENABLED
     value: "false"
+
+  # ---------------------------------------------------------------------------
+  # Version Control observe runtime (control plane)
+  #
+  # ALL of these must be set for the observe surface to mount (fail-closed).
+  # They point at the trusted target workspace + the UC namespace that holds the
+  # VC control tables/Volume (provisioned once — see scripts/version_control and
+  # backend/version_control_ddl). The app SP is the ambient identity, so it must
+  # hold SELECT+MODIFY on the four control tables and READ/WRITE on vc_snapshots.
+  #
+  # Replace the __VC_OBSERVE_*__ placeholders with real values before deploy.
+  # ---------------------------------------------------------------------------
+  - name: VC_OBSERVE_WORKSPACE_ID
+    value: "__VC_OBSERVE_WORKSPACE_ID__"
+  - name: VC_OBSERVE_HOST
+    value: "__VC_OBSERVE_HOST__"
+  - name: VC_OBSERVE_CATALOG
+    value: "__VC_OBSERVE_CATALOG__"
+  - name: VC_OBSERVE_CONTROL_SCHEMA
+    value: "__VC_OBSERVE_CONTROL_SCHEMA__"
+  - name: VC_OBSERVE_SP_PRINCIPAL_ID
+    value: "__VC_OBSERVE_SP_PRINCIPAL_ID__"
+  - name: VC_OBSERVE_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: VC_OBSERVE_ENVIRONMENT
+    value: "nonprod"
   # ---------------------------------------------------------------------------
   # MLflow Tracing
   # ---------------------------------------------------------------------------
