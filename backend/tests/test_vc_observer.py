@@ -160,6 +160,22 @@ def test_capture_threads_restore_origin_and_lineage(observer_rig):
     assert context.restored_from_version_id == source
 
 
+def test_capture_records_actor_override_while_reading_as_the_executor(observer_rig):
+    """A deliberate write (restore) records the human as the ledger actor, but the GET and
+    status read still run under the SP executor identity."""
+    rig, observer, viewer, status, identity = observer_rig
+    human = vc.ActorContext("user@x", rig.executor.workspace_id, "human")
+    reads = []
+    observer.status_reader = lambda binding, actor: reads.append(actor) or status
+    result = observer.capture(rig.binding, "restore", rig.executor, origin=vc.Origin.RESTORE,
+                              actor_override=human)
+    context = rig.ledger.append_observation.call_args.args[1]
+    assert context.actor == human
+    assert result.captured_version.observed_by == "user@x"
+    # The status reader saw the SP executor, not the human override.
+    assert all(actor.subject_id == rig.executor.principal_id for actor in reads)
+
+
 @pytest.mark.parametrize("failure", ["append_observation", "verify_committed", "advance_heads"])
 def test_capture_persistence_failure_returns_stale_and_disables_actions(observer_rig, failure):
     rig, observer, viewer, status, identity = observer_rig

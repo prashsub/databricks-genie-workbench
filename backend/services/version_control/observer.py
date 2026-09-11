@@ -28,10 +28,15 @@ class Observer:
         return self._capture(binding, "open", executor, status, origin=origin)
 
     def capture(self, binding, reason, executor, *, origin=vc.Origin.EXTERNAL,
-                restored_from_version_id=None, optimizer_run_id=None, champion_id=None):
+                restored_from_version_id=None, actor_override=None,
+                optimizer_run_id=None, champion_id=None):
+        # `actor_override` records the human who initiated a deliberate write (e.g. a
+        # restore clicked in the workbench) as the ledger actor, while the GET/lease still
+        # run as the SP executor. Defaults to the executor identity (SP-observed captures).
         actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
         return self._capture(binding, reason, executor, self.status_reader(binding, actor),
                              origin=origin, restored_from_version_id=restored_from_version_id,
+                             actor_override=actor_override,
                              optimizer_run_id=optimizer_run_id, champion_id=champion_id)
 
     @staticmethod
@@ -46,10 +51,12 @@ class Observer:
             context.optimizer_run_id, context.champion_id)
 
     def _capture(self, binding, reason, executor, status, *, origin=vc.Origin.EXTERNAL,
-                 restored_from_version_id=None, optimizer_run_id=None, champion_id=None):
+                 restored_from_version_id=None, actor_override=None,
+                 optimizer_run_id=None, champion_id=None):
         try:
             return self._capture_committed(binding, reason, executor, status, origin=origin,
                                            restored_from_version_id=restored_from_version_id,
+                                           actor_override=actor_override,
                                            optimizer_run_id=optimizer_run_id, champion_id=champion_id)
         except Exception:
             logger.exception("VC observation capture failed for binding %s", binding.binding_id)
@@ -57,7 +64,8 @@ class Observer:
                 reasons=(*status.reasons, "Observation evidence unavailable")), None, True)
 
     def _capture_committed(self, binding, reason, executor, status, *, origin=vc.Origin.EXTERNAL,
-                           restored_from_version_id=None, optimizer_run_id=None, champion_id=None):
+                           restored_from_version_id=None, actor_override=None,
+                           optimizer_run_id=None, champion_id=None):
         try:
             lease = self.coordination.observe_exclusively(binding, executor)
         except Exception:
@@ -79,9 +87,10 @@ class Observer:
                 # Busy/failure paths above still return None.
                 return vc.ObservationResult(replace(status, stale=False),
                                             self._summary_of(previous), False)
+        record_actor = actor_override or vc.ActorContext(
+            executor.principal_id, executor.workspace_id, executor.actor_kind)
         context = vc.CaptureContext(binding, f"{lease.fence.attempt_id}:observe",
-            datetime.now(timezone.utc), reason,
-            vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
+            datetime.now(timezone.utc), reason, record_actor,
             origin, parent_version_id=status.heads.observed,
             restored_from_version_id=restored_from_version_id,
             attempt_id=lease.fence.attempt_id, generation=lease.fence.generation,

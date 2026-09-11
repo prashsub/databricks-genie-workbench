@@ -159,11 +159,13 @@ def test_space_restore_applies_snapshot_and_records_version(monkeypatch):
     response = _client(runtime).post(f"/api/version-control/spaces/{SPACE_ID}/restore", json=_RESTORE_BODY)
     assert response.status_code == 200
     assert response.json()["captured_version"]["version_id"] == str(UUID(int=9))
-    # Recorded as a restore linked to the requested source version, as the SP.
+    # Recorded as a restore linked to the requested source version, attributed to the
+    # human who clicked Restore (actor_override), not the SP executor.
     _binding, reason, _executor = runtime.observer.capture.call_args.args
     assert reason == "restore"
     assert runtime.observer.capture.call_args.kwargs["origin"] == vc.Origin.RESTORE
     assert runtime.observer.capture.call_args.kwargs["restored_from_version_id"] == str(UUID(int=1))
+    assert runtime.observer.capture.call_args.kwargs["actor_override"] == runtime.actor
     # The live space was PATCHed as the OBO user.
     assert client.api_client.do.call_args_list[0].args[0] == "PATCH"
 

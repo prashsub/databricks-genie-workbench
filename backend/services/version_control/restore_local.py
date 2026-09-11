@@ -54,5 +54,7 @@ def restore_space_version(runtime, *, space_id, version_id, expected_current_ver
                 historical.snapshot.restorable_metadata.get("description"))
 
     executor = runtime.identity.executor(runtime.reader_selection)
+    # Record the human who clicked Restore as the ledger actor (the GET/lease still run as
+    # the SP executor); the restore was their deliberate, OBO-authorized write.
     return runtime.observer.capture(binding, "restore", executor, origin=vc.Origin.RESTORE,
-                                    restored_from_version_id=version_id)
+                                    restored_from_version_id=version_id, actor_override=actor)
