@@ -157,3 +157,59 @@ governance for the optimizer.
 Revert + de-wire + test reconcile + merge: ~2–3 days. Observe-capture wiring (composition +
 hooks + flag + identity, optional history UI + live check): ~3–6 days. Total ≈ 1–1.5 weeks —
 vs. ~3–4 weeks to finish M10.
+
+## 13. Mechanism refinement (discovered during Step 2)
+
+**Finding:** the fork branch (`vc/unblock` @ `8c3da097`) diverged from base at merge-base
+`ae8c4367` and **never took base's 83 commits** — it lacks base's entire MV-advisor feature
+(13 base-only backend files: `mv_create.py`, `mv_entitlement.py`, `mv_suggest.py`,
+`join_advisor.py`, their tests; plus the optimizer-package MV modules `mv_advisor.py`,
+`mv_attach.py`, …). Therefore a **file-by-file revert of the optimizer slice on the fork
+branch** does not just "undo guards" — reverting `auto_optimize.py` to base pulls in base's
+whole MV feature by hand (import cascade). That is fragile and effectively re-builds base's
+branch manually.
+
+**Conflict surface is tiny.** Only **10 files are dual-touched** (changed by both base and
+fork since `ae8c4367`). Non-test dual-touched files:
+
+| File | Resolution |
+|---|---|
+| `backend/routers/auto_optimize.py` | take **base** (functional trigger + MV features); re-add observe-before hook in Step 5 |
+| `packages/.../optimization/unified_loop.py` | take **base** |
+| `packages/.../optimization/applier.py` | take **base** |
+| `packages/.../common/genie_client.py` | take **base** |
+| `packages/.../jobs/run_optimize.py` | take **base** |
+| `pyproject.toml` | combine (markers + addopts; both small/additive) |
+| `databricks.yml` | combine (base +24 / fork +40, additive) |
+| `scripts/deploy_lib/gso_job.py` | combine (base +13 / fork +3, additive) |
+| `frontend/src/lib/api.ts` | combine (base +282 MV UI / fork +17 VC, disjoint sections) |
+
+Everything else is a clean one-sided add: base's MV feature comes in automatically, and the
+fork's VC-keep files (`backend/services/version_control/**`, `vc_*` routers/jobs) add cleanly.
+
+**Refined mechanism (supersedes §10 steps 2–4 & 7):** construct the target by **merging fork
+into a base-derived `feature/version-control-ci-cd`** with the resolution policy above,
+instead of reverting file-by-file on the fork branch. This is why the earlier merge felt
+non-seamless — it had no resolution policy for the optimizer `/trigger`; we now do
+("take base for optimizer-governance; combine for VC-shared; add VC-keep").
+
+**Refined sequence:**
+1. `vc/observe-pivot` off `vc/unblock` holds this plan doc. **(done)**
+2. Create `feature/version-control-ci-cd` off `origin/feature/metric-view-advisor`.
+3. `git merge` the fork (`vc/unblock`) into it; resolve the 10 conflicts per the table.
+4. **Post-merge cleanup** = the rest of §4's REMOVE that isn't covered by conflict
+   resolution (these are fork-only adds the merge keeps): delete
+   `backend/services/version_control/optimizer_adapter.py`,
+   `packages/.../integration/version_control.py`, the GSO candidate/champion tests,
+   `backend/tests/test_vc_optimizer_adapter.py`, `M10_IMPLEMENTATION.md`; de-wire the
+   optimizer seam in `backend/jobs/__init__.py`; revert to base any fork-only GSO/router
+   tests written for the candidate model (`test_auto_optimize_router.py`,
+   `test_create_agent.py`, GSO `conftest.py` candidate fixture + rewritten unit tests).
+5. Grep-clean + full offline green (backend + GSO).
+6. Build observe capture (§6); live nonprod validation.
+7. Branch **is** the target — open PR / land.
+
+**Validation the merge is correct:** after resolution + cleanup,
+`git diff origin/feature/metric-view-advisor -- packages/genie-space-optimizer/src` is
+empty, and grep for `assert_candidate_write` / `require_candidate_session_for_job` /
+`optimizer_adapter` / `integration.version_control` is zero.
