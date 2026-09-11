@@ -32,7 +32,7 @@ _preflight_check_vc_bundle_content() {
     if [ -x "$root/.venv/bin/python" ]; then
         guard_python=("$root/.venv/bin/python")
     elif command -v uv &>/dev/null; then
-        guard_python=(uv run --project "$root" python)
+        guard_python=(uv run --frozen --project "$root" python)
     else
         _error "VC bundle guard tooling failure: project Python and uv unavailable; refusing deployment or destroy."
         exit 2
