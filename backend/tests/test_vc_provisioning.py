@@ -80,7 +80,7 @@ def test_bundle_guard_runs_on_destroy_and_separates_tooling_failure_from_dual_au
 
     interpreter.unlink()
     fallback = binaries / "uv"
-    fallback.write_text(f'#!/bin/sh\n[ "$1" = run ] && [ "$2" = --project ] && [ "$3" = {shlex.quote(str(project))} ] && [ "$4" = python ] || exit 99\nshift 4\nexec {shlex.quote(sys.executable)} "$@"\n')
+    fallback.write_text(f'#!/bin/sh\n[ "$1" = run ] && [ "$2" = --frozen ] && [ "$3" = --project ] && [ "$4" = {shlex.quote(str(project))} ] && [ "$5" = python ] || exit 99\nshift 5\nexec {shlex.quote(sys.executable)} "$@"\n')
     fallback.chmod(0o755)
     result = subprocess.run(shell, env=environment, capture_output=True, text=True)
     assert result.returncode == expected, result.stdout + result.stderr

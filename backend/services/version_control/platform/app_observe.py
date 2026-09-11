@@ -43,12 +43,34 @@ def observe_config_from_env(env: Any) -> dict | None:
     host = env["VC_OBSERVE_HOST"]
     workspace_id = env["VC_OBSERVE_WORKSPACE_ID"]
     profile = env.get("VC_OBSERVE_PROFILE") or None
+    # The VC identity model admits an executor only via an explicitly-bound OAuth M2M
+    # profile or OBO/pat — never a bare ambient client. On Databricks Apps the app runs
+    # as its service principal via ambient OAuth M2M credentials injected as
+    # DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET (see services/auth.py). So when no
+    # operator profile is supplied (the deployed-app path), bind the app SP as an m2m
+    # executor: a stable routing key into the identity provider's ``_profiles`` plus an
+    # ``auth`` block that constructs the client from those env vars. This is the in-Job
+    # m2m pattern validated by test_client_prefers_m2m_auth_over_profile_routing_key_in_job;
+    # ``profile`` there is a routing key only, never a local ~/.databrickscfg profile.
+    executor_role: dict[str, Any] = {"warehouse_id": warehouse_id, "host": host}
+    if profile:
+        executor_role["profile"] = profile
+        selection_profile = profile
+    else:
+        selection_profile = "vc-observe-app-sp"
+        executor_role["profile"] = selection_profile
+        executor_role["auth"] = {
+            "mode": "m2m",
+            "host": host,
+            "client_id_env": env.get("VC_OBSERVE_CLIENT_ID_ENV") or "DATABRICKS_CLIENT_ID",
+            "client_secret_env": env.get("VC_OBSERVE_CLIENT_SECRET_ENV") or "DATABRICKS_CLIENT_SECRET",
+        }
     selection = {
         "workspace_id": workspace_id,
         "host": host,
         "principal_id": env["VC_OBSERVE_SP_PRINCIPAL_ID"],
         "execution_ref": env.get("VC_OBSERVE_EXECUTION_REF") or "app/genie-workbench",
-        "profile": profile,
+        "profile": selection_profile,
     }
     return {
         "workspace_id": workspace_id,
@@ -58,7 +80,7 @@ def observe_config_from_env(env: Any) -> dict | None:
         "target_warehouse_id": warehouse_id,
         "target_selection": selection,
         "environment": env.get("VC_OBSERVE_ENVIRONMENT") or "prod",
-        "roles": {"executor": {"warehouse_id": warehouse_id, "host": host, "profile": profile}},
+        "roles": {"executor": executor_role},
         "flags": {
             "vc_history_enabled": _flag(env, "VC_HISTORY_ENABLED"),
             "vc_writes_enabled": _flag(env, "VC_WRITES_ENABLED"),

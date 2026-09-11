@@ -42,6 +42,37 @@ def test_config_builds_full_shape_from_env():
                                "vc_restore_enabled": False}
 
 
+def test_config_binds_app_sp_m2m_executor_when_no_profile():
+    """The deployed-app path: with no operator profile, the app SP is bound as an m2m
+    executor from the ambient DATABRICKS_CLIENT_ID/SECRET env, with a routing profile key
+    (into the identity provider's _profiles) equal to target_selection.profile so the
+    identity provider takes the oauth-m2m executor path, never the bare-ambient client."""
+    executor = observe_config_from_env(_FULL_ENV)["roles"]["executor"]
+    assert executor["profile"] == "vc-observe-app-sp"
+    assert executor["auth"] == {"mode": "m2m", "host": TARGET_HOST,
+                                "client_id_env": "DATABRICKS_CLIENT_ID",
+                                "client_secret_env": "DATABRICKS_CLIENT_SECRET"}
+    config = observe_config_from_env(_FULL_ENV)
+    assert config["target_selection"]["profile"] == executor["profile"]
+
+
+def test_config_m2m_credential_env_names_are_overridable():
+    config = observe_config_from_env({**_FULL_ENV,
+                                      "VC_OBSERVE_CLIENT_ID_ENV": "APP_ID",
+                                      "VC_OBSERVE_CLIENT_SECRET_ENV": "APP_SECRET"})
+    auth = config["roles"]["executor"]["auth"]
+    assert auth["client_id_env"] == "APP_ID" and auth["client_secret_env"] == "APP_SECRET"
+
+
+def test_config_uses_operator_profile_when_provided_without_m2m_auth():
+    """The operator/local path: an explicit VC_OBSERVE_PROFILE is a real named profile,
+    so it routes through _profiles directly with no m2m auth block."""
+    config = observe_config_from_env({**_FULL_ENV, "VC_OBSERVE_PROFILE": "vc-operator"})
+    executor = config["roles"]["executor"]
+    assert executor["profile"] == "vc-operator" and "auth" not in executor
+    assert config["target_selection"]["profile"] == "vc-operator"
+
+
 def test_config_empty_env_is_none():
     assert observe_config_from_env({}) is None
 

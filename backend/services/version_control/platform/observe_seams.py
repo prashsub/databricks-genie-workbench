@@ -25,6 +25,7 @@ validated per the two-install-path contract).
 Restore/reconcile mutations are intentionally NOT built here; they stay fail-closed.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -177,5 +178,9 @@ def resolve_observe_runtime(config: dict | None, *, adapters: Any = None,
         return None
     try:
         return build_observe_runtime(config, adapters=adapters, flags=flags)
-    except Exception:  # noqa: BLE001 - any assembly failure -> no observe surface (fail-closed)
+    except Exception as exc:  # noqa: BLE001 - any assembly failure -> no observe surface (fail-closed)
+        # Fail closed, but never silently: the message (no secrets) is the only signal an
+        # operator gets that a fully-configured observe surface refused to integrate.
+        logging.getLogger(__name__).warning(
+            "VC observe runtime failed to integrate; mounting no surface: %s", exc)
         return None
