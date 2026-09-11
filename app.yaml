@@ -30,6 +30,16 @@ user_api_scopes:
   - "files.files"
 
 env:
+  - name: VC_WRITES_ENABLED
+    value: "false"
+  - name: VC_RESTORE_ENABLED
+    value: "false"
+  - name: VC_PROMOTION_ENABLED
+    value: "false"
+  - name: VC_OPTIMIZER_APPLY_ENABLED
+    value: "false"
+  - name: VC_RECONCILE_ENABLED
+    value: "false"
   # ---------------------------------------------------------------------------
   # MLflow Tracing
   # ---------------------------------------------------------------------------

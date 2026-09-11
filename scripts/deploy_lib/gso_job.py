@@ -351,6 +351,9 @@ def ensure_gso_job(w, cfg: InstallConfig, app_sp_client_id: str, deployer_user: 
     notebooks_path = upload_job_notebooks(w, cfg, deployer_user)
     wheel_path = upload_gso_wheel(w, cfg)
     settings = build_job_settings(cfg, notebooks_path, wheel_path)
+    if not app_sp_client_id:
+        raise ValueError("Explicit app service principal required for Job run_as")
+    settings["run_as"] = {"service_principal_name": app_sp_client_id}
     job_id = upsert_job(w, settings)
     set_job_permissions(w, job_id, deployer_user, app_sp_client_id)
     grant_directory_permissions(w, notebooks_path, app_sp_client_id)
