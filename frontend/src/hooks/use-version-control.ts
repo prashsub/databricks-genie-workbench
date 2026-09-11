@@ -61,7 +61,7 @@ export function createVersionControlStore(api: VersionControlApi) {
   }
 }
 export function useVersionControl(bindingId: string, api: VersionControlApi = demoApi) {
-  const store = useMemo(() => createVersionControlStore(api), [api, bindingId])
+  const store = useMemo(() => createVersionControlStore(api), [api])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   useEffect(() => { void store.open(bindingId); return () => store.dispose() }, [store, bindingId])
   useEffect(() => {

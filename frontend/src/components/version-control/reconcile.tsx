@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
 import { createMutationIntent } from '@/lib/version-control-api'
-import type { ApprovalInputs, ApprovalRecord, Operation, ReviewedCommand } from '@/types/version-control'
+import type { ApprovalInputs, ApprovalRecord, Operation } from '@/types/version-control'
 import { canMutate } from '@/hooks/use-version-control'
 import type { VersionControlState } from '@/hooks/use-version-control'
-import { pollOperation } from './restore'
+import { hasFreshApproval, reconcileAction } from './reconcile-actions'
 export function OperationStatusView({ operation, onVerify }: { operation: Operation; onVerify: () => void }) {
   return <section aria-label="Operation verification and audit">
     <h3>Operation {operation.operation_id}</h3>
@@ -32,17 +32,6 @@ export function OperationDrillThrough({ api, operationId }: { api?: VersionContr
   </div>
 }
 
-function hasFreshApproval(bindingId: string, reviewed: ReviewedCommand, approval: ApprovalRecord | null) {
-  return Boolean(approval?.valid && approval.approval_id === reviewed.approval_id && approval.inputs.target_binding.binding_id === bindingId && approval.inputs.target_binding.binding_revision === reviewed.binding_revision && Date.parse(approval.inputs.expires_at) > Date.now() && JSON.stringify(approval.inputs.expected_base_fingerprints) === JSON.stringify(reviewed.expected_base))
-}
-
-export async function reconcileAction(api: VersionControlApi, bindingId: string, action: 'adopt' | 'reapply' | 'acknowledge', reviewed: ReviewedCommand, inputs: ApprovalInputs, approval: ApprovalRecord | null, key: string) {
-  const fresh = hasFreshApproval(bindingId, reviewed, approval)
-  if (action === 'adopt' && !fresh) return api.requestApproval(inputs, key)
-  if (action === 'reapply' && !fresh) throw new Error('Reapply requires a fresh approval for the newly captured base.')
-  const handle = await api.reconcile(bindingId, { ...reviewed, action, policy_inputs: { validation_policy_digest: inputs.validation_policy_digest, benchmark_policy_digest: inputs.benchmark_policy_digest } }, key)
-  return pollOperation(api, handle.operation_id)
-}
 export function ReconcilePanel({ api, state, inputs, approval, onApproval, onComplete, onCompare }: {
   api: VersionControlApi; state: VersionControlState; inputs: ApprovalInputs; approval: ApprovalRecord | null
   onApproval: (approvalId: string) => void; onComplete: () => void; onCompare: () => void

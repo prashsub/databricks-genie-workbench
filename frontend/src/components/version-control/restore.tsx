@@ -1,28 +1,10 @@
 import { useState } from 'react'
-import { createMutationIntent, VersionControlError } from '@/lib/version-control-api'
+import { createMutationIntent } from '@/lib/version-control-api'
 import type { VersionControlApi } from '@/lib/version-control-api'
 import type { Operation, RestoreCommand } from '@/types/version-control'
 import { OperationStatusView } from './reconcile'
+import { submitRestore } from './restore-actions'
 
-export async function pollOperation(api: VersionControlApi, operationId: string, onUpdate?: (operation: Operation) => void) {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const operation = await api.operation(operationId)
-    onUpdate?.(operation)
-    if (!['requested', 'preimage_captured', 'apply_attempted', 'compensation_attempted'].includes(operation.status) || attempt === 29) return operation
-    await new Promise(resolve => setTimeout(resolve, 1000))
-  }
-  throw new Error('Operation polling exhausted')
-}
-export async function submitRestore(api: VersionControlApi, bindingId: string, command: RestoreCommand, confirmed: boolean, key: string, onUpdate?: (operation: Operation) => void) {
-  if (!confirmed || !command.approval_id.trim()) throw new Error('Confirm the reviewed version and supply a fresh approval reference.')
-  try {
-    const handle = await api.restore(bindingId, command, key)
-    return await pollOperation(api, handle.operation_id, onUpdate)
-  } catch (error) {
-    if (error instanceof VersionControlError && error.operation_id) return pollOperation(api, error.operation_id, onUpdate)
-    throw error
-  }
-}
 export function RestorePanel({ api, bindingId, command, disabled, onComplete }: { api: VersionControlApi; bindingId: string; command: Omit<RestoreCommand, 'approval_id'>; disabled: boolean; onComplete: () => void }) {
   const [approvalId, setApprovalId] = useState('')
   const [confirmed, setConfirmed] = useState(false)

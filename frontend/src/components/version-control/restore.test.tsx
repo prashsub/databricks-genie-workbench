@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import { submitRestore } from './restore'
+import { submitRestore } from './restore-actions'
 import { VersionControlApi } from '@/lib/version-control-api'
 import { fingerprints } from './fixtures'
 

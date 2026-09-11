@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { VersionControlApi } from '@/lib/version-control-api'
 import { createMutationIntent } from '@/lib/version-control-api'
 import type { ApprovalRequestInputs, ApprovalRecord } from '@/types/version-control'
+import { voteApproval } from './approvals-actions'
 
 export function ApprovalDetails({ record }: { record: ApprovalRecord }) {
   const approvers = new Set(record.votes.filter(vote => vote.decision === 'approve' && vote.actor_id !== record.inputs.requester_id).map(vote => vote.actor_id))
@@ -15,10 +16,6 @@ export function ApprovalDetails({ record }: { record: ApprovalRecord }) {
     <h4>Bound inputs and policy digests</h4><pre>{JSON.stringify(record.inputs, null, 2)}</pre>
     <h4>Vote audit</h4><ul>{record.votes.map((vote, index) => <li key={index}>{vote.actor_id}: {vote.decision} · {vote.recorded_at} · Target-group eligible: {vote.target_group_eligible ? 'yes' : 'no'}</li>)}</ul>
   </section>
-}
-export function voteApproval(api: VersionControlApi, record: ApprovalRecord, decision: 'approve' | 'reject', key: string) {
-  if (!record.allowed_actions.includes('vote')) return Promise.reject(new Error('Voting is not allowed by the server.'))
-  return api.vote(record.approval_id, decision, key)
 }
 export function ApprovalsPanel({ api, approvalId, inputs, disabled, onApproval, onRecord }: {
   api: VersionControlApi; approvalId: string; inputs: ApprovalRequestInputs | null; disabled: boolean

@@ -42,7 +42,7 @@ it('interleaved_intents_reuse_the_original_key_when_the_first_intent_returns', a
 })
 
 import type { ApprovalInputs, DeploymentReceipt, DriftState, OperationStatus, Origin, Comparison, DiffItem, PackageManifest } from '@/types/version-control'
-import { reconcileAction } from '@/components/version-control/reconcile'
+import { reconcileAction } from '@/components/version-control/reconcile-actions'
 import { approvalInputsFixture } from '@/components/version-control/fixtures'
 import enums from '../../../backend/tests/fixtures/vc_contracts/enums.json'
 import binding_status from '../../../backend/tests/fixtures/vc_contracts/binding_status.json'

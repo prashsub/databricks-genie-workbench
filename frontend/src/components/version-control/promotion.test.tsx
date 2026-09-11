@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { expect, it, vi } from 'vitest'
-import { createPromotionFlow, ReceiptView, pollReceipt } from './promotion'
+import { ReceiptView } from './promotion'
+import { createPromotionFlow, pollReceipt } from './promotion-actions'
 import { VersionControlApi } from '@/lib/version-control-api'
 import { approvalFixture, receiptFixture } from './fixtures'
 import { renderToStaticMarkup } from 'react-dom/server'

@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it, vi } from 'vitest'
 import { OverviewBadge } from './overview-badge'
 import { bindingFixture } from './fixtures'
-import { loadOverview } from './overview'
+import { loadOverview } from './overview-actions'
 import { VersionControlApi } from '@/lib/version-control-api'
 
 it('overview_badge_uses_approved_deployed_not_observed_equality', () => {

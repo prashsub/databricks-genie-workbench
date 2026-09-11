@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { expect, it, vi } from 'vitest'
-import { reconcileAction, OperationStatusView, ReconcilePanel } from './reconcile'
+import { OperationStatusView, ReconcilePanel } from './reconcile'
+import { reconcileAction } from './reconcile-actions'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { VersionControlApi } from '@/lib/version-control-api'
 import { approvalFixture, approvalInputsFixture, fingerprints, bindingFixture } from './fixtures'

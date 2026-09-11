@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it, vi } from 'vitest'
-import { ApprovalDetails, voteApproval } from './approvals'
+import { ApprovalDetails } from './approvals'
+import { voteApproval } from './approvals-actions'
 import { approvalFixture } from './fixtures'
 import { VersionControlApi } from '@/lib/version-control-api'
 

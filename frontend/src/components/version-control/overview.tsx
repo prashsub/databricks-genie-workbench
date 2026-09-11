@@ -2,8 +2,7 @@ import type { VersionControlApi } from '@/lib/version-control-api'
 import { useEffect, useState } from 'react'
 import type { OverviewPage } from '@/types/version-control'
 import { OverviewBadge } from './overview-badge'
-
-export function loadOverview(api: VersionControlApi, cursor?: string, signal?: AbortSignal) { return api.overview(cursor, signal) }
+import { loadOverview } from './overview-actions'
 
 export function VersionControlOverview({ api, onSelect }: { api: VersionControlApi; onSelect: (bindingId: string) => void }) {
   const [page, setPage] = useState<OverviewPage>({ items: [], next_cursor: null })
@@ -13,10 +12,12 @@ export function VersionControlOverview({ api, onSelect }: { api: VersionControlA
   const [error, setError] = useState('')
   useEffect(() => {
     const controller = new AbortController()
+    // Show the spinner immediately when the query inputs change; a deps-triggered
+    // fetch legitimately resets loading synchronously (error clears on settle).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
-    setError('')
     loadOverview(api, cursor, controller.signal).then(result => {
-      if (!controller.signal.aborted) setPage(result)
+      if (!controller.signal.aborted) { setPage(result); setError('') }
     }).catch(error => { if (!controller.signal.aborted) setError(String(error)) })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
