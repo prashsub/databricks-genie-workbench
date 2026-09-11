@@ -1,9 +1,12 @@
 """Serialized full-state observation, independent of policy head authority."""
 
+import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 
 from backend.services.version_control import contracts as vc
+
+logger = logging.getLogger(__name__)
 
 
 class Observer:
@@ -43,6 +46,7 @@ class Observer:
             return self._capture_committed(binding, reason, executor, status,
                                            optimizer_run_id=optimizer_run_id, champion_id=champion_id)
         except Exception:
+            logger.exception("VC observation capture failed for binding %s", binding.binding_id)
             return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
                 reasons=(*status.reasons, "Observation evidence unavailable")), None, True)
 

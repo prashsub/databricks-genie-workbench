@@ -9,12 +9,15 @@ state without knowing the internal binding id.
   gated on ``vc_writes_enabled``.
 """
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from backend.services.version_control import contracts as vc
 from backend.services.version_control.observe_optimizer import resolve_or_enroll_bound
+
+logger = logging.getLogger(__name__)
 
 SpaceId = Annotated[str, Path(pattern=r"^[0-9a-zA-Z_-]{1,128}$")]
 
@@ -36,6 +39,9 @@ def _invoke(call):
     except (ValueError, TypeError) as error:
         raise _error(409, "request_conflict", str(error)) from error
     except Exception as error:
+        # Fail closed to the client, but never silently: the server-side cause is the
+        # only signal for an opaque evidence_unavailable 503.
+        logger.exception("VC space request failed")
         raise _error(503, "evidence_unavailable", "Evidence unavailable", stale=True) from error
 
 
