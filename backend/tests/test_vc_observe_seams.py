@@ -63,6 +63,41 @@ def test_registry_is_enroll_capable_and_ledger_writes_enabled():
     assert runtime.actor.workspace_id == "target" and runtime.actor.actor_kind == "service"
 
 
+def test_actor_trusts_app_entry_identity_without_scim():
+    """Option A: the observe runtime resolves the actor from the app-entry (proxy-verified)
+    identity, not a second SCIM lookup. The fake provider tags actors "service"; the
+    entry-trusted wrapper returns a "human" actor built directly from the forwarded
+    reference, proving the governed SCIM resolve_actor is bypassed for observe reads."""
+    runtime = build_observe_runtime(_config(), adapters=FakeAdapters())
+    actor = runtime.identity.actor(vc.AuthenticatedRequest("alice@corp.com", "target"))
+    assert actor == vc.ActorContext("alice@corp.com", "target", "human")
+
+
+def test_actor_strips_workspace_suffix_from_token_forwarded_reference():
+    """Personal-token access forwards ``<subject>@<workspace_id>``; the workspace suffix is
+    an access artifact and is stripped, while an email (a different @) is preserved."""
+    runtime = build_observe_runtime(_config(), adapters=FakeAdapters())
+    assert runtime.identity.actor(
+        vc.AuthenticatedRequest("599900@target", "target")
+    ) == vc.ActorContext("599900", "target", "human")
+
+
+def test_actor_rejects_workspace_mismatch_or_empty_subject():
+    runtime = build_observe_runtime(_config(), adapters=FakeAdapters())
+    with pytest.raises(PermissionError, match="Server-authenticated"):
+        runtime.identity.actor(vc.AuthenticatedRequest("alice@corp.com", "other-ws"))
+    with pytest.raises(PermissionError, match="Server-authenticated"):
+        runtime.identity.actor(vc.AuthenticatedRequest("", "target"))
+
+
+def test_non_actor_identity_methods_delegate_to_governed_provider():
+    """The wrapper overrides only actor(); executor() (and every other identity method)
+    delegates to the underlying provider unchanged, so read/capture leaves are untouched."""
+    runtime = build_observe_runtime(_config(), adapters=FakeAdapters())
+    executor = runtime.identity.executor(runtime.reader_selection)
+    assert executor.workspace_id == "target"
+
+
 def test_authorize_history_is_target_local():
     runtime = build_observe_runtime(_config(), adapters=FakeAdapters())
     binding = vc.BindingRef(str(UUID(int=1)), 1, "sales", "target", "space-1", "dev")

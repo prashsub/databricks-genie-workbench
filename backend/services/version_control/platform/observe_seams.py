@@ -83,6 +83,46 @@ def _deny_authorization(_grant: Any, _executor: Any) -> bool:
     return False
 
 
+class _EntryTrustedActorIdentity:
+    """Observe-local identity that trusts the app-entry (Databricks Apps proxy) subject.
+
+    The Apps auth proxy authenticates the caller before the request reaches the app (OBO
+    token + forwarded-identity headers), so the observe READ/capture surface resolves the
+    actor directly from that verified identity instead of a second SCIM ``users.get``
+    round-trip. That round-trip (the governed ``resolve_actor``) keys on a bare SCIM id
+    the platform never forwards — it hands over an email, or ``<subject>@<workspace_id>``
+    for personal-token access — so it fail-closed 403'd every real caller of the read
+    surface.
+
+    Only ``actor`` is overridden; every other identity method (``executor``, credential
+    verification, ``groups``, ``can_edit``, ``verify_run_as``, ...) delegates UNCHANGED to
+    the underlying governed provider, so the read/capture leaves are untouched and the
+    governed promotion path keeps its own zero-trust ``resolve_actor``. Read authorization
+    still enforces the workspace boundary via ``authorize_history``; the human subject is
+    used only for that boundary check (its ``subject_id`` is never consulted for capture
+    provenance — the recorded actor is the SP executor — and never admits a mutation).
+    """
+
+    def __init__(self, delegate: Any, workspace_id: str):
+        self._delegate = delegate
+        self._workspace_id = workspace_id
+
+    def actor(self, request: Any) -> vc.ActorContext:
+        reference = getattr(request, "authentication_reference", "") or ""
+        if getattr(request, "workspace_id", None) != self._workspace_id:
+            raise PermissionError("Server-authenticated request required")
+        # ``<subject>@<workspace_id>`` is a personal-token forwarding artifact; strip only
+        # that exact workspace suffix so an email (a different ``@``) is preserved intact.
+        suffix = f"@{self._workspace_id}"
+        subject = reference[: -len(suffix)] if reference.endswith(suffix) else reference
+        if not subject:
+            raise PermissionError("Server-authenticated request required")
+        return vc.ActorContext(subject, self._workspace_id, "human")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+
 def build_observe_runtime(config: dict, *, adapters: Any = None,
                           flags: FeatureFlags | None = None) -> ObserveRuntime:
     """Assemble the observe runtime from explicit config + an injectable ``adapters``.
@@ -104,7 +144,11 @@ def build_observe_runtime(config: dict, *, adapters: Any = None,
     sql = adapters.sql("executor")
     selection = _selection(config["target_selection"])
 
-    identity = adapters.identity_provider("executor")
+    # Trust the app-entry identity for observe reads/capture (Option A): wrap the governed
+    # provider so actor() resolves from the proxy-verified forwarded identity, not a second
+    # SCIM lookup. Every other identity method delegates unchanged; the governed promotion
+    # path is untouched (it builds its own provider via build_governed_seams).
+    identity = _EntryTrustedActorIdentity(adapters.identity_provider("executor"), workspace_id)
     canonicalizer = Canonicalizer()
 
     # Registry <-> coordination store are mutually referential: the store resolves a
