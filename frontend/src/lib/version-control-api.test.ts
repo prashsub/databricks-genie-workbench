@@ -23,6 +23,23 @@ it('double_click_or_network_loss_does_not_generate_new_mutation_key', async () =
   expect(transport).toHaveBeenCalledTimes(2)
 })
 
+it('config_and_space_restore_hit_the_space_keyed_endpoints', async () => {
+  const cfgTransport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ history_enabled: true, writes_enabled: true, restore_enabled: false })))
+  const cfg = await new VersionControlApi(cfgTransport).config()
+  expect(cfg).toEqual({ history_enabled: true, writes_enabled: true, restore_enabled: false })
+  expect(cfgTransport.mock.calls[0][0]).toBe('/api/version-control/config')
+
+  const observation = { status: { binding_id: 'b', binding_revision: 1, heads: { observed: 'v1', approved: null, deployed: null }, drift: 'unknown', quarantined: false, unresolved_operation_id: null, observed_at: null, projection_as_of: '2026-01-01T00:00:00Z', stale: false, allowed_actions: [], reasons: [] }, captured_version: null, busy: false }
+  const restoreTransport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(observation)))
+  const result = await new VersionControlApi(restoreTransport).spaceRestore('space 1', { version_id: 'v1', expected_current_version_id: 'v0' }, 'key-1')
+  expect(result).toEqual(observation)
+  expect(restoreTransport.mock.calls[0][0]).toBe('/api/version-control/spaces/space%201/restore')
+  const init = restoreTransport.mock.calls[0][1]
+  expect(init?.method).toBe('POST')
+  expect(JSON.parse(init?.body as string)).toEqual({ version_id: 'v1', expected_current_version_id: 'v0' })
+  expect((init?.headers as Record<string, string>)['Idempotency-Key']).toBe('key-1')
+})
+
 it('interleaved_intents_reuse_the_original_key_when_the_first_intent_returns', async () => {
   const intent = createMutationIntent()
   const a = { version_id: 'a', expected_base: fingerprints, binding_revision: 3, approval_id: 'approval-1' }

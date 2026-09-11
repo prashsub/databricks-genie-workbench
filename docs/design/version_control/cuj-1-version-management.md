@@ -40,9 +40,15 @@ binding; the version a user selects here becomes the `source_version_id` in CUJ 
 |---|---|---|
 | List versions | `GET /api/version-control/spaces/{id}/versions` → `ledger.history` | **Mounted, live** (gated on `VC_HISTORY_ENABLED`) |
 | Capture current state | `POST /api/version-control/spaces/{id}/observe` → `Observer.capture_on_open` | **Mounted, live** (gated on `VC_WRITES_ENABLED`) |
-| Version detail | `ledger.get_version` | Engine exists; **detail route not mounted** |
-| Semantic diff | `canonical_diff.py` + `SemanticDiffView` | Engine exists; **diff endpoint deferred** (per observe-only pivot) |
-| Publish (= in-workspace restore) | `POST .../restore` with `RestoreCommand` | Router present, **wired to `FailClosedRestore()`** (`VC_RESTORE_ENABLED=false`) |
+| Version detail | `GET /api/version-control/bindings/{id}/versions/{versionId}` → `ledger.get_version` | **Mounted, live** (gated on `VC_HISTORY_ENABLED`) |
+| Semantic diff | `GET /api/version-control/bindings/{id}/diff` → `canonical_diff.py` + `SemanticDiffView` | **Mounted, live** (gated on `VC_HISTORY_ENABLED`) |
+| Publish (= in-workspace restore) | `POST /api/version-control/spaces/{id}/restore` → `restore_local.restore_space_version` | **Mounted, live** (gated on `VC_WRITES_ENABLED`+`VC_RESTORE_ENABLED`) — simple OBO path |
+| Deployment flags | `GET /api/version-control/config` | **Mounted, live** (drives disabled-with-explainer UI) |
+
+The **governed** restore path (`POST .../restore` with `RestoreCommand` → mutation gate /
+approvals / Job) remains present but **dormant** (`FailClosedRestore()`), reserved for
+regulated / shared-production needs. CUJ 1 ships the lightweight in-workspace restore
+below.
 
 The tab shell (`SpaceVersionControlTab.tsx`) is already on the design system; the body
 (`history.tsx`) is a raw-HTML prototype and is the visual debt to replace.
@@ -89,18 +95,29 @@ defer (see §7).
 ### 4.5 Publish = in-workspace restore / roll-forward (governed write)
 
 Publishing a selected version applies it to *this* agent as a **new reviewed write**,
-never rewinding history:
+never rewinding history. This CUJ ships the **simple in-workspace path**
+(`restore_local.restore_space_version`): the workbench writes the stored snapshot back to
+the live space **as the logged-in user (OBO)** — the same trust model the Create Agent
+uses — guarded by an optimistic concurrency check, then records the result:
 
-1. Show the historical→current semantic diff.
-2. Confirm the current base fingerprint still matches what the user reviewed.
-3. Submit `RestoreCommand{version_id, binding_revision, expected_base, approval_id}` →
-   `POST .../restore`.
-4. Read back; persist the resulting version linked by `restored_from_version_id`.
+1. Show the current→selected semantic diff (reuses the diff endpoint).
+2. Guard: canonicalize the live space and require it to still equal the version the user
+   believed was current (`expected_current_version_id`); if it moved, refuse with a 409
+   ("the space changed — refresh and retry") rather than clobbering the change.
+3. `POST /api/version-control/spaces/{id}/restore {version_id, expected_current_version_id}`
+   PATCHes `serialized_space` (+ description) via the OBO client — the user's own edit
+   rights are the authorization (a non-editor is rejected by the API; no SP fallback).
+4. Record the resulting state as a new `origin=restore` version linked by
+   `restored_from_version_id` (via `Observer.capture`, which advances the observed head).
 
-Today the restore port is `FailClosedRestore()` and `VC_RESTORE_ENABLED=false`, so the
-button renders **disabled with an explainer** ("Restore is not enabled on this
-deployment"). When enabled, it runs through the governed gate (coordination lease,
-pre-state capture, read-back verification) described in the [README](README.md).
+The button renders **disabled with an explainer** ("Restore is not enabled on this
+deployment") whenever `VC_RESTORE_ENABLED=false` (surfaced by `GET .../config`).
+
+What the simple path trades away vs. the dormant **governed** gate (coordination lease,
+two-person approval, target-local Job, durable audit — see the [README](README.md)) is
+concurrency/approval/audit strength; the `expected_current_version_id` guard covers the
+clobber risk, which is the material concern for a human restoring their own space. The
+governed gate stays available to switch on for regulated / shared-production spaces.
 
 ## 5. States (must all be designed, not just the happy path)
 
@@ -115,19 +132,23 @@ pre-state capture, read-back verification) described in the [README](README.md).
 ## 6. New vs reuse (scope for implementation)
 
 - **Reuse (live):** versions list + capture endpoints; `ledger`, `Observer`,
-  `canonical_diff`.
-- **New (small):** version-detail route; (optional) diff endpoint; the `origin=manual`
-  labeling fix; the redesigned `history.tsx` + `Versions` sub-tab on the design system.
-- **Gated/deferred:** publish/restore stays fail-closed until `VC_RESTORE_ENABLED` and the
-  governed write path are turned on.
+  `canonical_diff`; `Observer.capture` (extended with `origin` + `restored_from_version_id`).
+- **Built:** version-detail route; diff endpoint; the origin labeling fix (`workbench`
+  for user captures, `optimizer` for run pairs, `restore` for restores); the redesigned
+  `history.tsx` + `Versions` sub-tab; the simple in-workspace restore
+  (`restore_local.py` + `POST .../restore`) and the `GET .../config` flag surface.
+- **Dormant (opt-in):** the governed restore path (mutation gate / approvals / Job) stays
+  fail-closed behind `FailClosedRestore()` for regulated / shared-production needs.
 
-## 7. Open questions
+## 7. Resolved questions
 
-1. Ship **diff now** (engine exists) or defer per the observe-only pivot?
-2. Is the `origin=manual` relabel a backend change (preferred, at capture time) or a
-   frontend display mapping?
-3. Does "publish/restore" ship **disabled-with-explainer** in the first PR, or is enabling
-   the governed restore path in scope?
+1. **Diff:** shipped now (the engine existed; the read surface is low-risk).
+2. **Origin relabel:** done as a **backend change at capture time** — the recorded
+   `origin` is authoritative (`WORKBENCH`/`OPTIMIZER`/`RESTORE`), not a display mapping.
+   (The §4.1 badge label "manual" is the `workbench` origin — the code/UI use "Workbench".)
+3. **Publish/restore:** shipped as the **simple in-workspace OBO path** (§4.5), gated by
+   `VC_RESTORE_ENABLED` with a disabled-with-explainer fallback. The governed gate is
+   left dormant for later opt-in rather than being the CUJ-1 path.
 
 ## 8. Non-goals
 

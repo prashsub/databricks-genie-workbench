@@ -1,4 +1,4 @@
-import type { ApiError, ApprovalRequestInputs, ApprovalRecord, ApprovalRequest, BindingStatus, DeploymentReceipt, ObservationResult, Operation, OperationHandle, OverviewPage, ReconcileCommand, ReleaseCommand, ReleaseHandle, RestoreCommand, SemanticDiff, VersionDetail, VersionPage } from '@/types/version-control'
+import type { ApiError, ApprovalRequestInputs, ApprovalRecord, ApprovalRequest, BindingStatus, DeploymentReceipt, ObservationResult, Operation, OperationHandle, OverviewPage, ReconcileCommand, ReleaseCommand, ReleaseHandle, RestoreCommand, SemanticDiff, SpaceRestoreRequest, VcConfig, VersionDetail, VersionPage } from '@/types/version-control'
 
 export class VersionControlError extends Error implements ApiError {
   code: string
@@ -57,9 +57,13 @@ export class VersionControlApi {
     if (dedupeIntent) this.intents.set(intent, result)
     return result
   }
+  // Deployment flag surface (CUJ-1 §5) — lets the UI render disabled-with-explainer states.
+  config(signal?: AbortSignal) { return this.get<VcConfig>('/config', signal) }
   // Space-keyed bridge (workbench is space_id-keyed; the ledger is binding-keyed).
   spaceVersions(spaceId: string, cursor?: string, signal?: AbortSignal) { return this.get<VersionPage>(`/spaces/${encodeURIComponent(spaceId)}/versions?${pageQuery(cursor)}`, signal) }
   spaceObserve(spaceId: string, key: string) { return this.post<ObservationResult>(`/spaces/${encodeURIComponent(spaceId)}/observe`, {}, key, false) }
+  // Simple in-workspace restore (CUJ-1 §4.5): apply a stored version to the live space.
+  spaceRestore(spaceId: string, body: SpaceRestoreRequest, key: string) { return this.post<ObservationResult>(`/spaces/${encodeURIComponent(spaceId)}/restore`, body, key, false) }
   overview(cursor?: string, signal?: AbortSignal) { return this.get<OverviewPage>(`/overview?${pageQuery(cursor)}`, signal) }
   status(bindingId: string, signal?: AbortSignal) { return this.get<BindingStatus>(`${bindingPath(bindingId)}/status`, signal) }
   versions(bindingId: string, cursor?: string, signal?: AbortSignal) { return this.get<VersionPage>(`${bindingPath(bindingId)}/versions?${pageQuery(cursor)}`, signal) }

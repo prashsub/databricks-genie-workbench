@@ -9,17 +9,36 @@ state without knowing the internal binding id.
   gated on ``vc_writes_enabled``.
 """
 
+import json
 import logging
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
+from pydantic import BaseModel, ConfigDict
 
 from backend.services.version_control import contracts as vc
 from backend.services.version_control.observe_optimizer import resolve_or_enroll_bound
+from backend.services.version_control.restore_local import restore_space_version
 
 logger = logging.getLogger(__name__)
 
 SpaceId = Annotated[str, Path(pattern=r"^[0-9a-zA-Z_-]{1,128}$")]
+
+
+class RestoreSpaceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version_id: UUID
+    expected_current_version_id: UUID
+
+
+def _obo_patch_live(client, space_id, serialized_space, description):
+    """PATCH the live serialized space (+ description) as the OBO user. No SP fallback:
+    the user's own edit rights are the authorization, so a non-editor is rejected here."""
+    path = f"/api/2.0/genie/spaces/{space_id}"
+    client.api_client.do("PATCH", path, body={"serialized_space": json.dumps(serialized_space)})
+    if description is not None:
+        client.api_client.do("PATCH", path, body={"description": description})
 
 
 def _error(status, code, message, *, stale=False):
@@ -56,6 +75,16 @@ def build_router(*, runtime):
             raise _error(401, "authentication_required", "Authentication required")
         return identity.actor(authentication)
 
+    @router.get("/config")
+    def config():
+        # Unauthenticated flag surface so the UI can render disabled-with-explainer states
+        # (CUJ-1 §5) before attempting a gated write.
+        return {
+            "history_enabled": flags.enabled("vc_history_enabled") is True,
+            "writes_enabled": flags.enabled("vc_writes_enabled") is True,
+            "restore_enabled": flags.enabled("vc_restore_enabled") is True,
+        }
+
     @router.get("/spaces/{space_id}/versions")
     def space_versions(space_id: SpaceId, request: Request,
                        limit: Annotated[int, Query(ge=1, le=100)] = 25,
@@ -84,5 +113,24 @@ def build_router(*, runtime):
                 raise PermissionError("Binding history scope denied")
             return runtime.observer.capture_on_open(binding, actor)
         return _invoke(capture)
+
+    @router.post("/spaces/{space_id}/restore")
+    def space_restore(space_id: SpaceId, body: RestoreSpaceBody, request: Request):
+        def restore():
+            if (flags.enabled("vc_writes_enabled") is not True
+                    or flags.enabled("vc_restore_enabled") is not True):
+                raise _error(503, "vc_restore_disabled", "VC restore is not enabled", stale=True)
+            actor = actor_for(request)
+            # Live GET/PATCH run as the OBO user (their edit rights are the authorization);
+            # the ledger record runs as the SP via the runtime, like every other capture.
+            from backend.services.auth import get_workspace_client
+            from backend.services.genie_client import get_genie_space
+            client = get_workspace_client()
+            return restore_space_version(
+                runtime, space_id=space_id, version_id=str(body.version_id),
+                expected_current_version_id=str(body.expected_current_version_id), actor=actor,
+                live_reader=lambda sid: get_genie_space(sid),
+                live_writer=lambda sid, ss, desc: _obo_patch_live(client, sid, ss, desc))
+        return _invoke(restore)
 
     return router

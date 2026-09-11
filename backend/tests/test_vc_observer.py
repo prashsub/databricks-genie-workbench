@@ -136,6 +136,30 @@ def test_capture_on_open_leaves_optimizer_provenance_empty(observer_rig):
     assert context.optimizer_run_id is None and context.champion_id is None
 
 
+def test_capture_on_open_records_workbench_origin(observer_rig):
+    """CUJ-1 §4.2: a user-initiated capture surfaces as `workbench`, not `external`."""
+    rig, observer, viewer, status, identity = observer_rig
+    result = observer.capture_on_open(rig.binding, viewer)
+    assert result.captured_version.origin == vc.Origin.WORKBENCH
+    context = rig.ledger.append_observation.call_args.args[1]
+    assert context.origin == vc.Origin.WORKBENCH
+
+
+def test_capture_threads_restore_origin_and_lineage(observer_rig):
+    """A restore record carries origin=restore and links restored_from_version_id on both
+    the appended CaptureContext and the returned VersionSummary."""
+    rig, observer, viewer, status, identity = observer_rig
+    source = uid()
+    result = observer.capture(rig.binding, "restore", rig.executor,
+                              origin=vc.Origin.RESTORE, restored_from_version_id=source)
+    assert result.captured_version is not None
+    assert result.captured_version.origin == vc.Origin.RESTORE
+    assert result.captured_version.restored_from_version_id == source
+    context = rig.ledger.append_observation.call_args.args[1]
+    assert context.origin == vc.Origin.RESTORE
+    assert context.restored_from_version_id == source
+
+
 @pytest.mark.parametrize("failure", ["append_observation", "verify_committed", "advance_heads"])
 def test_capture_persistence_failure_returns_stale_and_disables_actions(observer_rig, failure):
     rig, observer, viewer, status, identity = observer_rig

@@ -1,4 +1,4 @@
-import { Copy, X } from 'lucide-react'
+import { Copy, RotateCcw, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import type { VersionDetail } from '@/types/version-control'
 import { absoluteTime, friendlyActor, originMeta, relativeTime, shortId } from './version-format'
@@ -14,7 +14,15 @@ function Fingerprint({ label, value }: { label: string; value: string }) {
   )
 }
 
-export function VersionDetailPanel({ detail, onClose }: { detail: VersionDetail; onClose: () => void }) {
+interface VersionDetailPanelProps {
+  detail: VersionDetail
+  onClose: () => void
+  onRestore?: () => void
+  restoreEnabled?: boolean
+  restoring?: boolean
+}
+
+export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled, restoring }: VersionDetailPanelProps) {
   const meta = originMeta(detail.origin)
   const { Icon } = meta
   const snapshot = detail.snapshot
@@ -90,6 +98,23 @@ export function VersionDetailPanel({ detail, onClose }: { detail: VersionDetail;
             {JSON.stringify(snapshot, null, 2)}
           </pre>
         </details>
+      )}
+
+      {onRestore && (
+        <div className="flex items-center justify-end pt-1">
+          <button
+            type="button"
+            onClick={onRestore}
+            disabled={!restoreEnabled || restoring}
+            title={restoreEnabled
+              ? 'Apply this version as the live configuration (a new reviewed version; history is preserved)'
+              : 'Restore is not enabled on this deployment'}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-default text-sm font-medium text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RotateCcw className="w-4 h-4" />
+            {restoring ? 'Restoring…' : 'Restore this version'}
+          </button>
+        </div>
       )}
     </section>
   )

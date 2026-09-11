@@ -6,6 +6,7 @@ import type { ObservationResult, SemanticDiff, VersionDetail, VersionPage, Versi
 import { History } from './history'
 import { VersionDetailPanel } from './version-detail-panel'
 import { SemanticDiffView } from './diff'
+import { shortId } from './version-format'
 
 type SubTab = 'versions' | 'promote'
 
@@ -35,6 +36,10 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   const [detailError, setDetailError] = useState<string | null>(null)
   const [diff, setDiff] = useState<SemanticDiff | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
+  const [restoreEnabled, setRestoreEnabled] = useState(false)
+  const [pendingRestore, setPendingRestore] = useState<VersionSummary | null>(null)
+  const [restoring, setRestoring] = useState(false)
+  const [restoreError, setRestoreError] = useState<string | null>(null)
 
   const load = useCallback(async (cursor?: string) => {
     setLoading(true)
@@ -58,8 +63,17 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     setDetailError(null)
     setDiff(null)
     setDiffError(null)
+    setPendingRestore(null)
+    setRestoreError(null)
     void load()
   }, [load])
+
+  // Deployment flags (whether restore is enabled) — best-effort; default disabled.
+  useEffect(() => {
+    let live = true
+    api.config().then(cfg => { if (live) setRestoreEnabled(cfg.restore_enabled) }).catch(() => {})
+    return () => { live = false }
+  }, [])
 
   const selectVersion = useCallback(async (version: VersionSummary) => {
     setDetail(null)
@@ -82,6 +96,42 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
       setDiffError(errorMessage(err, 'Failed to compare versions.'))
     }
   }, [page.items])
+
+  // Publish = in-workspace restore (CUJ-1 §4.5): preview current→selected, confirm, apply.
+  const beginRestore = useCallback((version: VersionSummary) => {
+    const current = page.items[0]?.version_id
+    setRestoreError(null)
+    setPendingRestore(version)
+    if (current && current !== version.version_id) void compareVersions(current, version.version_id)
+    else setDiff(null)
+  }, [page.items, compareVersions])
+
+  const confirmRestore = useCallback(async () => {
+    const current = page.items[0]?.version_id
+    if (!pendingRestore || !current) return
+    setRestoring(true)
+    setRestoreError(null)
+    try {
+      const result = await api.spaceRestore(
+        spaceId,
+        { version_id: pendingRestore.version_id, expected_current_version_id: current },
+        crypto.randomUUID(),
+      )
+      setNotice(result.captured_version
+        ? 'Restored this version as the live configuration.'
+        : 'The live space already matches this version.')
+      setPendingRestore(null)
+      setDetail(null)
+      setDiff(null)
+      await load()
+    } catch (err) {
+      setRestoreError(err instanceof VersionControlError && err.status === 409
+        ? 'The space changed since you opened this view. Refresh the history and try again.'
+        : errorMessage(err, 'Restore failed.'))
+    } finally {
+      setRestoring(false)
+    }
+  }, [spaceId, pendingRestore, page.items, load])
 
   const capture = useCallback(async () => {
     setCapturing(true)
@@ -185,7 +235,47 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
               {detailError}
             </div>
           )}
-          {detail && <VersionDetailPanel detail={detail} onClose={() => setDetail(null)} />}
+          {detail && (
+            <VersionDetailPanel
+              detail={detail}
+              onClose={() => setDetail(null)}
+              onRestore={() => beginRestore(detail)}
+              restoreEnabled={restoreEnabled}
+              restoring={restoring && pendingRestore?.version_id === detail.version_id}
+            />
+          )}
+
+          {pendingRestore && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 space-y-3">
+              <p className="text-sm text-secondary">
+                Restore version <span className="font-mono text-primary">{shortId(pendingRestore.version_id)}</span> as
+                the live configuration? It is applied as a new version — history is preserved. Review the changes below.
+              </p>
+              {restoreError && (
+                <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
+                  {restoreError}
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setPendingRestore(null); setRestoreError(null) }}
+                  disabled={restoring}
+                  className="px-3 py-2 rounded-lg border border-default text-sm font-medium text-muted hover:text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void confirmRestore() }}
+                  disabled={restoring}
+                  className="px-3 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-sm font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                >
+                  {restoring ? 'Restoring…' : 'Confirm restore'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {diffError && (
             <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">

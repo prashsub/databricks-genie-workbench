@@ -31,6 +31,11 @@ export interface ObservationResult { status: BindingStatus; captured_version: Ve
 export interface ApiError { code: string; message: string; operation_id?: string; retryable: boolean; stale: boolean; details?: Record<string, unknown> }
 export interface ReviewedCommand { binding_revision: number; expected_base: Fingerprints; approval_id: string }
 export interface RestoreCommand extends ReviewedCommand { version_id: string }
+// Simple in-workspace restore (CUJ-1 §4.5): restore a stored version onto the live space
+// as the OBO user, guarded by the version the client believes is current.
+export interface SpaceRestoreRequest { version_id: string; expected_current_version_id: string }
+// Deployment flag surface (CUJ-1 §5) so the UI can render disabled-with-explainer states.
+export interface VcConfig { history_enabled: boolean; writes_enabled: boolean; restore_enabled: boolean }
 export interface ReconcileCommand extends ReviewedCommand { action: 'adopt' | 'reapply' | 'acknowledge'; policy_inputs: Record<string, unknown> }
 export interface ApprovalInputs {
   schema_version: string; operation_id?: string; operation_type: string; source_version_id: string

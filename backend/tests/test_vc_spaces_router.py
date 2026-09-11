@@ -27,23 +27,32 @@ def _status():
                             datetime.now(timezone.utc), False, (), ())
 
 
-def _runtime(*, history=True, writes=True, existing=_BINDING):
+def _runtime(*, history=True, writes=True, restore=True, existing=_BINDING):
     ledger = Mock()
     ledger.history.return_value = vc.VersionPage((_summary(),), "cursor-2")
+    # get_version -> a snapshot whose serialized_space/restorable_metadata are real JSON
+    # (the restore path json.dumps the serialized_space onto the live space).
+    ledger.get_version.return_value = SimpleNamespace(
+        snapshot=SimpleNamespace(serialized_space={"config": {}}, restorable_metadata={"description": "d"}))
     registry = Mock()
     registry.find_active_by_space_key.return_value = existing
     observer = Mock()
     observer.capture_on_open.return_value = vc.ObservationResult(_status(), _summary(), False)
+    observer.capture.return_value = vc.ObservationResult(_status(), _summary(), False)
     actor = vc.ActorContext("user@x", "target", "human")
     identity = Mock()
     identity.actor.return_value = actor
+    canonicalizer = Mock()
+    canonicalizer.observe.return_value = object()
+    canonicalizer.compare.return_value = vc.Comparison.EQUAL
     flags = Mock()
     flags.enabled.side_effect = lambda switch: {
-        "vc_history_enabled": history, "vc_writes_enabled": writes}.get(switch, False)
+        "vc_history_enabled": history, "vc_writes_enabled": writes,
+        "vc_restore_enabled": restore}.get(switch, False)
     return SimpleNamespace(
         ledger=ledger, registry=registry, observer=observer, identity=identity, flags=flags,
-        authorize_history=Mock(return_value=True), actor=actor, workspace_id="target",
-        environment="prod", reader_selection=object())
+        canonicalizer=canonicalizer, authorize_history=Mock(return_value=True), actor=actor,
+        workspace_id="target", environment="prod", reader_selection=object())
 
 
 def _client(runtime, *, authenticated=True):
@@ -112,6 +121,99 @@ def test_spaces_router_exposes_exact_routes():
 
     routes = {(r.path, tuple(sorted(r.methods))) for r in build_router(runtime=_runtime()).routes}
     assert routes == {
+        ("/api/version-control/config", ("GET",)),
         ("/api/version-control/spaces/{space_id}/versions", ("GET",)),
         ("/api/version-control/spaces/{space_id}/observe", ("POST",)),
+        ("/api/version-control/spaces/{space_id}/restore", ("POST",)),
     }
+
+
+def test_config_reports_flag_state():
+    runtime = _runtime(history=True, writes=True, restore=False)
+    response = _client(runtime).get("/api/version-control/config")
+    assert response.status_code == 200
+    assert response.json() == {"history_enabled": True, "writes_enabled": True,
+                               "restore_enabled": False}
+
+
+def test_config_needs_no_authentication():
+    runtime = _runtime()
+    response = _client(runtime, authenticated=False).get("/api/version-control/config")
+    assert response.status_code == 200
+
+
+_RESTORE_BODY = {"version_id": str(UUID(int=1)), "expected_current_version_id": str(UUID(int=9))}
+
+
+def _obo_patch(monkeypatch):
+    """Patch the OBO seams the restore route reaches for the live GET/PATCH."""
+    client = Mock()
+    monkeypatch.setattr("backend.services.auth.get_workspace_client", lambda: client)
+    monkeypatch.setattr("backend.services.genie_client.get_genie_space", lambda sid: {"serialized_space": {}})
+    return client
+
+
+def test_space_restore_applies_snapshot_and_records_version(monkeypatch):
+    runtime = _runtime()
+    client = _obo_patch(monkeypatch)
+    response = _client(runtime).post(f"/api/version-control/spaces/{SPACE_ID}/restore", json=_RESTORE_BODY)
+    assert response.status_code == 200
+    assert response.json()["captured_version"]["version_id"] == str(UUID(int=9))
+    # Recorded as a restore linked to the requested source version, as the SP.
+    _binding, reason, _executor = runtime.observer.capture.call_args.args
+    assert reason == "restore"
+    assert runtime.observer.capture.call_args.kwargs["origin"] == vc.Origin.RESTORE
+    assert runtime.observer.capture.call_args.kwargs["restored_from_version_id"] == str(UUID(int=1))
+    # The live space was PATCHed as the OBO user.
+    assert client.api_client.do.call_args_list[0].args[0] == "PATCH"
+
+
+def test_space_restore_409_when_space_drifted(monkeypatch):
+    runtime = _runtime()
+    runtime.canonicalizer.compare.return_value = vc.Comparison.DIFFERENT
+    _obo_patch(monkeypatch)
+    response = _client(runtime).post(f"/api/version-control/spaces/{SPACE_ID}/restore", json=_RESTORE_BODY)
+    assert response.status_code == 409
+    runtime.observer.capture.assert_not_called()
+
+
+def test_space_restore_404_when_not_enrolled(monkeypatch):
+    runtime = _runtime(existing=None)
+    _obo_patch(monkeypatch)
+    response = _client(runtime).post(f"/api/version-control/spaces/{SPACE_ID}/restore", json=_RESTORE_BODY)
+    assert response.status_code == 404
+
+
+def test_space_restore_fail_closed_when_restore_disabled(monkeypatch):
+    runtime = _runtime(restore=False)
+    _obo_patch(monkeypatch)
+    response = _client(runtime).post(f"/api/version-control/spaces/{SPACE_ID}/restore", json=_RESTORE_BODY)
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_restore_disabled"
+    runtime.observer.capture.assert_not_called()
+
+
+# -- restore_space_version service (branches not reached via the router) -----
+
+def test_restore_service_raises_value_error_when_current_version_is_stale():
+    from backend.services.version_control.restore_local import restore_space_version
+
+    runtime = _runtime()
+    runtime.ledger.get_version.side_effect = [object(), KeyError("gone")]  # historical ok, expected missing
+    with pytest.raises(ValueError, match="stale"):
+        restore_space_version(runtime, space_id=SPACE_ID, version_id=str(UUID(int=1)),
+                              expected_current_version_id=str(UUID(int=2)), actor=runtime.actor,
+                              live_reader=lambda sid: {}, live_writer=lambda *a: None)
+    runtime.observer.capture.assert_not_called()
+
+
+def test_restore_service_denies_actor_outside_binding_workspace():
+    from backend.services.version_control.restore_local import restore_space_version
+
+    runtime = _runtime()
+    intruder = vc.ActorContext("user@x", "other-ws", "human")
+    with pytest.raises(PermissionError):
+        restore_space_version(runtime, space_id=SPACE_ID, version_id=str(UUID(int=1)),
+                              expected_current_version_id=str(UUID(int=2)), actor=intruder,
+                              live_reader=lambda sid: {}, live_writer=lambda *a: None)
+    runtime.ledger.get_version.assert_not_called()

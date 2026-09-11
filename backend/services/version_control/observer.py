@@ -20,14 +20,18 @@ class Observer:
         self.reader_selection = reader_selection
         self.status_reader = status_reader
 
-    def capture_on_open(self, binding, viewer):
+    def capture_on_open(self, binding, viewer, *, origin=vc.Origin.WORKBENCH):
+        # A user opening the tab / clicking "Capture current state" is a workbench-initiated
+        # observation (CUJ-1 §4.2), not `external`. Callers may override for other surfaces.
         status = self.status_reader(binding, viewer)
         executor = self.identity.executor(self.reader_selection)
-        return self._capture(binding, "open", executor, status)
+        return self._capture(binding, "open", executor, status, origin=origin)
 
-    def capture(self, binding, reason, executor, *, optimizer_run_id=None, champion_id=None):
+    def capture(self, binding, reason, executor, *, origin=vc.Origin.EXTERNAL,
+                restored_from_version_id=None, optimizer_run_id=None, champion_id=None):
         actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
         return self._capture(binding, reason, executor, self.status_reader(binding, actor),
+                             origin=origin, restored_from_version_id=restored_from_version_id,
                              optimizer_run_id=optimizer_run_id, champion_id=champion_id)
 
     @staticmethod
@@ -41,17 +45,19 @@ class Observer:
             context.restored_from_version_id, version.snapshot.fingerprints,
             context.optimizer_run_id, context.champion_id)
 
-    def _capture(self, binding, reason, executor, status, *, optimizer_run_id=None, champion_id=None):
+    def _capture(self, binding, reason, executor, status, *, origin=vc.Origin.EXTERNAL,
+                 restored_from_version_id=None, optimizer_run_id=None, champion_id=None):
         try:
-            return self._capture_committed(binding, reason, executor, status,
+            return self._capture_committed(binding, reason, executor, status, origin=origin,
+                                           restored_from_version_id=restored_from_version_id,
                                            optimizer_run_id=optimizer_run_id, champion_id=champion_id)
         except Exception:
             logger.exception("VC observation capture failed for binding %s", binding.binding_id)
             return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
                 reasons=(*status.reasons, "Observation evidence unavailable")), None, True)
 
-    def _capture_committed(self, binding, reason, executor, status, *,
-                           optimizer_run_id=None, champion_id=None):
+    def _capture_committed(self, binding, reason, executor, status, *, origin=vc.Origin.EXTERNAL,
+                           restored_from_version_id=None, optimizer_run_id=None, champion_id=None):
         try:
             lease = self.coordination.observe_exclusively(binding, executor)
         except Exception:
@@ -76,7 +82,8 @@ class Observer:
         context = vc.CaptureContext(binding, f"{lease.fence.attempt_id}:observe",
             datetime.now(timezone.utc), reason,
             vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind),
-            vc.Origin.EXTERNAL, parent_version_id=status.heads.observed,
+            origin, parent_version_id=status.heads.observed,
+            restored_from_version_id=restored_from_version_id,
             attempt_id=lease.fence.attempt_id, generation=lease.fence.generation,
             optimizer_run_id=optimizer_run_id, champion_id=champion_id)
         observation = self.ledger.append_observation(snapshot, context)
@@ -84,8 +91,8 @@ class Observer:
             raise RuntimeError("Observation persistence unavailable")
         heads = self.coordination.advance_heads(lease.fence, vc.HeadUpdate(observation.version_id, None, None, None))
         summary = vc.VersionSummary(observation.version_id, binding.binding_id, context.observed_at,
-            context.origin, context.actor.subject_id, context.parent_version_id, None,
-            snapshot.fingerprints, optimizer_run_id, champion_id)
+            context.origin, context.actor.subject_id, context.parent_version_id,
+            restored_from_version_id, snapshot.fingerprints, optimizer_run_id, champion_id)
         return vc.ObservationResult(replace(status, heads=heads, observed_at=context.observed_at,
             projection_as_of=context.observed_at, drift=vc.DriftState.UNKNOWN,
             stale=False, allowed_actions=()), summary, False)

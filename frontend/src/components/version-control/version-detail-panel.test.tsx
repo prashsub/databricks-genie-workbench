@@ -26,3 +26,25 @@ it('detail_panel_omits_snapshot_section_when_absent', () => {
   const html = renderToStaticMarkup(<VersionDetailPanel detail={withoutSnapshot} onClose={vi.fn()} />)
   expect(html).not.toContain('Restorable snapshot')
 })
+
+it('detail_panel_omits_restore_button_without_handler', () => {
+  const html = renderToStaticMarkup(<VersionDetailPanel detail={detail} onClose={vi.fn()} />)
+  expect(html).not.toContain('Restore this version')
+})
+
+it('detail_panel_restore_disabled_with_explainer_when_flag_off', () => {
+  const html = renderToStaticMarkup(
+    <VersionDetailPanel detail={detail} onClose={vi.fn()} onRestore={vi.fn()} restoreEnabled={false} />,
+  )
+  expect(html).toContain('Restore this version')
+  expect(html).toContain('Restore is not enabled on this deployment')
+  expect(html).toContain('disabled')
+})
+
+it('detail_panel_restore_enabled_when_flag_on', () => {
+  const html = renderToStaticMarkup(
+    <VersionDetailPanel detail={detail} onClose={vi.fn()} onRestore={vi.fn()} restoreEnabled />,
+  )
+  expect(html).toContain('Restore this version')
+  expect(html).toContain('Apply this version as the live configuration')
+})

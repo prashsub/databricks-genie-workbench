@@ -78,14 +78,14 @@ def test_capture_before_records_optimizer_before_without_run_id():
     rt = _runtime(existing=_BOUND)
     assert capture_before(rt, space_id=SPACE_ID) == "obs-result"
     rt.observer.capture.assert_called_once_with(_BOUND, "optimizer_before", "executor",
-                                                optimizer_run_id=None)
+                                                origin=vc.Origin.OPTIMIZER, optimizer_run_id=None)
 
 
 def test_capture_after_stamps_optimizer_run_id():
     rt = _runtime(existing=_BOUND)
     assert capture_after(rt, space_id=SPACE_ID, run_id="run-1") == "obs-result"
     rt.observer.capture.assert_called_once_with(_BOUND, "optimizer_after", "executor",
-                                                optimizer_run_id="run-1")
+                                                origin=vc.Origin.OPTIMIZER, optimizer_run_id="run-1")
 
 
 def test_capture_is_fail_safe_and_never_raises():
@@ -115,7 +115,7 @@ def test_after_poll_waits_for_terminal_then_captures():
     assert result == "obs-result"
     assert len(sleeps) == 2  # slept through the two RUNNING polls
     rt.observer.capture.assert_called_once_with(_BOUND, "optimizer_after", "executor",
-                                                optimizer_run_id="run-1")
+                                                origin=vc.Origin.OPTIMIZER, optimizer_run_id="run-1")
 
 
 def test_after_poll_disabled_is_noop():

@@ -90,7 +90,9 @@ def _capture(runtime, *, space_id: str, reason: str, optimizer_run_id: str | Non
              environment: str | None = None):
     binding = resolve_or_enroll_bound(runtime, space_id=space_id, environment=environment)
     executor = runtime.identity.executor(runtime.reader_selection)
-    return runtime.observer.capture(binding, reason, executor, optimizer_run_id=optimizer_run_id)
+    # before/after snapshots bracket an optimizer run; badge them `optimizer` (CUJ-1 §4.1).
+    return runtime.observer.capture(binding, reason, executor, origin=vc.Origin.OPTIMIZER,
+                                    optimizer_run_id=optimizer_run_id)
 
 
 def capture_before(runtime, *, space_id: str, environment: str | None = None):
