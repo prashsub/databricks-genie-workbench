@@ -243,3 +243,75 @@ empty, and grep for `assert_candidate_write` / `require_candidate_session_for_jo
   (`docs/design/version_control/implementation_plan/module-10-optimizer-integration.md`,
   `testing-strategy.md` optimizer_adapter refs) still describe the removed governed-
   optimizer model — decide whether to prune/annotate them.
+
+## 15. Step 6 detailed build plan (post-reconnaissance)
+
+Both the backend and frontend VC surfaces were mapped. Step 6 is a real platform
+integration, larger than §6 first implied, and its live path is **deploy-only-validated**
+(no local server). Offline we build wiring + fake-based tests; live capture is Step 7.
+
+### 15.1 What already exists (fork-built, dormant)
+- **Backend routers (unmounted):** `vc_mutations` (POST observe, POST restore),
+  `vc_reconcile` (GET overview, GET status, POST reconcile), `vc_operations`
+  (GET operation, audit), `vc_releases`, `vc_approvals`. `main.py` composes an empty,
+  all-flags-off container and mounts none of them.
+- **Capture/ledger:** `Observer.capture_on_open/capture`; `ledger.history()`/`get_version()`
+  are reads (no write flag); `append_observation` needs `writes_enabled` **and** binding +
+  observer identity in the trusted target workspace.
+- **Enrollment:** `registry.enroll(EnrollmentRequest, actor)` creates a provisional binding
+  for a `space_key` (a write; needs the M03 initializer + `writes_enabled`).
+  `registry.resolve(binding_id)` reads it back. **Observing a space requires a binding.**
+- **Frontend (demo-mocked):** `frontend/src/components/version-control/` has real
+  presentational `History` + `RestorePanel` + `VersionControlTab`, a real
+  `lib/version-control-api.ts` client, but everything defaults to `demoApi` (in-memory
+  mock) and is only reachable via `?view=version-control`
+  (`pages/VersionControlWorkbench.tsx`). Not on SpaceDetail/AdminDashboard.
+
+### 15.2 Backend gaps to close
+1. **Live compose** (`platform/` — new builder, fail-closed until configured, mirroring
+   `live_seams.build_governed_seams`): construct Delta registry + ledger + coordination +
+   canonicalizer + transport + identity + status_reader + Volume artifact adapters as the
+   trusted target-workspace SP, register them into the `Composition`, `writes_enabled` +
+   `vc_history_enabled` from config. Build an `Observer` + restore service from these.
+2. **History-list endpoint** — the frontend calls `versions()`/`diff()` which have **no
+   backend route**. Add `GET /api/version-control/bindings/{id}/versions` (→ `ledger.history`)
+   and optionally `/versions/{vid}` + `/diff` (→ `get_version` + canonicalizer compare).
+3. **Mount routers** in `main.py`, supplying ports from `app.state.version_control`, gated on
+   `vc_history_enabled` (reads) and the write flags (observe/restore/enroll).
+4. **`/trigger` hooks** in `auto_optimize.py`: on trigger, resolve-or-**enroll** the space →
+   **capture-before**; then **capture-after** via BOTH `capture_on_open` (passive) and a
+   job-poll of the optimizer `run_id`. Stamp `optimizer_run_id` (see next).
+5. **Observer run-id stamping** — `Observer.capture` sets `Origin.EXTERNAL` and no
+   `optimizer_run_id`; add a capture variant that accepts `optimizer_run_id`/`champion_id`
+   so after-run versions carry provenance.
+6. **`request.state.vc_auth`** — the observe/restore routers read it; the OBO middleware (or
+   a small dependency) must populate the authenticated VC actor.
+
+### 15.3 Frontend changes
+- Swap `demoApi` → `new VersionControlApi(fetch)` in `VersionControlWorkbench.tsx`,
+  `use-version-control.ts`, `version-control-tab.tsx` (keep `demoApi` for Vitest only).
+- Fix `version-control-api.ts`: operations → `/api/vc/operations/{id}`; restore body
+  `expected_base` as 64-hex digest string (not `Fingerprints`); align approvals route.
+- Source `binding_id` from the space's binding (via overview/status) rather than the demo
+  shell; decide the mount location (see decisions).
+
+### 15.4 Open decisions (Step 6)
+- **UI mount:** add a per-agent "Version Control" tab in `SpaceDetail`, or keep a top-level
+  view? (Recommend: SpaceDetail tab, since observe is per-space.)
+- **Binding lifecycle:** auto-enroll a space on first optimizer trigger (implicit), or
+  require explicit enrollment? (Recommend: auto-enroll on trigger, behind the write flag.)
+- **Live config/identity:** catalog/control-schema/warehouse for the versions table +
+  Volume, and the trusted SP identity — provided at deploy (Step 7); offline stays
+  fail-closed.
+- **History/diff endpoints:** add now (fuller UI) vs. defer diff and drive history from
+  observe/status only.
+
+### 15.5 Sequence (Step 6)
+a. Observer run-id capture variant + offline test.
+b. History-list (+detail/diff) endpoint(s) + offline tests.
+c. Live-compose builder (fail-closed) + register ports + offline fake tests.
+d. Mount routers + `vc_auth` population + flag gating.
+e. `/trigger` enroll + capture-before/after (both) + offline tests with fakes.
+f. Frontend de-mock + route/body fixes + SpaceDetail tab.
+g. (Step 7) deploy to nonprod: provision versions table/Volume, set flags + SP, validate
+   one optimizer run writes before+after versions and restore works.
