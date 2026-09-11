@@ -111,4 +111,89 @@ def test_history_rejects_out_of_range_limit(history_rig, limit):
 def test_history_router_exposes_exact_contract_route(history_rig):
     assert {(route.path, tuple(sorted(route.methods))) for route in history_rig.router.routes} == {
         ("/api/version-control/bindings/{binding_id}/versions", ("GET",)),
+        ("/api/version-control/bindings/{binding_id}/versions/{version_id}", ("GET",)),
+        ("/api/version-control/bindings/{binding_id}/diff", ("GET",)),
     }
+
+
+def _version(rig, canon, *, version_id, serialized, description="d"):
+    from datetime import datetime, timezone
+
+    snapshot = canon.observe({"serialized_space": serialized, "description": description})
+    context = vc.CaptureContext(
+        binding=rig.binding, observation_key=f"key/{version_id}",
+        observed_at=datetime.now(timezone.utc), observation_reason="open",
+        actor=vc.ActorContext("reader@example.com", rig.binding.workspace_id, "human"),
+        origin=vc.Origin.EXTERNAL)
+    return vc.Version(version_id, snapshot, context)
+
+
+def test_version_detail_returns_summary_plus_snapshot(history_rig):
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+
+    setup = history_rig
+    version = _version(setup.rig, FakeCanonicalizer(),
+                       version_id=uid(), serialized={"a": 1, "benchmarks": {}})
+    setup.ledger.get_version.return_value = version
+    response = setup.client.get(setup.prefix + f"/versions/{version.version_id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["version_id"] == version.version_id
+    assert body["origin"] == "external"
+    assert body["fingerprints"]["config"] == version.snapshot.fingerprints.config
+    assert body["snapshot"] == {"a": 1, "benchmarks": {}}
+    setup.ledger.get_version.assert_called_once_with(setup.rig.binding, version.version_id)
+
+
+def test_version_detail_404_when_missing(history_rig):
+    setup = history_rig
+    setup.ledger.get_version.side_effect = KeyError("nope")
+    response = setup.client.get(setup.prefix + f"/versions/{uid()}")
+    assert response.status_code == 404
+
+
+def test_version_detail_fail_closed_when_history_disabled(history_rig):
+    setup = history_rig
+    setup.rig.flags.enabled.side_effect = lambda switch: switch != "vc_history_enabled"
+    client, _ = setup.make_client(flags=setup.rig.flags)
+    response = client.get(setup.prefix + f"/versions/{uid()}")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "vc_history_disabled"
+    setup.ledger.get_version.assert_not_called()
+
+
+def test_diff_reports_different_equal_and_unknown(history_rig):
+    from dataclasses import replace
+
+    from backend.tests.vc_fakes.fixtures import FakeCanonicalizer
+
+    setup = history_rig
+    canon = FakeCanonicalizer()
+    left = _version(setup.rig, canon, version_id=uid(), serialized={"a": 1, "benchmarks": {}})
+    right = _version(setup.rig, canon, version_id=uid(), serialized={"a": 2, "benchmarks": {}})
+    versions = {left.version_id: left, right.version_id: right}
+    setup.ledger.get_version.side_effect = lambda _binding, vid: versions[vid]
+
+    different = setup.client.get(setup.prefix + f"/diff?left={left.version_id}&right={right.version_id}")
+    assert different.status_code == 200
+    assert different.json()["comparison"] == "different"
+    assert different.json()["items"]
+
+    equal = setup.client.get(setup.prefix + f"/diff?left={left.version_id}&right={left.version_id}")
+    assert equal.status_code == 200
+    assert equal.json() == {"comparison": "equal", "items": []}
+
+    # A canonicalizer-version mismatch must report UNKNOWN, never a false "equal".
+    mismatched = replace(right.snapshot,
+                         fingerprints=replace(right.snapshot.fingerprints, canonicalizer_version="vc-c14n/2"))
+    versions[right.version_id] = replace(right, snapshot=mismatched)
+    unknown = setup.client.get(setup.prefix + f"/diff?left={left.version_id}&right={right.version_id}")
+    assert unknown.status_code == 200
+    assert unknown.json() == {"comparison": "unknown", "items": []}
+
+
+def test_diff_404_when_version_missing(history_rig):
+    setup = history_rig
+    setup.ledger.get_version.side_effect = KeyError("nope")
+    response = setup.client.get(setup.prefix + f"/diff?left={uid()}&right={uid()}")
+    assert response.status_code == 404

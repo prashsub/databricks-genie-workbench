@@ -5,6 +5,14 @@ import { versionFixture } from './fixtures'
 
 it('history_shows_origin_actor_lineage_and_optimizer_drillthrough', () => {
   const html = renderToStaticMarkup(<History page={{ items: [{ ...versionFixture, origin: 'optimizer', optimizer_run_id: 'run/42', champion_id: 'champion-7', restored_from_version_id: 'original-1' }], next_cursor: 'next' }} onNext={vi.fn()} onSelect={vi.fn()} onCompare={vi.fn()} />)
-  for (const text of ['optimizer', versionFixture.observed_by, 'approved-2', 'original-1', 'champion-7', 'run%2F42', 'Compare versions', 'Next history page', 'external-3']) expect(html).toContain(text)
+  for (const text of ['Optimizer', versionFixture.observed_by, 'approved-2', 'original-1', 'champion-7', 'run%2F42', 'Compare versions', 'Load more', 'external-3']) expect(html).toContain(text)
   expect(html).not.toContain('Version 3')
+})
+
+it('history_renders_empty_and_loading_states', () => {
+  const empty = renderToStaticMarkup(<History page={{ items: [], next_cursor: null }} onNext={vi.fn()} onSelect={vi.fn()} onCompare={vi.fn()} />)
+  expect(empty).toContain('No versions captured yet')
+  const loading = renderToStaticMarkup(<History page={{ items: [], next_cursor: null }} loading onNext={vi.fn()} onSelect={vi.fn()} onCompare={vi.fn()} />)
+  expect(loading).toContain('animate-pulse')
+  expect(loading).not.toContain('No versions captured yet')
 })

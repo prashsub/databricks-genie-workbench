@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Camera, GitBranch, RefreshCw } from 'lucide-react'
+import { Camera, GitBranch, RefreshCw, Upload } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { VersionControlApi, VersionControlError } from '@/lib/version-control-api'
-import type { ObservationResult, VersionPage } from '@/types/version-control'
+import type { ObservationResult, SemanticDiff, VersionDetail, VersionPage, VersionSummary } from '@/types/version-control'
 import { History } from './history'
+import { VersionDetailPanel } from './version-detail-panel'
+import { SemanticDiffView } from './diff'
+
+type SubTab = 'versions' | 'promote'
+
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof VersionControlError ? err.message : fallback
+}
 
 // Real (non-demo) Version Control client. The observe surface is fully fail-closed on
 // the backend: unless the deployment enables the VC flags, these calls return 503 and
@@ -16,11 +25,16 @@ interface Props {
 }
 
 export function SpaceVersionControlTab({ spaceId }: Props) {
+  const [subTab, setSubTab] = useState<SubTab>('versions')
   const [page, setPage] = useState<VersionPage>(EMPTY_PAGE)
   const [loading, setLoading] = useState(false)
   const [capturing, setCapturing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [detail, setDetail] = useState<VersionDetail | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [diff, setDiff] = useState<SemanticDiff | null>(null)
+  const [diffError, setDiffError] = useState<string | null>(null)
 
   const load = useCallback(async (cursor?: string) => {
     setLoading(true)
@@ -40,8 +54,34 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
 
   useEffect(() => {
     setNotice(null)
+    setDetail(null)
+    setDetailError(null)
+    setDiff(null)
+    setDiffError(null)
     void load()
   }, [load])
+
+  const selectVersion = useCallback(async (version: VersionSummary) => {
+    setDetail(null)
+    setDetailError(null)
+    try {
+      setDetail(await api.version(version.binding_id, version.version_id))
+    } catch (err) {
+      setDetailError(errorMessage(err, 'Failed to load version detail.'))
+    }
+  }, [])
+
+  const compareVersions = useCallback(async (left: string, right: string) => {
+    const bindingId = page.items[0]?.binding_id
+    if (!bindingId) return
+    setDiff(null)
+    setDiffError(null)
+    try {
+      setDiff(await api.diff(bindingId, left, right))
+    } catch (err) {
+      setDiffError(errorMessage(err, 'Failed to compare versions.'))
+    }
+  }, [page.items])
 
   const capture = useCallback(async () => {
     setCapturing(true)
@@ -60,62 +100,115 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     }
   }, [spaceId, load])
 
+  const subTabs: { id: SubTab; label: string }[] = [
+    { id: 'versions', label: 'Versions' },
+    { id: 'promote', label: 'Promote' },
+  ]
+
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-start gap-3">
-          <span className="mt-0.5 p-2 rounded-lg border border-default bg-surface-secondary text-muted">
-            <GitBranch className="w-4 h-4" />
-          </span>
-          <div>
-            <h3 className="text-lg font-display font-semibold text-primary">Version Control</h3>
-            <p className="text-sm text-muted mt-1 max-w-2xl">
-              Captured snapshots of this agent's configuration — including the before/after
-              state around each optimizer run. Version history is read-only; capturing records
-              the current configuration so you can track and (later) restore changes.
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 p-2 rounded-lg border border-default bg-surface-secondary text-muted">
+          <GitBranch className="w-4 h-4" />
+        </span>
+        <div>
+          <h3 className="text-lg font-display font-semibold text-primary">Version Control</h3>
+          <p className="text-sm text-muted mt-1 max-w-2xl">
+            Manage this agent's configuration versions in-workspace, and promote an approved
+            version to another workspace you manage.
+          </p>
+        </div>
+      </div>
+
+      <div className="inline-flex rounded-lg border border-default bg-surface-secondary p-0.5">
+        {subTabs.map(tab => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setSubTab(tab.id)}
+            className={cn(
+              'px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
+              subTab === tab.id
+                ? 'bg-surface text-primary shadow-sm'
+                : 'text-muted hover:text-secondary',
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {subTab === 'versions' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => load()}
+              disabled={loading || capturing}
+              className="p-2 rounded-lg border border-default text-muted hover:text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50"
+              title="Refresh history"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={capture}
+              disabled={capturing}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-default text-sm font-medium text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50"
+            >
+              <Camera className="w-4 h-4" />
+              {capturing ? 'Capturing…' : 'Capture current state'}
+            </button>
+          </div>
+
+          {error && (
+            <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
+              {error}
+            </div>
+          )}
+          {notice && (
+            <div className="text-sm rounded-lg border border-default bg-surface-secondary text-muted px-3 py-2">
+              {notice}
+            </div>
+          )}
+
+          <div className="rounded-xl border border-default bg-surface p-4">
+            <History
+              page={page}
+              loading={loading}
+              onNext={() => { if (page.next_cursor) void load(page.next_cursor) }}
+              onSelect={version => { void selectVersion(version) }}
+              onCompare={(left, right) => { void compareVersions(left, right) }}
+            />
+          </div>
+
+          {detailError && (
+            <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
+              {detailError}
+            </div>
+          )}
+          {detail && <VersionDetailPanel detail={detail} onClose={() => setDetail(null)} />}
+
+          {diffError && (
+            <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
+              {diffError}
+            </div>
+          )}
+          {diff && <SemanticDiffView diff={diff} />}
+        </div>
+      )}
+
+      {subTab === 'promote' && (
+        <div className="rounded-xl border border-default bg-surface p-4">
+          <div className="text-center py-16 text-muted">
+            <Upload className="w-8 h-8 mx-auto mb-3 opacity-50" />
+            <p className="text-secondary font-medium">Cross-workspace promotion</p>
+            <p className="text-sm mt-1 max-w-md mx-auto">
+              Promote an approved version to another workspace you manage, with two-person
+              approval and a durable deployment receipt. This surface is not enabled on this
+              deployment yet.
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={() => load()}
-            disabled={loading || capturing}
-            className="p-2 rounded-lg border border-default text-muted hover:text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50"
-            title="Refresh history"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-          <button
-            onClick={capture}
-            disabled={capturing}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-default text-sm font-medium text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50"
-          >
-            <Camera className="w-4 h-4" />
-            {capturing ? 'Capturing…' : 'Capture current state'}
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
-          {error}
-        </div>
       )}
-      {notice && (
-        <div className="text-sm rounded-lg border border-default bg-surface-secondary text-muted px-3 py-2">
-          {notice}
-        </div>
-      )}
-
-      <div className="rounded-xl border border-default bg-surface p-4">
-        <History
-          page={page}
-          loading={loading}
-          onNext={() => { if (page.next_cursor) void load(page.next_cursor) }}
-          onSelect={() => { /* version detail deferred to a later milestone */ }}
-          onCompare={() => { /* semantic diff deferred to a later milestone */ }}
-        />
-      </div>
     </div>
   )
 }
