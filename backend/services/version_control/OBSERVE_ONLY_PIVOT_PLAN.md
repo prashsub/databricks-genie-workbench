@@ -309,7 +309,11 @@ integration, larger than §6 first implied, and its live path is **deploy-only-v
 
 ### 15.5 Sequence (Step 6)
 a. Observer run-id capture variant + offline test.
-b. History-list (+detail/diff) endpoint(s) + offline tests.
+b. History-list endpoint (`GET .../versions` → `ledger.history`) + offline tests. DONE
+   (`backend/routers/vc_history.py`, gated on `vc_history_enabled`). Version **detail**
+   and **diff** deferred: the frontend's `VersionDetail` is a flat summary+snapshot and
+   restore's `expected_base` is a digest string, so those shapes are reconciled with the
+   frontend in step (f) rather than shipping a mismatched backend contract now.
 c. Live-compose builder (fail-closed) + register ports + offline fake tests.
 d. Mount routers + `vc_auth` population + flag gating.
 e. `/trigger` enroll + capture-before/after (both) + offline tests with fakes.
