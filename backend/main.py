@@ -113,6 +113,21 @@ class OBOAuthMiddleware(BaseHTTPMiddleware):
         else:
             request.state.user_token = ""
 
+            # Version Control observe surface: derive the per-request VC actor from
+            # the Databricks Apps forwarded-identity headers, only when the observe
+            # runtime is integrated (else the VC routers are not mounted at all).
+            observe = getattr(request.app.state, "vc_observe", None)
+            if observe is not None:
+                from backend.services.version_control.platform.app_observe import (
+                    vc_auth_from_request,
+                )
+
+                vc_auth = vc_auth_from_request(
+                    request.headers, observe.workspace_id,
+                    dev_email=os.environ.get("DEV_USER_EMAIL"))
+                if vc_auth is not None:
+                    request.state.vc_auth = vc_auth
+
         response = await call_next(request)
 
         is_streaming = getattr(response, "media_type", "") == "text/event-stream"
@@ -140,8 +155,19 @@ app = FastAPI(
 )
 
 from backend.services.version_control.platform import compose
+from backend.services.version_control.platform.app_observe import observe_config_from_env
+from backend.services.version_control.platform.observe_seams import resolve_observe_runtime
 
 app.state.version_control = compose()
+
+# Version Control observe-only surface. Fully fail-closed: unless the trusted-workspace
+# control-plane env vars are set (deploy-only), this resolves to None and no VC routes
+# are mounted, so the app behaves exactly as before. See platform/app_observe.py.
+app.state.vc_observe = resolve_observe_runtime(observe_config_from_env(os.environ))
+if app.state.vc_observe is not None:
+    logger.info("VC observe surface integrated (workspace=%s)", app.state.vc_observe.workspace_id)
+else:
+    logger.info("VC observe surface not configured; VC routes disabled")
 
 if _mlflow_configured:
     try:
@@ -214,6 +240,12 @@ app.include_router(watch_feedback_router)
 app.include_router(watch_resources_router)
 app.include_router(watch_settings_router)
 app.include_router(watch_admin_router)
+
+# Version Control observe surface routers — only when the runtime is integrated.
+if app.state.vc_observe is not None:
+    from backend.services.version_control.platform.app_observe import mount_observe_routers
+
+    mount_observe_routers(app, app.state.vc_observe)
 
 # Serve static files from React build
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"

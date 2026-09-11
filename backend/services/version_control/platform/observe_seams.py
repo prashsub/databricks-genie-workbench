@@ -62,6 +62,7 @@ class ObserveRuntime:
     observer: Observer
     ledger: DeltaVersionLedger
     registry: DeltaRegistry
+    facts: DurableOperationFacts
     identity: Any
     coordination: CoordinationService
     canonicalizer: Canonicalizer
@@ -159,7 +160,7 @@ def build_observe_runtime(config: dict, *, adapters: Any = None,
         return actor_ctx.workspace_id == binding.workspace_id == workspace_id
 
     return ObserveRuntime(
-        observer=observer, ledger=ledger, registry=registry, identity=identity,
+        observer=observer, ledger=ledger, registry=registry, facts=facts, identity=identity,
         coordination=coordination, canonicalizer=canonicalizer, transport=transport,
         reader_selection=selection, authorize_history=authorize_history, flags=flags,
         workspace_id=workspace_id, actor=actor)
