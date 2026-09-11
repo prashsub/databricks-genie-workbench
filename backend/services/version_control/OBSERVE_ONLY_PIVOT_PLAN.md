@@ -213,3 +213,33 @@ non-seamless — it had no resolution policy for the optimizer `/trigger`; we no
 `git diff origin/feature/metric-view-advisor -- packages/genie-space-optimizer/src` is
 empty, and grep for `assert_candidate_write` / `require_candidate_session_for_job` /
 `optimizer_adapter` / `integration.version_control` is zero.
+
+## 14. Progress log
+
+- **Steps 1–5 complete.** `feature/version-control-ci-cd` created off base and the fork
+  merged in (`815c27e3`, 2-parent: base `923a78be` + fork `b9732a0d`). 226 files differ
+  from base = the net VC surface.
+- Resolutions applied per §13 table: optimizer package == base (empty diff verified);
+  `auto_optimize.py`/`create.py` == base; `pyproject.toml` combined. Deleted
+  `optimizer_adapter.py`, GSO `integration/version_control.py`, candidate/champion GSO
+  tests, `M10_IMPLEMENTATION.md`, `test_vc_optimizer_adapter.py`. De-wired the optimizer
+  seam (`jobs/__init__.py`, `live_seams.py`, `GovernedSeams.optimizer`,
+  `contracts.OptimizerChampionAdapter` + its spec entry in
+  `docs/design/.../contracts.md`). Reverted `test_auto_optimize_router.py` /
+  `test_create_agent.py` to base; adjusted `test_vc_runtime_assembly.py` /
+  `test_vc_governed_ports.py` for the removed optimizer handler.
+- **Decision taken (minimal de-wire):** the inert `optimizer_apply` kind + flag +
+  capability vocabulary is retained (reserved/unwired/fail-closed), matching the
+  codebase's existing pattern for other not-yet-wired kinds. Full excision of that
+  vocabulary is a possible follow-up.
+- **Offline baseline:** `./scripts/test.sh` → **3237 passed**. Remaining 3 failed + 2
+  errored are base's MV-advisor doc-parity GSO tests (`test_gap_report_counts`,
+  `test_rules_parity`, `test_exposure_matrix`) that read **gitignored** local files
+  (`docs/design/mv-advisor-{gap-report,playbook}.md`) absent in this clone — identical on
+  base, not a regression.
+- **Not yet done:** frontend build/lint check (`api.ts` auto-merged), Step 6 observe
+  capture (blocked on §11 capture-after decision), Step 7 live nonprod validation + PR.
+- **Open cleanup (optional):** the M10 design docs
+  (`docs/design/version_control/implementation_plan/module-10-optimizer-integration.md`,
+  `testing-strategy.md` optimizer_adapter refs) still describe the removed governed-
+  optimizer model — decide whether to prune/annotate them.
