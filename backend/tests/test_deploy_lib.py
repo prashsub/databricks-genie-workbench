@@ -158,6 +158,13 @@ def test_all_current_app_yaml_placeholders_are_covered():
             "LAKEBASE_INSTANCE": "genie-workbench-lakebase",
             "LLM_MODEL": "databricks-claude-sonnet-4-6",
             "MLFLOW_EXPERIMENT_ID": "",
+            # VC observe surface placeholders — must stay in lockstep with the
+            # replacements dict built by run_install in scripts/deploy_lib/install.py.
+            "VC_OBSERVE_WORKSPACE_ID": "1234567890",
+            "VC_OBSERVE_HOST": "https://example.databricks.com",
+            "VC_OBSERVE_CATALOG": "main",
+            "VC_OBSERVE_CONTROL_SCHEMA": "genie_space_optimizer",
+            "VC_OBSERVE_SP_PRINCIPAL_ID": "app-sp-client-id",
         },
     )
     assert "__" not in rendered

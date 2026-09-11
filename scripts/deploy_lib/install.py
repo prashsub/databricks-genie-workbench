@@ -79,6 +79,16 @@ def run_install(w, cfg: InstallConfig, status_fn=None) -> dict[str, Any]:
     status(f"GSO job ready: {gso_job.job_id}")
 
     status("Rendering patched app.yaml into generated workspace source...")
+    # Version Control observe surface: mirror deploy.sh's __VC_OBSERVE_*__ resolution.
+    # WORKSPACE_ID/HOST come from this workspace; CATALOG/CONTROL_SCHEMA from the GSO
+    # location (the VC control tables are colocated in the GSO schema); SP_PRINCIPAL_ID
+    # is the app SP resolved above. If workspace-id/host cannot be resolved, substitute
+    # EMPTY so the observe runtime stays fail-closed rather than blocking the deploy.
+    try:
+        vc_observe_workspace_id = str(w.get_workspace_id())
+    except Exception:  # noqa: BLE001
+        vc_observe_workspace_id = ""
+    vc_observe_host = (getattr(w.config, "host", "") or "").rstrip("/")
     render_app_yaml(
         template_path=Path(cfg.repo_root or "") / "app.yaml",
         output_workspace_path=f"{source_path}/app.yaml",
@@ -89,6 +99,11 @@ def run_install(w, cfg: InstallConfig, status_fn=None) -> dict[str, Any]:
             "LAKEBASE_INSTANCE": cfg.lakebase_instance or "",
             "LLM_MODEL": cfg.llm_model,
             "MLFLOW_EXPERIMENT_ID": cfg.mlflow_experiment_id or "",
+            "VC_OBSERVE_WORKSPACE_ID": vc_observe_workspace_id,
+            "VC_OBSERVE_HOST": vc_observe_host,
+            "VC_OBSERVE_CATALOG": cfg.catalog,
+            "VC_OBSERVE_CONTROL_SCHEMA": cfg.gso_schema,
+            "VC_OBSERVE_SP_PRINCIPAL_ID": app_sp_client_id,
         },
         workspace_client=w,
     )
