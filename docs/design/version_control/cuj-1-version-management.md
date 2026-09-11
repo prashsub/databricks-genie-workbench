@@ -38,12 +38,19 @@ binding; the version a user selects here becomes the `source_version_id` in CUJ 
 
 | Capability | Backend | Status in running app |
 |---|---|---|
-| List versions | `GET /api/version-control/spaces/{id}/versions` → `ledger.history` | **Mounted, live** (gated on `VC_HISTORY_ENABLED`) |
-| Capture current state | `POST /api/version-control/spaces/{id}/observe` → `Observer.capture_on_open` | **Mounted, live** (gated on `VC_WRITES_ENABLED`) |
-| Version detail | `GET /api/version-control/bindings/{id}/versions/{versionId}` → `ledger.get_version` | **Mounted, live** (gated on `VC_HISTORY_ENABLED`) |
-| Semantic diff | `GET /api/version-control/bindings/{id}/diff` → `canonical_diff.py` + `SemanticDiffView` | **Mounted, live** (gated on `VC_HISTORY_ENABLED`) |
-| Publish (= in-workspace restore) | `POST /api/version-control/spaces/{id}/restore` → `restore_local.restore_space_version` | **Mounted, live** (gated on `VC_WRITES_ENABLED`+`VC_RESTORE_ENABLED`) — simple OBO path |
-| Deployment flags | `GET /api/version-control/config` | **Mounted, live** (drives disabled-with-explainer UI) |
+| List versions | `GET /api/version-control/spaces/{id}/versions` → `ledger.history` | **Mounted, live** (native) |
+| Capture current state | `POST /api/version-control/spaces/{id}/observe` → `Observer.capture_on_open` | **Mounted, live** (native) |
+| Version detail | `GET /api/version-control/bindings/{id}/versions/{versionId}` → `ledger.get_version` | **Mounted, live** (native) |
+| Semantic diff | `GET /api/version-control/bindings/{id}/diff` → `canonical_diff.py` + `SemanticDiffView` | **Mounted, live** (native) |
+| Publish (= in-workspace restore) | `POST /api/version-control/spaces/{id}/restore` → `restore_local.restore_space_version` | **Mounted, live** (native) — simple OBO path |
+| Deployment flags | `GET /api/version-control/config` | **Mounted, live** (reports capabilities; always on when the surface is wired) |
+
+CUJ-1 is a **native, baked-in feature**: history, capture, and in-workspace restore are
+live whenever the observe surface is wired (all `VC_OBSERVE_*` resolved). There is no
+per-capability switch to turn them off — `app_observe.py` hardwires
+`vc_history`/`vc_writes`/`vc_restore` on for the app surface. The `VC_*_ENABLED` feature
+switches now govern only the CUJ-2+ **governed** writes (promotion / optimizer-apply /
+reconcile), which stay fail-closed.
 
 The **governed** restore path (`POST .../restore` with `RestoreCommand` → mutation gate /
 approvals / Job) remains present but **dormant** (`FailClosedRestore()`), reserved for
@@ -77,7 +84,7 @@ A timeline/list of versions, newest first, paginated. Each row:
 - **Origin semantics fix:** a user-initiated capture must surface as `origin=manual`, not
   `external`. `external` is reserved for drift observed by capture-on-open. (This is a
   labeling change from today's behavior, where manual capture records `external`.)
-- Disabled with an explainer when `VC_WRITES_ENABLED=false`.
+- Always available when the VC surface is wired (native — no capture switch).
 
 ### 4.3 Inspect a version (read)
 
@@ -110,8 +117,9 @@ uses — guarded by an optimistic concurrency check, then records the result:
 4. Record the resulting state as a new `origin=restore` version linked by
    `restored_from_version_id` (via `Observer.capture`, which advances the observed head).
 
-The button renders **disabled with an explainer** ("Restore is not enabled on this
-deployment") whenever `VC_RESTORE_ENABLED=false` (surfaced by `GET .../config`).
+Restore is native — always available when the VC surface is wired. `GET .../config`
+still reports capabilities so the UI keeps a defensive disabled-with-explainer state, but
+in a wired deployment it always resolves enabled.
 
 What the simple path trades away vs. the dormant **governed** gate (coordination lease,
 two-person approval, target-local Job, durable audit — see the [README](README.md)) is
@@ -121,7 +129,8 @@ governed gate stays available to switch on for regulated / shared-production spa
 
 ## 5. States (must all be designed, not just the happy path)
 
-- **VC disabled on this deployment** — distinct empty state (not "no versions").
+- **VC surface not wired on this deployment** (`VC_OBSERVE_*` unset → no routes mounted) —
+  distinct empty state (not "no versions").
 - **Agent not enrolled yet** — distinct empty state.
 - **No captures yet** — distinct empty state with a Capture call-to-action.
 - **Loading** — skeleton rows, not blank.
@@ -146,9 +155,10 @@ governed gate stays available to switch on for regulated / shared-production spa
 2. **Origin relabel:** done as a **backend change at capture time** — the recorded
    `origin` is authoritative (`WORKBENCH`/`OPTIMIZER`/`RESTORE`), not a display mapping.
    (The §4.1 badge label "manual" is the `workbench` origin — the code/UI use "Workbench".)
-3. **Publish/restore:** shipped as the **simple in-workspace OBO path** (§4.5), gated by
-   `VC_RESTORE_ENABLED` with a disabled-with-explainer fallback. The governed gate is
-   left dormant for later opt-in rather than being the CUJ-1 path.
+3. **Publish/restore:** shipped as the **simple in-workspace OBO path** (§4.5), native
+   (on whenever the VC surface is wired) with a defensive disabled-with-explainer
+   fallback. The governed gate is left dormant for later opt-in rather than being the
+   CUJ-1 path.
 
 ## 8. Non-goals
 

@@ -492,20 +492,10 @@ sed -i.bak "s|__VC_OBSERVE_CATALOG__|${CATALOG}|" "$PATCHED_APP_YAML"
 sed -i.bak "s|__VC_OBSERVE_CONTROL_SCHEMA__|${GSO_SCHEMA}|" "$PATCHED_APP_YAML"
 sed -i.bak "s|__VC_OBSERVE_SP_PRINCIPAL_ID__|${SP_CLIENT_ID}|" "$PATCHED_APP_YAML"
 
-# Observe capture is a governed write. The committed app.yaml ships every write
-# switch "false" (fail-closed default; test_vc_composition enforces it). Enable
-# VC_WRITES_ENABLED in the DEPLOYED app.yaml only when the observe surface is
-# actually wired (workspace id resolved). Restore/promotion/etc. stay false.
-if [ -n "$VC_WS_ID" ]; then
-    python3 - "$PATCHED_APP_YAML" <<'PY'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-text = text.replace('  - name: VC_WRITES_ENABLED\n    value: "false"',
-                    '  - name: VC_WRITES_ENABLED\n    value: "true"')
-open(path, "w").write(text)
-PY
-fi
+# CUJ-1 (version history / capture / in-workspace restore) is a native feature:
+# app_observe.py hardwires it on whenever the VC_OBSERVE_* surface resolves above, so
+# there is no write flag to patch here. The CUJ-2+ governed switches
+# (promotion / optimizer-apply / reconcile) stay "false" in app.yaml.
 
 rm -f "${PATCHED_APP_YAML}.bak"
 

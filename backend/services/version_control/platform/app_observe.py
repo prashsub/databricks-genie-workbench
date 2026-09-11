@@ -7,9 +7,12 @@ control-plane vars are all set), (2) mount the reads-plus-capture routers, and
 headers. Everything is fail-closed: without config, ``main`` mounts nothing and
 behaves exactly as before (deploy-only validated per the install-path contract).
 
-Restore/reconcile mutations are NOT wired here (reads-only scope). ``FailClosedRestore``
-satisfies the ``vc_mutations`` router contract while guaranteeing a restore submit can
-never execute until a real governed-write restore service is wired and platform-checked.
+CUJ-1 (history, capture, in-workspace restore) is native: ``observe_config_from_env``
+hardwires it on whenever the control-plane vars resolve, and the space-keyed restore
+(``restore_local``, mounted by ``vc_spaces``) is a live OBO write. The GOVERNED
+binding-keyed restore (``vc_mutations``) stays fail-closed via ``FailClosedRestore`` —
+it can never execute until a real governed-write restore service is wired and
+platform-checked. Promotion / optimizer-apply / reconcile are not built here.
 """
 
 from typing import Any
@@ -25,10 +28,6 @@ _REQUIRED_ENV = (
     "VC_OBSERVE_HOST",
     "VC_OBSERVE_SP_PRINCIPAL_ID",
 )
-
-
-def _flag(env: Any, name: str) -> bool:
-    return str(env.get(name, "")).strip().lower() == "true"
 
 
 def observe_config_from_env(env: Any) -> dict | None:
@@ -81,10 +80,16 @@ def observe_config_from_env(env: Any) -> dict | None:
         "target_selection": selection,
         "environment": env.get("VC_OBSERVE_ENVIRONMENT") or "prod",
         "roles": {"executor": executor_role},
+        # CUJ-1 (version history, capture, in-workspace restore) is a native, baked-in
+        # feature: it is ON whenever the observe surface is wired (all VC_OBSERVE_* above
+        # resolved). There is deliberately no env switch to disable it. The governed CUJ-2+
+        # writes (promotion / optimizer-apply / reconcile) are NOT part of this surface —
+        # they default off in the governed composition and the app never performs them
+        # (vc_mutations mounts FailClosedRestore).
         "flags": {
-            "vc_history_enabled": _flag(env, "VC_HISTORY_ENABLED"),
-            "vc_writes_enabled": _flag(env, "VC_WRITES_ENABLED"),
-            "vc_restore_enabled": _flag(env, "VC_RESTORE_ENABLED"),
+            "vc_history_enabled": True,
+            "vc_writes_enabled": True,
+            "vc_restore_enabled": True,
         },
     }
 
@@ -113,8 +118,9 @@ class FailClosedRestore:
 def mount_observe_routers(app: Any, runtime: ObserveRuntime) -> None:
     """Mount the reads-plus-capture routers (history + observe/restore) from the runtime.
 
-    Restore stays fail-closed (flags default off + ``FailClosedRestore``); the observe
-    capture and history reads are the live surface.
+    History reads, observe capture, and the space-keyed in-workspace restore
+    (``vc_spaces``) are the native live surface. The governed binding-keyed restore on
+    ``vc_mutations`` stays fail-closed via ``FailClosedRestore``.
     """
     from backend.routers.vc_history import build_router as build_history_router
     from backend.routers.vc_mutations import build_router as build_mutations_router

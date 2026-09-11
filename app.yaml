@@ -33,20 +33,16 @@ env:
   # ---------------------------------------------------------------------------
   # Version Control feature flags
   #
-  # SHIPPED DEFAULT IS FAIL-CLOSED: every write switch is "false" here and stays
-  # that way in the committed file (test_vc_composition enforces this). Observe
-  # capture is a governed write, so deploy.sh flips VC_WRITES_ENABLED to "true"
-  # in the DEPLOYED app.yaml only when the observe surface is actually wired
-  # (VC_OBSERVE_* resolved). VC_HISTORY_ENABLED is a READ switch (not a write
-  # switch) so it ships enabled. Restore/reconcile/promotion stay OFF (reads-only
-  # scope; restore is also fail-closed in code regardless of the flag).
+  # CUJ-1 (version history, capture, and in-workspace restore) is a NATIVE, baked-in
+  # feature — there is no switch to disable it. It is live whenever the observe surface
+  # is wired (all VC_OBSERVE_* below resolved); app_observe.py hardwires
+  # vc_history/vc_writes/vc_restore on for the app surface, so nothing is patched here at
+  # deploy time.
+  #
+  # The switches below gate the CUJ-2+ GOVERNED writes (cross-workspace promotion,
+  # optimizer write-back, reconcile). These are not built into the app surface and stay
+  # fail-closed; test_vc_composition enforces they ship "false".
   # ---------------------------------------------------------------------------
-  - name: VC_HISTORY_ENABLED
-    value: "true"
-  - name: VC_WRITES_ENABLED
-    value: "false"
-  - name: VC_RESTORE_ENABLED
-    value: "false"
   - name: VC_PROMOTION_ENABLED
     value: "false"
   - name: VC_OPTIMIZER_APPLY_ENABLED

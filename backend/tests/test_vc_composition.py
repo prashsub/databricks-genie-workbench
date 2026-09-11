@@ -157,6 +157,12 @@ def test_first_write_enable_requires_every_safety_capability():
             container.require_write(name)
     assert container.enabled("vc_history_enabled")
     assert not platform.compose(flags=flags).enabled("vc_writes_enabled")
+    # CUJ-1 writes (vc_writes/vc_restore) are native — no longer declared in app.yaml
+    # (app_observe.py hardwires them on). Only the CUJ-2+ governed switches remain
+    # declared, and they must ship fail-closed.
     root = Path(__file__).resolve().parents[2]
     env = {item["name"]: item.get("value") for item in yaml.safe_load((root / "app.yaml").read_text())["env"]}
-    assert all(env[name.upper()] == "false" for name in WRITE_SWITCHES)
+    governed_switches = WRITE_SWITCHES - {"vc_writes_enabled", "vc_restore_enabled"}
+    assert governed_switches
+    assert all(env[name.upper()] == "false" for name in governed_switches)
+    assert "VC_WRITES_ENABLED" not in env and "VC_RESTORE_ENABLED" not in env

@@ -21,11 +21,10 @@ _FULL_ENV = {
     "VC_OBSERVE_WAREHOUSE_ID": "wh-123",
     "VC_OBSERVE_HOST": TARGET_HOST,
     "VC_OBSERVE_SP_PRINCIPAL_ID": "target-sp",
-    "VC_HISTORY_ENABLED": "true",
 }
 
 
-@pytest.mark.parametrize("drop", list(_FULL_ENV.keys() - {"VC_HISTORY_ENABLED"}))
+@pytest.mark.parametrize("drop", list(_FULL_ENV.keys()))
 def test_config_is_none_when_a_required_var_is_missing(drop):
     env = {k: v for k, v in _FULL_ENV.items() if k != drop}
     assert observe_config_from_env(env) is None
@@ -38,8 +37,10 @@ def test_config_builds_full_shape_from_env():
     assert config["target_selection"]["principal_id"] == "target-sp"
     assert config["target_selection"]["execution_ref"] == "app/genie-workbench"
     assert config["roles"]["executor"]["warehouse_id"] == "wh-123"
-    assert config["flags"] == {"vc_history_enabled": True, "vc_writes_enabled": False,
-                               "vc_restore_enabled": False}
+    # CUJ-1 (history/capture/restore) is native: the flags are hardwired on whenever the
+    # observe surface is wired, independent of any env switch.
+    assert config["flags"] == {"vc_history_enabled": True, "vc_writes_enabled": True,
+                               "vc_restore_enabled": True}
 
 
 def test_config_binds_app_sp_m2m_executor_when_no_profile():
