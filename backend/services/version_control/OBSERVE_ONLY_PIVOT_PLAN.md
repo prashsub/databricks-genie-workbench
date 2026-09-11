@@ -142,15 +142,15 @@ governance for the optimizer.
 6. Live nonprod validation of capture (+ promotion smoke).
 7. Seamless merge into `feature/version-control-ci-cd`.
 
-## 11. Open decisions
+## 11. Open decisions — RESOLVED
 
-- **Capture-after mechanism:** `capture_on_open` (passive, simplest) vs. poll the job
-  `run_id` to completion (tight bracket) vs. both. *(Gates Step 5.)*
-- Does the UI need a VC version-history / restore tab now, or is silent capture-for-restore
-  enough?
-- `create-agent` stays functional / ungoverned? (recommended: yes.)
-- Flag + identity for capture (`vc_history_enabled` + ledger writes; app SP as trusted
-  target identity).
+- **Capture-after mechanism:** **BOTH** — `capture_on_open` as the always-on passive
+  baseline, plus job-poll of the optimizer run id for a tight before/after bracket.
+- **UI:** **Include a history/restore read surface** — mount a read endpoint + a minimal
+  history/restore UI tab (the fork already ships `frontend/src/components/version-control/`).
+- `create-agent` stays functional / ungoverned. **(done — reverted to base.)**
+- Flag + identity for capture: `vc_history_enabled` + ledger writes enabled, app SP as the
+  trusted target identity.
 
 ## 12. Rough effort
 
