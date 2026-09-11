@@ -57,6 +57,9 @@ export class VersionControlApi {
     if (dedupeIntent) this.intents.set(intent, result)
     return result
   }
+  // Space-keyed bridge (workbench is space_id-keyed; the ledger is binding-keyed).
+  spaceVersions(spaceId: string, cursor?: string, signal?: AbortSignal) { return this.get<VersionPage>(`/spaces/${encodeURIComponent(spaceId)}/versions?${pageQuery(cursor)}`, signal) }
+  spaceObserve(spaceId: string, key: string) { return this.post<ObservationResult>(`/spaces/${encodeURIComponent(spaceId)}/observe`, {}, key, false) }
   overview(cursor?: string, signal?: AbortSignal) { return this.get<OverviewPage>(`/overview?${pageQuery(cursor)}`, signal) }
   status(bindingId: string, signal?: AbortSignal) { return this.get<BindingStatus>(`${bindingPath(bindingId)}/status`, signal) }
   versions(bindingId: string, cursor?: string, signal?: AbortSignal) { return this.get<VersionPage>(`${bindingPath(bindingId)}/versions?${pageQuery(cursor)}`, signal) }

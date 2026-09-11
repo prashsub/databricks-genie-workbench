@@ -3,13 +3,14 @@
  * Tabs: Score (default) | Optimize | History
  */
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
-import { ArrowLeft, Star, BarChart2, Clock, ExternalLink, Rocket, Play, ChevronDown, ChevronRight, Settings, RefreshCw, Network } from "lucide-react"
+import { ArrowLeft, Star, BarChart2, Clock, ExternalLink, Rocket, Play, ChevronDown, ChevronRight, Settings, RefreshCw, Network, GitBranch } from "lucide-react"
 import { scanSpace, toggleStar, getSpaceHistory, getSpaceDetail, getActiveRunForSpace } from "@/lib/api"
 import { MATURITY_COLORS, getOptimizationLabel } from "@/lib/utils"
 import type { ScanResult, ScoreHistoryPoint, OptimizationEvent, MvProposal } from "@/types"
 import type { MvRerunPrefill } from "@/components/auto-optimize/OptimizationConfig"
 import { IQScoreTab } from "./IQScoreTab"
 import { HistoryTab } from "./HistoryTab"
+import { SpaceVersionControlTab } from "@/components/version-control/SpaceVersionControlTab"
 import { useAnalysis } from "@/hooks/useAnalysis"
 import { SpaceOverview } from "@/components/SpaceOverview"
 import { AutoOptimizeTab } from "@/components/auto-optimize/AutoOptimizeTab"
@@ -179,6 +180,7 @@ export function SpaceDetail({ spaceId, displayName, spaceUrl, activeTab, runId, 
     { id: "model", label: "Model", icon: <Network className="w-4 h-4" /> },
     { id: "optimize", label: "Optimize", icon: <Rocket className="w-4 h-4" /> },
     { id: "history", label: "History", icon: <Clock className="w-4 h-4" /> },
+    { id: "versions", label: "Version Control", icon: <GitBranch className="w-4 h-4" /> },
   ]
 
   // Determine contextual action(s) based on scan results
@@ -364,6 +366,10 @@ export function SpaceDetail({ spaceId, displayName, spaceUrl, activeTab, runId, 
 
         {activeTab === "history" && (
           <HistoryTab history={history} optimizationEvents={optimizationEvents} isLoading={isLoadingHistory} />
+        )}
+
+        {activeTab === "versions" && (
+          <SpaceVersionControlTab spaceId={spaceId} />
         )}
       </div>
 

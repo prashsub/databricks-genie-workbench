@@ -96,6 +96,7 @@ def mount_observe_routers(app: Any, runtime: ObserveRuntime) -> None:
     """
     from backend.routers.vc_history import build_router as build_history_router
     from backend.routers.vc_mutations import build_router as build_mutations_router
+    from backend.routers.vc_spaces import build_router as build_spaces_router
 
     app.include_router(build_history_router(
         ledger=runtime.ledger, registry=runtime.registry, identity=runtime.identity,
@@ -105,3 +106,5 @@ def mount_observe_routers(app: Any, runtime: ObserveRuntime) -> None:
         registry=runtime.registry, facts=runtime.facts,
         authorize_history=runtime.authorize_history,
         reader_selection=runtime.reader_selection, flags=runtime.flags))
+    # Space-keyed bridge for the SpaceDetail Version Control tab.
+    app.include_router(build_spaces_router(runtime=runtime))
