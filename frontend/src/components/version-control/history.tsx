@@ -140,7 +140,7 @@ function EmptyState() {
     <div className="text-center py-16 text-muted">
       <GitBranch className="w-8 h-8 mx-auto mb-3 opacity-50" />
       <p className="text-secondary font-medium">No versions captured yet</p>
-      <p className="text-sm mt-1">Capture the current configuration to start tracking changes over time.</p>
+      <p className="text-sm mt-1">Opening this tab auto-captures the current configuration. If nothing appears, use “Capture current state” to save one now.</p>
     </div>
   )
 }

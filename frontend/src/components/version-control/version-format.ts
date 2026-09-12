@@ -7,7 +7,7 @@ export type OriginMeta = { label: string; variant: BadgeProps['variant']; Icon: 
 
 // Origin drives the color + icon of each version so "what changed this" reads at a glance.
 export const ORIGIN_META: Record<Origin, OriginMeta> = {
-  workbench: { label: 'Workbench', variant: 'info', Icon: GitCommit },
+  workbench: { label: 'Auto-captured', variant: 'info', Icon: GitCommit },
   external: { label: 'External', variant: 'warning', Icon: AlertTriangle },
   optimizer: { label: 'Optimizer', variant: 'default', Icon: Sparkles },
   restore: { label: 'Restore', variant: 'secondary', Icon: RotateCcw },

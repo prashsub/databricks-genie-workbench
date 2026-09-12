@@ -457,3 +457,73 @@ If cross-workspace promotion is kept, its large-artifact handling (`promotion/st
 `releases.py` absolute `/Volumes/...` paths) is a **separate** path and may retain a Volume —
 but it must not be reached from the CUJ-1 capture/restore code. This decision governs CUJ-1
 inline persistence only.
+
+## 17. Space "Version Control" tab — UX improvement plan
+
+**Status:** Planned, not implemented (decided to write down first) · **Surface:**
+`frontend/src/components/version-control/SpaceVersionControlTab.tsx` and its children
+(`history.tsx`, `version-detail-panel.tsx`, `config-view.tsx`, `diff.tsx`).
+
+### 17.1 Problems observed (with root cause in code)
+
+1. **Capture lag with no feedback.** On open, `syncOnOpen` (`SpaceVersionControlTab.tsx:69`)
+   calls `api.spaceObserve` — the slow part is the OBO live GET of the Genie space inside
+   `capture_on_open` — and **swallows everything silently** (no spinner/message) until
+   `load()` returns. The manual `capture()` (`:186`) only branches on `captured_version`
+   truthy, conflating *no-change*, *busy*, and *permission error* into one message.
+2. **Config view too narrow + text overflow.** The tab grid is inverted:
+   `grid-cols-[minmax(0,1fr)_minmax(320px,380px)]` (`:267`) makes the **history list wide**
+   and crams the **config/detail into a 320–380px sticky rail**. `ConfigView` is fine — it is
+   starved of width. Long UC join identifiers overflow (`config-view.tsx:160-161` lack
+   `break-all`); `SqlCodeBlock` `overflow-x-auto` scrolls sideways, painful at 320px.
+3. **No list multi-select for diff.** Diff is dropdown-driven (`history.tsx:186-202` → two
+   `<select>`s → `SemanticDiffView` below the grid).
+
+Backend already distinguishes the outcomes we need: `ObservationResult`
+(`types/version-control.ts:30`) carries **`captured_version`** *and* **`busy`**. Observe is a
+single blocking POST (`vc_spaces.py:105` `space_observe`) — no SSE today.
+
+### 17.2 Direction — master–detail (list-detail) pattern
+
+Adopt the pattern used by mature version-history UIs (VS Code Timeline, GitKraken, Google
+Docs "Version history", Notion, Figma): a **narrow selectable list rail** + a **wide detail
+pane with a sticky metadata header over an independently scrollable body**. This is the
+inverse of today's layout and directly fixes #2/#3.
+
+### 17.3 Slices (each its own PLAN → VERIFY → commit)
+
+- **Slice A — capture status & staged messaging (fixes #1). Decided: client-driven. LANDED.**
+  Make on-open capture visible (status line + rail skeleton). Distinct terminal states from
+  `ObservationResult` + errors (Nielsen "visibility of system status"): *saved new version
+  (changes detected)* · *no changes since last version* · *capture already in progress*
+  (`busy`) · *capture not enabled* (503 `vc_writes_disabled`) · *no access to read this
+  space* (permission). Auto-dismiss success/no-change; keep errors sticky. Honest single
+  "reading & comparing…" phase now (observe is one blocking call); **no SSE**. Absorbs the
+  previously-pending messaging slice. Implemented: `capture-notice.ts`
+  (`describeObservation`/`describeCaptureError`), visible `syncing` status +
+  `loading || syncing` rail skeleton and tone-styled auto-dismissing notices in
+  `SpaceVersionControlTab.tsx`, Slice D folded in (`version-format.ts` `workbench` →
+  "Auto-captured", header auto-capture copy, softer empty state). Tests:
+  `SpaceVersionControlTab.test.tsx`.
+- **Slice B — layout inversion + overflow (fixes #2 & #3).** Flip to
+  `grid-cols-[300px_minmax(0,1fr)]`: narrow versions rail left, wide detail right. Detail =
+  **sticky header** (origin badge, short id/copy, captured time, actor, fingerprints,
+  lineage, Restore) over a **scrollable body** (sectioned `ConfigView`). Two-pane full-height
+  with each pane scrolling on its own; page no longer scrolls. Add `break-all`/`min-w-0` to
+  join identifiers; keep `SqlCodeBlock` horizontal scroll (comfortable at width). Stack below
+  `lg`.
+- **Slice C — multi-select compare in the rail (fixes #4).** Checkbox per rail row; a compare
+  tray appears when exactly 2 are picked ("Compare 2 versions"), >2 capped. Single-click
+  still opens detail; checkboxes drive compare (avoids click-nav vs multi-select ambiguity —
+  GitHub/Google Docs pattern). Render the existing `SemanticDiffView` in the right pane while
+  comparing; retire the dropdown compare.
+- **Slice D — labels & copy (fold into A).** Option A relabel `workbench` origin →
+  **"Auto-captured"** in `version-format.ts` `ORIGIN_META`; explanatory copy (auto-capture
+  points = optimizer runs + entering the workbench; direct-in-Genie edits captured on next
+  open; no background watcher); soften the empty state.
+- **Slice E (optional, deferred) — true server-side stages via SSE.** Stream
+  `reading → canonicalizing → comparing → captured/no-change` from a new `observe/stream`
+  endpoint reusing the create-agent SSE infra. Only if Slice A's client-side status is
+  insufficient. **Not chosen now.**
+
+**Suggested order:** A → B → C, D folded into A. Recommended when implementation resumes.

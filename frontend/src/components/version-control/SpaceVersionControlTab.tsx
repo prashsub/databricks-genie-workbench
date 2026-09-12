@@ -3,6 +3,7 @@ import { Camera, GitBranch, RefreshCw, Upload } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { VersionControlApi, VersionControlError } from '@/lib/version-control-api'
 import type { ObservationResult, SemanticDiff, VersionDetail, VersionPage, VersionSummary } from '@/types/version-control'
+import { type CaptureNotice, describeCaptureError, describeObservation } from './capture-notice'
 import { History } from './history'
 import { VersionDetailPanel } from './version-detail-panel'
 import { SemanticDiffView } from './diff'
@@ -30,8 +31,9 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   const [page, setPage] = useState<VersionPage>(EMPTY_PAGE)
   const [loading, setLoading] = useState(false)
   const [capturing, setCapturing] = useState(false)
+  const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<CaptureNotice | null>(null)
   const [detail, setDetail] = useState<VersionDetail | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -61,16 +63,21 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   }, [spaceId])
 
   // Auto-capture on open: fire a single observation when the tab opens (or the space
-  // switches) so edits made outside the workbench surface without a manual click. This is
-  // best-effort and idempotent — the backend dedups on the config fingerprint, so an
-  // unchanged space appends no new version. Observe errors are swallowed; the history read
-  // below is the source of truth for what renders. The manual Capture/Refresh buttons keep
-  // their explicit (noticed) behavior.
+  // switches) so edits made outside the workbench surface without a manual click. It is
+  // idempotent — the backend dedups on the config fingerprint, so an unchanged space appends
+  // no new version. Unlike the earlier silent version, this shows a visible "checking…"
+  // status and a terminal notice, so the user is never left staring at an unexplained lag
+  // (the slow step is the OBO live GET of the Genie space). The history read below remains
+  // the source of truth for what renders.
   const syncOnOpen = useCallback(async () => {
+    setSyncing(true)
+    setNotice(null)
     try {
-      await api.spaceObserve(spaceId, crypto.randomUUID())
-    } catch {
-      // best-effort — do not block or surface an error for the passive open capture
+      setNotice(describeObservation(await api.spaceObserve(spaceId, crypto.randomUUID())))
+    } catch (err) {
+      setNotice(describeCaptureError(err))
+    } finally {
+      setSyncing(false)
     }
     await load()
   }, [spaceId, load])
@@ -91,6 +98,13 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   useEffect(() => {
     if (selectedId) detailRef.current?.scrollIntoView({ block: 'nearest' })
   }, [selectedId])
+
+  // Auto-dismiss transient success/info notices; keep errors on screen until the next action.
+  useEffect(() => {
+    if (!notice || notice.tone === 'error') return
+    const timer = setTimeout(() => setNotice(null), 5000)
+    return () => clearTimeout(timer)
+  }, [notice])
 
   // Deployment flags (whether restore is enabled) — best-effort; default disabled.
   useEffect(() => {
@@ -161,8 +175,8 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
         crypto.randomUUID(),
       )
       setNotice(result.captured_version
-        ? 'Restored this version as the live configuration.'
-        : 'The live space already matches this version.')
+        ? { tone: 'success', message: 'Restored this version as the live configuration.' }
+        : { tone: 'info', message: 'The live space already matches this version.' })
       setPendingRestore(null)
       setDetail(null)
       setSelectedId(null)
@@ -183,12 +197,10 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     setNotice(null)
     try {
       const result: ObservationResult = await api.spaceObserve(spaceId, crypto.randomUUID())
-      setNotice(result.captured_version
-        ? 'Captured the current configuration as a new version.'
-        : 'No change since the last captured version.')
+      setNotice(describeObservation(result))
       await load()
     } catch (err) {
-      setError(err instanceof VersionControlError ? err.message : 'Capture failed.')
+      setNotice(describeCaptureError(err))
     } finally {
       setCapturing(false)
     }
@@ -210,6 +222,11 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
           <p className="text-sm text-muted mt-1 max-w-2xl">
             Manage this agent's configuration versions in-workspace, and promote an approved
             version to another workspace you manage.
+          </p>
+          <p className="text-xs text-muted mt-1.5 max-w-2xl">
+            A version is auto-captured whenever you open this tab and after each optimizer run.
+            Edits made directly in Genie are captured the next time you open this tab — there is
+            no background watcher.
           </p>
         </div>
       </div>
@@ -253,14 +270,30 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
             </button>
           </div>
 
+          {(syncing || capturing) && (
+            <div role="status" className="flex items-center gap-2 text-sm rounded-lg border border-default bg-surface-secondary text-muted px-3 py-2">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              {capturing ? 'Capturing the current configuration…' : 'Checking the live configuration for changes…'}
+            </div>
+          )}
           {error && (
             <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
               {error}
             </div>
           )}
           {notice && (
-            <div className="text-sm rounded-lg border border-default bg-surface-secondary text-muted px-3 py-2">
-              {notice}
+            <div
+              role="status"
+              className={cn(
+                'text-sm rounded-lg border px-3 py-2',
+                notice.tone === 'success'
+                  ? 'border-green-500/30 bg-green-500/10 text-green-400'
+                  : notice.tone === 'error'
+                    ? 'border-red-500/30 bg-red-500/10 text-red-400'
+                    : 'border-default bg-surface-secondary text-muted',
+              )}
+            >
+              {notice.message}
             </div>
           )}
 
@@ -268,7 +301,7 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
             <div className="rounded-xl border border-default bg-surface p-4">
               <History
                 page={page}
-                loading={loading}
+                loading={loading || syncing}
                 selectedId={selectedId}
                 currentId={page.items[0]?.version_id ?? null}
                 onNext={() => { if (page.next_cursor) void load(page.next_cursor) }}
