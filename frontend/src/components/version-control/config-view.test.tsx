@@ -35,6 +35,17 @@ it('config_view_renders_friendly_sections_and_preserves_unknowns', () => {
   }
 })
 
+it('config_view_renders_array_descriptions_as_plain_text', () => {
+  const arraySnapshot = {
+    data_sources: { tables: [{ identifier: 'cat.sch.tbl', description: ['Demo source orders for VC promotion gate'] }] },
+  }
+  const html = renderToStaticMarkup(<ConfigView snapshot={arraySnapshot} />)
+  // The structured section shows plain text (no JSON brackets); brackets only remain in
+  // the raw-JSON disclosure at the bottom.
+  expect(html).toContain('Demo source orders for VC promotion gate')
+  expect(html.split('View raw JSON')[0]).not.toContain('["Demo source orders')
+})
+
 it('config_view_handles_empty_snapshot_gracefully', () => {
   const html = renderToStaticMarkup(<ConfigView snapshot={{}} />)
   expect(html).toContain('No structured configuration in this snapshot.')

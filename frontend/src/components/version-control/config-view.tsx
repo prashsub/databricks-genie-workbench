@@ -21,6 +21,9 @@ function text(value: unknown): string {
   if (value == null) return ''
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  // Descriptions and similar fields are often string arrays; render them as plain text
+  // rather than a JSON dump. Objects still fall back to JSON.
+  if (Array.isArray(value)) return value.map(text).filter(Boolean).join(' ')
   return JSON.stringify(value)
 }
 
@@ -57,7 +60,7 @@ function SqlEntry({ record, index, labelKeys }: { record: Record<string, unknown
   const sql = firstText(record, ['sql', 'answer', 'query'])
   return (
     <div className="space-y-1">
-      <p className="text-xs text-secondary">{label}</p>
+      <p className="text-xs text-secondary break-words">{label}</p>
       {sql ? <SqlCodeBlock code={sql} maxLines={8} /> : null}
     </div>
   )
@@ -109,16 +112,16 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
               const columns = asArray(table.column_configs)
               return (
                 <div key={index} className={box}>
-                  <p className="font-mono text-xs text-secondary">{firstText(table, ['identifier', 'table', 'name']) || `Table ${index + 1}`}</p>
-                  {firstText(table, ['description']) && <p className="mt-0.5 text-xs text-muted">{firstText(table, ['description'])}</p>}
+                  <p className="font-mono text-xs text-secondary break-all">{firstText(table, ['identifier', 'table', 'name']) || `Table ${index + 1}`}</p>
+                  {firstText(table, ['description']) && <p className="mt-0.5 text-xs text-muted break-words">{firstText(table, ['description'])}</p>}
                   {columns.length > 0 && (
                     <ul className="mt-1.5 space-y-0.5">
                       {columns.map((column, ci) => {
                         const col = asObject(column)
                         const description = firstText(col, ['description'])
                         return (
-                          <li key={ci} className="text-xs text-muted">
-                            <span className="font-mono text-secondary">{firstText(col, ['column_name', 'name'])}</span>
+                          <li key={ci} className="text-xs text-muted break-words">
+                            <span className="font-mono text-secondary break-all">{firstText(col, ['column_name', 'name'])}</span>
                             {description ? ` — ${description}` : ''}
                           </li>
                         )
