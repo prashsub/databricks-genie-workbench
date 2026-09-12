@@ -13,18 +13,21 @@ const detail: VersionDetail = {
   snapshot: { data_sources: [{ table: 'sales' }] },
 }
 
-it('detail_panel_shows_origin_fingerprints_lineage_and_snapshot', () => {
+it('detail_panel_shows_origin_fingerprints_lineage_and_config', () => {
   const html = renderToStaticMarkup(<VersionDetailPanel detail={detail} onClose={vi.fn()} />)
-  for (const text of ['Optimizer', 'Fingerprints', versionFixture.observed_by, 'original-1', 'champion-7', 'Restorable snapshot', 'data_sources', 'Canonicalizer']) {
+  // 'data_sources' survives in the raw-JSON disclosure; 'Configuration'/'View raw JSON'
+  // are the structured config surface that replaced the raw snapshot dump.
+  for (const text of ['Optimizer', 'Fingerprints', versionFixture.observed_by, 'original-1', 'champion-7', 'Configuration', 'View raw JSON', 'data_sources', 'Canonicalizer']) {
     expect(html).toContain(text)
   }
 })
 
-it('detail_panel_omits_snapshot_section_when_absent', () => {
+it('detail_panel_omits_config_section_when_snapshot_absent', () => {
   const { snapshot, ...withoutSnapshot } = detail
   void snapshot
   const html = renderToStaticMarkup(<VersionDetailPanel detail={withoutSnapshot} onClose={vi.fn()} />)
-  expect(html).not.toContain('Restorable snapshot')
+  expect(html).not.toContain('Configuration')
+  expect(html).not.toContain('View raw JSON')
 })
 
 it('detail_panel_omits_restore_button_without_handler', () => {

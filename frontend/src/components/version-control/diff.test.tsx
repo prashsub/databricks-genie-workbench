@@ -7,7 +7,9 @@ it('semantic_diff_groups_changes_and_flags_manual_sql_review', () => {
     { category: 'sql', path: 'queries/1', change: 'modified', before: 'select 1', after: 'select 2', review_required: true },
     { category: 'columns', path: 'sales/id', change: 'added', before: null, after: 'id', review_required: false },
   ] }} />)
-  for (const text of ['sql', 'columns', 'Manual SQL review required', 'select 1', 'select 2', 'sales/id']) expect(html).toContain(text)
+  // The SQL value renders as a side-by-side, word-level diff (Before/After columns); the
+  // changed token is split into its own span, so assert on the rendered pieces.
+  for (const text of ['Sample SQL', 'Columns', 'Manual SQL review required', 'select ', 'Before', 'After', 'word-removed', 'word-added', 'sales/id']) expect(html).toContain(text)
   const unknown = renderToStaticMarkup(<SemanticDiffView diff={{ comparison: 'unknown', items: [] }} />)
   expect(unknown).toContain('Unknown comparison')
   expect(unknown).not.toContain('No changes')

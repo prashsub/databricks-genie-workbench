@@ -1,6 +1,7 @@
 import { Bot, Copy, RotateCcw, User, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import type { VersionDetail } from '@/types/version-control'
+import { ConfigView } from './config-view'
 import { absoluteTime, friendlyActor, isHumanActor, originMeta, relativeTime, shortId } from './version-format'
 
 const CHIP = 'inline-flex items-center gap-1 rounded-md border border-default bg-surface px-2 py-0.5 text-xs text-muted'
@@ -100,14 +101,10 @@ export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled,
       )}
 
       {snapshot !== undefined && snapshot !== null && (
-        <details className="rounded-lg border border-default bg-surface-secondary/40">
-          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-secondary">
-            Restorable snapshot
-          </summary>
-          <pre className="max-h-80 overflow-auto px-3 pb-3 text-xs text-muted whitespace-pre-wrap break-words">
-            {JSON.stringify(snapshot, null, 2)}
-          </pre>
-        </details>
+        <div className="space-y-2">
+          <p className="text-xs font-semibold text-secondary uppercase tracking-wide">Configuration</p>
+          <ConfigView snapshot={snapshot} />
+        </div>
       )}
 
       {onRestore && (

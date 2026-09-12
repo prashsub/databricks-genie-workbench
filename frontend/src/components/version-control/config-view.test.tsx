@@ -1,0 +1,42 @@
+import { renderToStaticMarkup } from 'react-dom/server'
+import { expect, it } from 'vitest'
+import { ConfigView } from './config-view'
+
+const snapshot = {
+  data_sources: {
+    tables: [
+      { identifier: 'main.sales.orders', description: 'Order facts', column_configs: [{ column_name: 'region', description: 'Sales region' }] },
+    ],
+    metric_views: [],
+  },
+  instructions: {
+    text_instructions: [{ content: ['Revenue = SUM(amount).\n'] }],
+    join_specs: [{ id: 'j1', left: { identifier: 'orders' }, right: { identifier: 'customers' }, sql: ['`o`.`cid` = `c`.`id`', '--rt=FROM_ONE--'] }],
+    sql_snippets: { filters: [{ id: 'f1', display_name: 'Active only', sql: 'status = 1' }] },
+    example_question_sqls: [{ id: 'q1', question: 'Top regions?', sql: 'select region from orders' }],
+  },
+  title: 'Sales agent',
+  weird_unmapped_field: { keep: 'me' },
+}
+
+it('config_view_renders_friendly_sections_and_preserves_unknowns', () => {
+  const html = renderToStaticMarkup(<ConfigView snapshot={snapshot} />)
+  for (const text of [
+    'Data sources', 'main.sales.orders', 'region',
+    'Instructions', 'Revenue = SUM(amount).',
+    'Joins', 'orders ⋈ customers',
+    'Filters', 'Active only',
+    'Sample SQL', 'Top regions?',
+    'Metadata', 'Sales agent',
+    'Other', 'weird_unmapped_field',
+    'View raw JSON',
+  ]) {
+    expect(html).toContain(text)
+  }
+})
+
+it('config_view_handles_empty_snapshot_gracefully', () => {
+  const html = renderToStaticMarkup(<ConfigView snapshot={{}} />)
+  expect(html).toContain('No structured configuration in this snapshot.')
+  expect(html).toContain('View raw JSON')
+})
