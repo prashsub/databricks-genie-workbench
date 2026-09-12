@@ -111,9 +111,15 @@ def build_router(*, runtime):
             binding = resolve_or_enroll_bound(runtime, space_id=space_id)
             if authorize_history(actor, binding) is not True:
                 raise PermissionError("Binding history scope denied")
-            # Record the authenticated human as the ledger actor (authorship), not the SP:
-            # the GET/lease still run as the SP executor inside `capture_on_open`.
-            return runtime.observer.capture_on_open(binding, actor, actor_override=actor)
+            # Record the authenticated human as the ledger actor (authorship), and read the
+            # live serialized space under the SAME user (OBO) via `live_reader`: the app SP
+            # usually has no grant on a user-owned Genie space, so an SP-pinned read 403s
+            # (mirrors restore's OBO live GET). The lease, status read, and ledger append
+            # still run as the SP executor inside `capture_on_open`.
+            from backend.services.genie_client import get_genie_space
+            return runtime.observer.capture_on_open(
+                binding, actor, actor_override=actor,
+                live_reader=lambda: get_genie_space(space_id))
         return _invoke(capture)
 
     @router.post("/spaces/{space_id}/restore")

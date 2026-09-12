@@ -21,16 +21,20 @@ class Observer:
         self.status_reader = status_reader
 
     def capture_on_open(self, binding, viewer, *, origin=vc.Origin.WORKBENCH,
-                        actor_override=None):
+                        actor_override=None, live_reader=None):
         # A user opening the tab / clicking "Capture current state" is a workbench-initiated
         # observation (CUJ-1 §4.2), not `external`. Callers may override for other surfaces.
         # `actor_override` records the human who initiated the capture as the ledger actor
-        # (mirrors `capture`); the GET/lease/status read still run as the SP executor. When
-        # omitted (e.g. system/optimizer callers) the SP executor identity is recorded.
+        # (mirrors `capture`); the lease, status read, and ledger append still run as the SP
+        # executor. When omitted (e.g. system/optimizer callers) the SP executor identity is
+        # recorded. `live_reader`, when supplied, reads the live serialized space under the
+        # CALLER's identity (OBO) instead of the SP-pinned transport -- the space-tab path
+        # injects it so a capture works on a user-owned space the SP has no grant on (an
+        # SP-pinned read 403s there; see restore's OBO live GET). Omitted -> SP transport.
         status = self.status_reader(binding, viewer)
         executor = self.identity.executor(self.reader_selection)
         return self._capture(binding, "open", executor, status, origin=origin,
-                             actor_override=actor_override)
+                             actor_override=actor_override, live_reader=live_reader)
 
     def capture(self, binding, reason, executor, *, origin=vc.Origin.EXTERNAL,
                 restored_from_version_id=None, actor_override=None,
@@ -57,12 +61,13 @@ class Observer:
 
     def _capture(self, binding, reason, executor, status, *, origin=vc.Origin.EXTERNAL,
                  restored_from_version_id=None, actor_override=None,
-                 optimizer_run_id=None, champion_id=None):
+                 optimizer_run_id=None, champion_id=None, live_reader=None):
         try:
             return self._capture_committed(binding, reason, executor, status, origin=origin,
                                            restored_from_version_id=restored_from_version_id,
                                            actor_override=actor_override,
-                                           optimizer_run_id=optimizer_run_id, champion_id=champion_id)
+                                           optimizer_run_id=optimizer_run_id, champion_id=champion_id,
+                                           live_reader=live_reader)
         except Exception:
             logger.exception("VC observation capture failed for binding %s", binding.binding_id)
             return vc.ObservationResult(replace(status, stale=True, allowed_actions=(),
@@ -70,7 +75,7 @@ class Observer:
 
     def _capture_committed(self, binding, reason, executor, status, *, origin=vc.Origin.EXTERNAL,
                            restored_from_version_id=None, actor_override=None,
-                           optimizer_run_id=None, champion_id=None):
+                           optimizer_run_id=None, champion_id=None, live_reader=None):
         try:
             lease = self.coordination.observe_exclusively(binding, executor)
         except Exception:
@@ -78,7 +83,12 @@ class Observer:
                 reasons=(*status.reasons, "Observation busy or unavailable")), None, True)
         actor = vc.ActorContext(executor.principal_id, executor.workspace_id, executor.actor_kind)
         status = self.status_reader(binding, actor)
-        snapshot = self.canonicalizer.observe(self.transport.get(binding, executor))
+        # The live read runs under the injected OBO reader when supplied (space-tab path, so
+        # the capture reflects the user's own view of a space the SP cannot read); otherwise
+        # through the SP-pinned transport (optimizer/system callers). It happens inside the
+        # observation lease either way, so concurrent opens still serialize + dedup.
+        raw = live_reader() if live_reader is not None else self.transport.get(binding, executor)
+        snapshot = self.canonicalizer.observe(raw)
         if status.heads.observed is not None:
             previous = self.ledger.get_version(binding, status.heads.observed)
             if self.canonicalizer.compare(previous.snapshot, snapshot) == vc.Comparison.EQUAL:

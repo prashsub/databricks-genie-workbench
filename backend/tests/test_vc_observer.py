@@ -190,6 +190,32 @@ def test_capture_on_open_records_actor_override_as_the_human(observer_rig):
     assert rig.transport.get.call_args.args[1] is rig.executor
 
 
+def test_capture_on_open_reads_live_state_via_injected_obo_reader(observer_rig):
+    """The space-tab path injects an OBO `live_reader` so the capture reads the serialized
+    space under the caller's identity, never through the SP-pinned transport (the SP often
+    has no grant on a user-owned space). The lease + ledger append still run as the SP."""
+    rig, observer, viewer, status, identity = observer_rig
+    envelope = {"serialized_space": {"instructions": "live-obo"}, "description": "d"}
+    calls = []
+    result = observer.capture_on_open(
+        rig.binding, viewer, live_reader=lambda: calls.append("obo") or envelope)
+    assert calls == ["obo"]                        # the injected reader was used
+    rig.transport.get.assert_not_called()          # ...and the SP transport was not
+    assert "get" not in rig.trace and "commit:open" in rig.trace
+    assert result.captured_version is not None
+    rig.ledger.append_observation.assert_called_once()
+
+
+def test_capture_on_open_without_reader_still_reads_via_sp_transport(observer_rig):
+    """Omitting `live_reader` keeps the default SP-pinned transport read (optimizer/system
+    callers), so their behavior is unchanged by the OBO seam."""
+    rig, observer, viewer, status, identity = observer_rig
+    result = observer.capture_on_open(rig.binding, viewer)
+    assert "get" in rig.trace
+    assert rig.transport.get.call_args.args[1] is rig.executor
+    assert result.captured_version is not None
+
+
 def test_capture_on_open_without_override_records_the_service_principal(observer_rig):
     """System/optimizer callers omit the override and stay recorded as the SP executor."""
     rig, observer, viewer, status, identity = observer_rig

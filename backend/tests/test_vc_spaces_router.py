@@ -100,14 +100,23 @@ def test_space_versions_requires_authentication():
     assert response.status_code == 401
 
 
-def test_space_observe_captures_current_state():
+def test_space_observe_captures_current_state(monkeypatch):
     runtime = _runtime()
+    envelope = {"serialized_space": {}}
+    seen = {}
+    monkeypatch.setattr("backend.services.genie_client.get_genie_space",
+                        lambda sid: seen.update(sid=sid) or envelope)
     response = _client(runtime).post(f"/api/version-control/spaces/{SPACE_ID}/observe")
     assert response.status_code == 200
     assert response.json()["captured_version"]["version_id"] == str(UUID(int=9))
     # The authenticated human is recorded as the ledger actor (authorship), not the SP.
-    runtime.observer.capture_on_open.assert_called_once_with(
-        _BINDING, runtime.actor, actor_override=runtime.actor)
+    call = runtime.observer.capture_on_open.call_args
+    assert call.args == (_BINDING, runtime.actor)
+    assert call.kwargs["actor_override"] == runtime.actor
+    # The live serialized space is read under the SAME user (OBO): the injected reader
+    # resolves get_genie_space for this space (the SP may lack access to a user-owned space).
+    assert call.kwargs["live_reader"]() is envelope
+    assert seen["sid"] == SPACE_ID
 
 
 def test_space_observe_fail_closed_when_writes_disabled():
