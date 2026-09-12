@@ -33,6 +33,24 @@ export function shortId(id: string): string {
   return id.length <= 12 ? id : `${id.slice(0, 8)}…`
 }
 
+// The app service principal is recorded as a raw GUID; a human capture/restore records an
+// email. This lets the UI show a person vs. system icon next to the author.
+export function isHumanActor(observedBy: string): boolean {
+  return !!observedBy && !UUID_RE.test(observedBy)
+}
+
+// Day bucket label for a chronological timeline: "Today" / "Yesterday" / a short date.
+export function dayGroupLabel(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return 'Unknown date'
+  const d = new Date(t)
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const diffDays = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000)
+  if (diffDays <= 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
 export function relativeTime(iso: string): string {
   const t = Date.parse(iso)
   if (Number.isNaN(t)) return iso

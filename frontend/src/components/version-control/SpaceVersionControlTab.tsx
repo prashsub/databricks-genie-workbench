@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Camera, GitBranch, RefreshCw, Upload } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { VersionControlApi, VersionControlError } from '@/lib/version-control-api'
@@ -33,7 +33,10 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [detail, setDetail] = useState<VersionDetail | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const detailRef = useRef<HTMLDivElement | null>(null)
   const [diff, setDiff] = useState<SemanticDiff | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [restoreEnabled, setRestoreEnabled] = useState(false)
@@ -60,6 +63,7 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   useEffect(() => {
     setNotice(null)
     setDetail(null)
+    setSelectedId(null)
     setDetailError(null)
     setDiff(null)
     setDiffError(null)
@@ -67,6 +71,11 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     setRestoreError(null)
     void load()
   }, [load])
+
+  // Bring the detail into view when opening a version (matters on stacked/small layouts).
+  useEffect(() => {
+    if (selectedId) detailRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedId])
 
   // Deployment flags (whether restore is enabled) — best-effort; default disabled.
   useEffect(() => {
@@ -76,13 +85,32 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   }, [])
 
   const selectVersion = useCallback(async (version: VersionSummary) => {
-    setDetail(null)
+    // Toggle: clicking the open row collapses it.
+    if (selectedId === version.version_id) {
+      setSelectedId(null)
+      setDetail(null)
+      setDetailError(null)
+      return
+    }
+    // Mark active immediately; keep the previous detail visible (dimmed) while the next
+    // one loads so the panel never blanks to nothing between selections.
+    setSelectedId(version.version_id)
     setDetailError(null)
+    setDetailLoading(true)
     try {
       setDetail(await api.version(version.binding_id, version.version_id))
     } catch (err) {
+      setDetail(null)
       setDetailError(errorMessage(err, 'Failed to load version detail.'))
+    } finally {
+      setDetailLoading(false)
     }
+  }, [selectedId])
+
+  const closeDetail = useCallback(() => {
+    setSelectedId(null)
+    setDetail(null)
+    setDetailError(null)
   }, [])
 
   const compareVersions = useCallback(async (left: string, right: string) => {
@@ -122,6 +150,7 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
         : 'The live space already matches this version.')
       setPendingRestore(null)
       setDetail(null)
+      setSelectedId(null)
       setDiff(null)
       await load()
     } catch (err) {
@@ -220,30 +249,43 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
             </div>
           )}
 
-          <div className="rounded-xl border border-default bg-surface p-4">
-            <History
-              page={page}
-              loading={loading}
-              onNext={() => { if (page.next_cursor) void load(page.next_cursor) }}
-              onSelect={version => { void selectVersion(version) }}
-              onCompare={(left, right) => { void compareVersions(left, right) }}
-            />
-          </div>
-
-          {detailError && (
-            <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
-              {detailError}
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,380px)] lg:items-start">
+            <div className="rounded-xl border border-default bg-surface p-4">
+              <History
+                page={page}
+                loading={loading}
+                selectedId={selectedId}
+                currentId={page.items[0]?.version_id ?? null}
+                onNext={() => { if (page.next_cursor) void load(page.next_cursor) }}
+                onSelect={version => { void selectVersion(version) }}
+                onCompare={(left, right) => { void compareVersions(left, right) }}
+              />
             </div>
-          )}
-          {detail && (
-            <VersionDetailPanel
-              detail={detail}
-              onClose={() => setDetail(null)}
-              onRestore={() => beginRestore(detail)}
-              restoreEnabled={restoreEnabled}
-              restoring={restoring && pendingRestore?.version_id === detail.version_id}
-            />
-          )}
+
+            <div ref={detailRef} className="min-w-0 lg:sticky lg:top-4">
+              {detailError && (
+                <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
+                  {detailError}
+                </div>
+              )}
+              {detail ? (
+                <div className={detailLoading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+                  <VersionDetailPanel
+                    detail={detail}
+                    isCurrent={detail.version_id === page.items[0]?.version_id}
+                    onClose={closeDetail}
+                    onRestore={() => beginRestore(detail)}
+                    restoreEnabled={restoreEnabled}
+                    restoring={restoring && pendingRestore?.version_id === detail.version_id}
+                  />
+                </div>
+              ) : !detailError && (
+                <div className="rounded-xl border border-dashed border-default bg-surface p-6 text-center text-sm text-muted">
+                  {detailLoading ? 'Loading version…' : 'Select a version to inspect its configuration and restore it.'}
+                </div>
+              )}
+            </div>
+          </div>
 
           {pendingRestore && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 space-y-3">

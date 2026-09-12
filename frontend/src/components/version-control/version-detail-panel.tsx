@@ -1,9 +1,10 @@
-import { Copy, RotateCcw, X } from 'lucide-react'
+import { Bot, Copy, RotateCcw, User, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import type { VersionDetail } from '@/types/version-control'
-import { absoluteTime, friendlyActor, originMeta, relativeTime, shortId } from './version-format'
+import { absoluteTime, friendlyActor, isHumanActor, originMeta, relativeTime, shortId } from './version-format'
 
 const CHIP = 'inline-flex items-center gap-1 rounded-md border border-default bg-surface px-2 py-0.5 text-xs text-muted'
+const CURRENT_PILL = 'inline-flex items-center rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] font-medium text-accent'
 
 function Fingerprint({ label, value }: { label: string; value: string }) {
   return (
@@ -20,11 +21,13 @@ interface VersionDetailPanelProps {
   onRestore?: () => void
   restoreEnabled?: boolean
   restoring?: boolean
+  isCurrent?: boolean
 }
 
-export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled, restoring }: VersionDetailPanelProps) {
+export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled, restoring, isCurrent }: VersionDetailPanelProps) {
   const meta = originMeta(detail.origin)
   const { Icon } = meta
+  const ActorIcon = isHumanActor(detail.observed_by) ? User : Bot
   const snapshot = detail.snapshot
   return (
     <section aria-label="Version detail" className="rounded-xl border border-default bg-surface p-4 space-y-4">
@@ -33,6 +36,7 @@ export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled,
           <Icon className="w-3 h-3" />
           {meta.label}
         </Badge>
+        {isCurrent && <span className={CURRENT_PILL}>Current</span>}
         <span className="font-mono text-xs text-secondary" title={detail.version_id}>{shortId(detail.version_id)}</span>
         <button
           type="button"
@@ -54,13 +58,19 @@ export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled,
       </div>
 
       <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
-        <div className="flex items-center justify-between gap-3">
+        <div className="col-span-2 flex items-start justify-between gap-3">
           <span className="text-muted">Captured</span>
-          <span className="text-secondary" title={absoluteTime(detail.observed_at)}>{relativeTime(detail.observed_at)}</span>
+          <span className="text-right text-secondary">
+            {absoluteTime(detail.observed_at)}
+            <span className="text-muted"> · {relativeTime(detail.observed_at)}</span>
+          </span>
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-muted">By</span>
-          <span className="text-secondary truncate" title={detail.observed_by}>{friendlyActor(detail.observed_by)}</span>
+          <span className="flex items-center gap-1 text-secondary truncate" title={detail.observed_by}>
+            <ActorIcon className="w-3 h-3 shrink-0" />
+            {friendlyActor(detail.observed_by)}
+          </span>
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-muted">Canonicalizer</span>
