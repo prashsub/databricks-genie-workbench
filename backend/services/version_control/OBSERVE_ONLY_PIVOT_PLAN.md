@@ -513,11 +513,13 @@ inverse of today's layout and directly fixes #2/#3.
   scroll on their own; stack below `lg`. Join identifiers got `break-all`/`min-w-0`
   (`config-view.tsx`) to kill the overflow. `SqlCodeBlock` keeps its horizontal scroll
   (comfortable at the new width).
-- **Slice C — multi-select compare in the rail (fixes #4).** Checkbox per rail row; a compare
-  tray appears when exactly 2 are picked ("Compare 2 versions"), >2 capped. Single-click
-  still opens detail; checkboxes drive compare (avoids click-nav vs multi-select ambiguity —
-  GitHub/Google Docs pattern). Render the existing `SemanticDiffView` in the right pane while
-  comparing; retire the dropdown compare.
+- **Slice C — multi-select compare in the rail (fixes #4). LANDED.** Checkbox per rail row
+  (`history.tsx`, additive `compareIds`/`onToggleCompare` — legacy dropdown kept only for the
+  M02 demo). Single-click still opens detail; checkboxes drive compare (avoids the click-nav
+  vs multi-select ambiguity — GitHub/Google Docs pattern). The space tab holds a rolling
+  max-two `compareIds`; at exactly two selected the right pane switches from version detail to
+  a compare panel (`Comparing X ↔ Y`, Clear) rendering the existing `SemanticDiffView`.
+  Restore-preview diff is a separate state, untouched.
 - **Slice D — labels & copy (fold into A).** Option A relabel `workbench` origin →
   **"Auto-captured"** in `version-format.ts` `ORIGIN_META`; explanatory copy (auto-capture
   points = optimizer runs + entering the workbench; direct-in-Genie edits captured on next

@@ -9,6 +9,17 @@ it('history_shows_origin_actor_lineage_and_optimizer_drillthrough', () => {
   expect(html).not.toContain('Version 3')
 })
 
+it('history_checkbox_mode_renders_selection_and_hides_dropdown', () => {
+  const items = [versionFixture, { ...versionFixture, version_id: 'external-2' }]
+  const html = renderToStaticMarkup(
+    <History page={{ items, next_cursor: null }} onNext={vi.fn()} onSelect={vi.fn()} compareIds={['external-2']} onToggleCompare={vi.fn()} />,
+  )
+  expect(html).toContain('type="checkbox"')
+  expect(html).toContain('1 selected — pick one more to compare')
+  // The legacy dropdown compare is retired in checkbox mode.
+  expect(html).not.toContain('Compare versions')
+})
+
 it('history_renders_empty_and_loading_states', () => {
   const empty = renderToStaticMarkup(<History page={{ items: [], next_cursor: null }} onNext={vi.fn()} onSelect={vi.fn()} onCompare={vi.fn()} />)
   expect(empty).toContain('No versions captured yet')

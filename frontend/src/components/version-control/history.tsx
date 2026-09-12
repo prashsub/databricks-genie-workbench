@@ -14,7 +14,11 @@ interface HistoryProps {
   currentId?: string | null
   onNext: () => void
   onSelect: (version: VersionSummary) => void
-  onCompare: (left: string, right: string) => void
+  // Legacy dropdown compare (M02 demo surface). The space tab uses checkbox multi-select
+  // instead — pass `onToggleCompare` (and `compareIds`) for that mode.
+  onCompare?: (left: string, right: string) => void
+  compareIds?: string[]
+  onToggleCompare?: (versionId: string) => void
 }
 
 const CHIP = 'inline-flex items-center gap-1 rounded-md border border-default bg-surface px-2 py-0.5 text-xs text-muted'
@@ -37,9 +41,11 @@ interface VersionRowProps {
   isCurrent: boolean
   isActive: boolean
   onSelect: (version: VersionSummary) => void
+  compareChecked?: boolean
+  onToggleCompare?: (versionId: string) => void
 }
 
-function VersionRow({ version, isCurrent, isActive, onSelect }: VersionRowProps) {
+function VersionRow({ version, isCurrent, isActive, onSelect, compareChecked, onToggleCompare }: VersionRowProps) {
   const meta = originMeta(version.origin)
   const { Icon } = meta
   const ActorIcon = isHumanActor(version.observed_by) ? User : Bot
@@ -62,6 +68,17 @@ function VersionRow({ version, isCurrent, isActive, onSelect }: VersionRowProps)
         )}
       >
         <div className="flex items-center gap-2 flex-wrap">
+          {onToggleCompare && (
+            <input
+              type="checkbox"
+              checked={!!compareChecked}
+              onClick={stop}
+              onChange={() => onToggleCompare(version.version_id)}
+              aria-label={`Select version ${shortId(version.version_id)} to compare`}
+              title="Select to compare"
+              className="h-4 w-4 cursor-pointer accent-accent"
+            />
+          )}
           <Badge variant={meta.variant} className="gap-1">
             <Icon className="w-3 h-3" />
             {meta.label}
@@ -149,13 +166,20 @@ function compareLabel(version: VersionSummary): string {
   return `${originMeta(version.origin).label} · ${relativeTime(version.observed_at)} · ${shortId(version.version_id)}`
 }
 
-export function History({ page, loading, selectedId, currentId, onNext, onSelect, onCompare }: HistoryProps) {
+export function History({ page, loading, selectedId, currentId, onNext, onSelect, onCompare, compareIds, onToggleCompare }: HistoryProps) {
   const [left, setLeft] = useState('')
   const [right, setRight] = useState('')
 
   if (loading && !page.items.length) return <LoadingRows />
   if (!page.items.length) return <EmptyState />
 
+  const checkboxMode = !!onToggleCompare
+  const selectedCount = compareIds?.length ?? 0
+  const compareHint = selectedCount === 0
+    ? 'Select two versions to compare'
+    : selectedCount === 1
+      ? '1 selected — pick one more to compare'
+      : '2 selected — comparing'
   const headId = currentId ?? page.items[0]?.version_id ?? null
   const groups = groupByDay(page.items)
   const selectClass = 'rounded-md border border-default bg-surface px-2 py-1 text-xs text-secondary'
@@ -177,6 +201,8 @@ export function History({ page, loading, selectedId, currentId, onNext, onSelect
                   isCurrent={version.version_id === headId}
                   isActive={version.version_id === selectedId}
                   onSelect={onSelect}
+                  compareChecked={compareIds?.includes(version.version_id)}
+                  onToggleCompare={onToggleCompare}
                 />
               ))}
             </ol>
@@ -185,21 +211,27 @@ export function History({ page, loading, selectedId, currentId, onNext, onSelect
       </ol>
 
       <div className="flex flex-wrap items-center gap-2 border-t border-default pt-3">
-        <span className="text-xs uppercase tracking-wide text-muted">Compare</span>
-        <label className="sr-only" htmlFor="vc-compare-left">Compare from</label>
-        <select id="vc-compare-left" className={selectClass} value={left} onChange={event => setLeft(event.target.value)}>
-          <option value="">Select version</option>
-          {page.items.map(version => <option key={version.version_id} value={version.version_id}>{compareLabel(version)}</option>)}
-        </select>
-        <span className="text-xs text-muted">to</span>
-        <label className="sr-only" htmlFor="vc-compare-right">Compare to</label>
-        <select id="vc-compare-right" className={selectClass} value={right} onChange={event => setRight(event.target.value)}>
-          <option value="">Select version</option>
-          {page.items.map(version => <option key={version.version_id} value={version.version_id}>{compareLabel(version)}</option>)}
-        </select>
-        <button type="button" className={actionClass} disabled={!left || !right || left === right} onClick={() => onCompare(left, right)}>
-          Compare versions
-        </button>
+        {checkboxMode ? (
+          <span className="text-xs text-muted">{compareHint}</span>
+        ) : onCompare ? (
+          <>
+            <span className="text-xs uppercase tracking-wide text-muted">Compare</span>
+            <label className="sr-only" htmlFor="vc-compare-left">Compare from</label>
+            <select id="vc-compare-left" className={selectClass} value={left} onChange={event => setLeft(event.target.value)}>
+              <option value="">Select version</option>
+              {page.items.map(version => <option key={version.version_id} value={version.version_id}>{compareLabel(version)}</option>)}
+            </select>
+            <span className="text-xs text-muted">to</span>
+            <label className="sr-only" htmlFor="vc-compare-right">Compare to</label>
+            <select id="vc-compare-right" className={selectClass} value={right} onChange={event => setRight(event.target.value)}>
+              <option value="">Select version</option>
+              {page.items.map(version => <option key={version.version_id} value={version.version_id}>{compareLabel(version)}</option>)}
+            </select>
+            <button type="button" className={actionClass} disabled={!left || !right || left === right} onClick={() => onCompare(left, right)}>
+              Compare versions
+            </button>
+          </>
+        ) : null}
 
         {page.next_cursor && (
           <button type="button" className={`${actionClass} ml-auto`} disabled={loading} onClick={onNext}>

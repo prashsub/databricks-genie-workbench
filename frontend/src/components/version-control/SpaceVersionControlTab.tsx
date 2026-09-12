@@ -41,6 +41,11 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   const detailRef = useRef<HTMLDivElement | null>(null)
   const [diff, setDiff] = useState<SemanticDiff | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
+  // Checkbox multi-select compare (shown in the right pane, independent of the restore diff).
+  const [compareIds, setCompareIds] = useState<string[]>([])
+  const [compareDiff, setCompareDiff] = useState<SemanticDiff | null>(null)
+  const [compareDiffError, setCompareDiffError] = useState<string | null>(null)
+  const [compareLoading, setCompareLoading] = useState(false)
   const [restoreEnabled, setRestoreEnabled] = useState(false)
   const [pendingRestore, setPendingRestore] = useState<VersionSummary | null>(null)
   const [restoring, setRestoring] = useState(false)
@@ -89,6 +94,9 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     setDetailError(null)
     setDiff(null)
     setDiffError(null)
+    setCompareIds([])
+    setCompareDiff(null)
+    setCompareDiffError(null)
     setPendingRestore(null)
     setRestoreError(null)
     void syncOnOpen()
@@ -141,6 +149,29 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     setDetail(null)
     setDetailError(null)
   }, [])
+
+  // Toggle a version into the compare set; cap at two (rolling — the newest two win).
+  const toggleCompare = useCallback((versionId: string) => {
+    setCompareIds(prev => prev.includes(versionId)
+      ? prev.filter(id => id !== versionId)
+      : [...prev, versionId].slice(-2))
+  }, [])
+
+  // Fetch the diff for the right pane whenever exactly two versions are selected.
+  useEffect(() => {
+    if (compareIds.length !== 2) { setCompareDiff(null); setCompareDiffError(null); return }
+    const bindingId = page.items[0]?.binding_id
+    if (!bindingId) return
+    let live = true
+    setCompareDiff(null)
+    setCompareDiffError(null)
+    setCompareLoading(true)
+    api.diff(bindingId, compareIds[0], compareIds[1])
+      .then(d => { if (live) setCompareDiff(d) })
+      .catch(err => { if (live) setCompareDiffError(errorMessage(err, 'Failed to compare versions.')) })
+      .finally(() => { if (live) setCompareLoading(false) })
+    return () => { live = false }
+  }, [compareIds, page.items])
 
   const compareVersions = useCallback(async (left: string, right: string) => {
     const bindingId = page.items[0]?.binding_id
@@ -308,7 +339,8 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
                 currentId={page.items[0]?.version_id ?? null}
                 onNext={() => { if (page.next_cursor) void load(page.next_cursor) }}
                 onSelect={version => { void selectVersion(version) }}
-                onCompare={(left, right) => { void compareVersions(left, right) }}
+                compareIds={compareIds}
+                onToggleCompare={toggleCompare}
               />
             </div>
 
@@ -318,7 +350,32 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
                   {detailError}
                 </div>
               )}
-              {detail ? (
+              {compareIds.length === 2 ? (
+                <div className="flex h-full flex-col rounded-xl border border-default bg-surface">
+                  <header className="shrink-0 flex flex-wrap items-center gap-2 border-b border-default p-4">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-secondary">Comparing</span>
+                    <span className="font-mono text-xs text-secondary">{shortId(compareIds[0])} ↔ {shortId(compareIds[1])}</span>
+                    <button
+                      type="button"
+                      onClick={() => setCompareIds([])}
+                      className="ml-auto inline-flex items-center gap-1 rounded-md border border-default px-2.5 py-1 text-xs font-medium text-secondary hover:bg-surface-secondary transition-colors"
+                    >
+                      Clear selection
+                    </button>
+                  </header>
+                  <div className="min-h-0 flex-1 overflow-auto p-4">
+                    {compareDiffError ? (
+                      <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
+                        {compareDiffError}
+                      </div>
+                    ) : compareLoading ? (
+                      <p className="text-sm text-muted">Comparing…</p>
+                    ) : compareDiff ? (
+                      <SemanticDiffView diff={compareDiff} />
+                    ) : null}
+                  </div>
+                </div>
+              ) : detail ? (
                 <div className={cn('h-full', detailLoading ? 'opacity-60 transition-opacity' : 'transition-opacity')}>
                   <VersionDetailPanel
                     detail={detail}
@@ -331,7 +388,7 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
                 </div>
               ) : !detailError && (
                 <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-default bg-surface p-6 text-center text-sm text-muted">
-                  {detailLoading ? 'Loading version…' : 'Select a version to inspect its configuration and restore it.'}
+                  {detailLoading ? 'Loading version…' : 'Select a version to inspect its configuration and restore it, or tick two versions to compare.'}
                 </div>
               )}
             </div>
