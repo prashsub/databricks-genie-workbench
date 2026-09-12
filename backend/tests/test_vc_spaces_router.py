@@ -105,7 +105,9 @@ def test_space_observe_captures_current_state():
     response = _client(runtime).post(f"/api/version-control/spaces/{SPACE_ID}/observe")
     assert response.status_code == 200
     assert response.json()["captured_version"]["version_id"] == str(UUID(int=9))
-    runtime.observer.capture_on_open.assert_called_once_with(_BINDING, runtime.actor)
+    # The authenticated human is recorded as the ledger actor (authorship), not the SP.
+    runtime.observer.capture_on_open.assert_called_once_with(
+        _BINDING, runtime.actor, actor_override=runtime.actor)
 
 
 def test_space_observe_fail_closed_when_writes_disabled():

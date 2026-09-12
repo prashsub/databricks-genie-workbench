@@ -20,12 +20,17 @@ class Observer:
         self.reader_selection = reader_selection
         self.status_reader = status_reader
 
-    def capture_on_open(self, binding, viewer, *, origin=vc.Origin.WORKBENCH):
+    def capture_on_open(self, binding, viewer, *, origin=vc.Origin.WORKBENCH,
+                        actor_override=None):
         # A user opening the tab / clicking "Capture current state" is a workbench-initiated
         # observation (CUJ-1 §4.2), not `external`. Callers may override for other surfaces.
+        # `actor_override` records the human who initiated the capture as the ledger actor
+        # (mirrors `capture`); the GET/lease/status read still run as the SP executor. When
+        # omitted (e.g. system/optimizer callers) the SP executor identity is recorded.
         status = self.status_reader(binding, viewer)
         executor = self.identity.executor(self.reader_selection)
-        return self._capture(binding, "open", executor, status, origin=origin)
+        return self._capture(binding, "open", executor, status, origin=origin,
+                             actor_override=actor_override)
 
     def capture(self, binding, reason, executor, *, origin=vc.Origin.EXTERNAL,
                 restored_from_version_id=None, actor_override=None,

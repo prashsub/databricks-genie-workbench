@@ -111,7 +111,9 @@ def build_router(*, runtime):
             binding = resolve_or_enroll_bound(runtime, space_id=space_id)
             if authorize_history(actor, binding) is not True:
                 raise PermissionError("Binding history scope denied")
-            return runtime.observer.capture_on_open(binding, actor)
+            # Record the authenticated human as the ledger actor (authorship), not the SP:
+            # the GET/lease still run as the SP executor inside `capture_on_open`.
+            return runtime.observer.capture_on_open(binding, actor, actor_override=actor)
         return _invoke(capture)
 
     @router.post("/spaces/{space_id}/restore")

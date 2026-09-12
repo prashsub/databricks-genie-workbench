@@ -176,6 +176,29 @@ def test_capture_records_actor_override_while_reading_as_the_executor(observer_r
     assert all(actor.subject_id == rig.executor.principal_id for actor in reads)
 
 
+def test_capture_on_open_records_actor_override_as_the_human(observer_rig):
+    """CUJ-1 §C: a workbench capture records the clicking human as the ledger actor while
+    the GET/lease still run under the SP executor. Omitting the override records the SP."""
+    rig, observer, viewer, status, identity = observer_rig
+    human = vc.ActorContext("user@x", rig.executor.workspace_id, "human")
+    result = observer.capture_on_open(rig.binding, viewer, actor_override=human)
+    context = rig.ledger.append_observation.call_args.args[1]
+    assert context.actor == human
+    assert result.captured_version.observed_by == "user@x"
+    assert context.origin == vc.Origin.WORKBENCH
+    # GET still runs as the SP executor (authorship override never changes the reader).
+    assert rig.transport.get.call_args.args[1] is rig.executor
+
+
+def test_capture_on_open_without_override_records_the_service_principal(observer_rig):
+    """System/optimizer callers omit the override and stay recorded as the SP executor."""
+    rig, observer, viewer, status, identity = observer_rig
+    result = observer.capture_on_open(rig.binding, viewer)
+    context = rig.ledger.append_observation.call_args.args[1]
+    assert context.actor.subject_id == rig.executor.principal_id
+    assert result.captured_version.observed_by == rig.executor.principal_id
+
+
 @pytest.mark.parametrize("failure", ["append_observation", "verify_committed", "advance_heads"])
 def test_capture_persistence_failure_returns_stale_and_disables_actions(observer_rig, failure):
     rig, observer, viewer, status, identity = observer_rig
