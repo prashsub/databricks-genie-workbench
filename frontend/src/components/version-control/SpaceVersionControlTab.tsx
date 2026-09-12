@@ -60,6 +60,21 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     }
   }, [spaceId])
 
+  // Auto-capture on open: fire a single observation when the tab opens (or the space
+  // switches) so edits made outside the workbench surface without a manual click. This is
+  // best-effort and idempotent — the backend dedups on the config fingerprint, so an
+  // unchanged space appends no new version. Observe errors are swallowed; the history read
+  // below is the source of truth for what renders. The manual Capture/Refresh buttons keep
+  // their explicit (noticed) behavior.
+  const syncOnOpen = useCallback(async () => {
+    try {
+      await api.spaceObserve(spaceId, crypto.randomUUID())
+    } catch {
+      // best-effort — do not block or surface an error for the passive open capture
+    }
+    await load()
+  }, [spaceId, load])
+
   useEffect(() => {
     setNotice(null)
     setDetail(null)
@@ -69,8 +84,8 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
     setDiffError(null)
     setPendingRestore(null)
     setRestoreError(null)
-    void load()
-  }, [load])
+    void syncOnOpen()
+  }, [syncOnOpen])
 
   // Bring the detail into view when opening a version (matters on stacked/small layouts).
   useEffect(() => {
