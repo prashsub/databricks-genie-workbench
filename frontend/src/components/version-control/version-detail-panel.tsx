@@ -31,7 +31,9 @@ export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled,
   const ActorIcon = isHumanActor(detail.observed_by) ? User : Bot
   const snapshot = detail.snapshot
   return (
-    <section aria-label="Version detail" className="rounded-xl border border-default bg-surface p-4 space-y-4">
+    <section aria-label="Version detail" className="flex h-full flex-col rounded-xl border border-default bg-surface">
+      {/* Sticky metadata header — stays put while the configuration body scrolls below. */}
+      <header className="shrink-0 space-y-4 border-b border-default p-4">
       <div className="flex items-center gap-2 flex-wrap">
         <Badge variant={meta.variant} className="gap-1">
           <Icon className="w-3 h-3" />
@@ -100,15 +102,8 @@ export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled,
         </div>
       )}
 
-      {snapshot !== undefined && snapshot !== null && (
-        <div className="space-y-2">
-          <p className="text-xs font-semibold text-secondary uppercase tracking-wide">Configuration</p>
-          <ConfigView snapshot={snapshot} />
-        </div>
-      )}
-
       {onRestore && (
-        <div className="flex items-center justify-end pt-1">
+        <div className="flex items-center justify-end">
           <button
             type="button"
             onClick={onRestore}
@@ -121,6 +116,14 @@ export function VersionDetailPanel({ detail, onClose, onRestore, restoreEnabled,
             <RotateCcw className="w-4 h-4" />
             {restoring ? 'Restoring…' : 'Restore this version'}
           </button>
+        </div>
+      )}
+      </header>
+
+      {snapshot !== undefined && snapshot !== null && (
+        <div className="min-h-0 flex-1 overflow-auto p-4 space-y-2">
+          <p className="text-xs font-semibold text-secondary uppercase tracking-wide">Configuration</p>
+          <ConfigView snapshot={snapshot} />
         </div>
       )}
     </section>

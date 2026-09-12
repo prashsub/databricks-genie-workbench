@@ -297,8 +297,10 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
             </div>
           )}
 
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,380px)] lg:items-start">
-            <div className="rounded-xl border border-default bg-surface p-4">
+          {/* Master–detail: narrow versions rail (left) + wide detail (right). Each pane
+              scrolls on its own at lg+; below lg they stack and the page scrolls. */}
+          <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)] lg:items-start">
+            <div className="rounded-xl border border-default bg-surface p-3 lg:h-[70vh] lg:overflow-auto">
               <History
                 page={page}
                 loading={loading || syncing}
@@ -310,14 +312,14 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
               />
             </div>
 
-            <div ref={detailRef} className="min-w-0 lg:sticky lg:top-4">
+            <div ref={detailRef} className="min-w-0 lg:h-[70vh]">
               {detailError && (
                 <div role="alert" className="text-sm rounded-lg border border-red-500/30 bg-red-500/10 text-red-400 px-3 py-2">
                   {detailError}
                 </div>
               )}
               {detail ? (
-                <div className={detailLoading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+                <div className={cn('h-full', detailLoading ? 'opacity-60 transition-opacity' : 'transition-opacity')}>
                   <VersionDetailPanel
                     detail={detail}
                     isCurrent={detail.version_id === page.items[0]?.version_id}
@@ -328,7 +330,7 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
                   />
                 </div>
               ) : !detailError && (
-                <div className="rounded-xl border border-dashed border-default bg-surface p-6 text-center text-sm text-muted">
+                <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-default bg-surface p-6 text-center text-sm text-muted">
                   {detailLoading ? 'Loading version…' : 'Select a version to inspect its configuration and restore it.'}
                 </div>
               )}

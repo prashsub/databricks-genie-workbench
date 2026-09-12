@@ -156,9 +156,9 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
               const right = firstText(asObject(join.right), ['identifier', 'alias'])
               const sql = asArray(join.sql).map(text).filter(Boolean).join('\n') || firstText(join, ['sql'])
               return (
-                <div key={index} className={`${box} space-y-1`}>
-                  <p className="text-xs text-secondary">{left && right ? `${left} ⋈ ${right}` : firstText(join, ['id']) || `Join ${index + 1}`}</p>
-                  {firstText(join, ['comment', 'instruction']) && <p className="text-xs text-muted">{firstText(join, ['comment', 'instruction'])}</p>}
+                <div key={index} className={`${box} space-y-1 min-w-0`}>
+                  <p className="text-xs text-secondary break-all">{left && right ? `${left} ⋈ ${right}` : firstText(join, ['id']) || `Join ${index + 1}`}</p>
+                  {firstText(join, ['comment', 'instruction']) && <p className="text-xs text-muted break-words">{firstText(join, ['comment', 'instruction'])}</p>}
                   {sql && <SqlCodeBlock code={sql} maxLines={6} />}
                 </div>
               )

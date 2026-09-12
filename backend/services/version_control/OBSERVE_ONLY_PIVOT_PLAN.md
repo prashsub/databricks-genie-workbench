@@ -505,13 +505,14 @@ inverse of today's layout and directly fixes #2/#3.
   `SpaceVersionControlTab.tsx`, Slice D folded in (`version-format.ts` `workbench` →
   "Auto-captured", header auto-capture copy, softer empty state). Tests:
   `SpaceVersionControlTab.test.tsx`.
-- **Slice B — layout inversion + overflow (fixes #2 & #3).** Flip to
-  `grid-cols-[300px_minmax(0,1fr)]`: narrow versions rail left, wide detail right. Detail =
-  **sticky header** (origin badge, short id/copy, captured time, actor, fingerprints,
-  lineage, Restore) over a **scrollable body** (sectioned `ConfigView`). Two-pane full-height
-  with each pane scrolling on its own; page no longer scrolls. Add `break-all`/`min-w-0` to
-  join identifiers; keep `SqlCodeBlock` horizontal scroll (comfortable at width). Stack below
-  `lg`.
+- **Slice B — layout inversion + overflow (fixes #2 & #3). LANDED.** Flipped to
+  `lg:grid-cols-[320px_minmax(0,1fr)]`: narrow versions rail left, wide detail right. Detail
+  (`version-detail-panel.tsx`) is now `flex h-full flex-col` — a `shrink-0` header (origin
+  badge, short id/copy, captured time, actor, fingerprints, lineage, Restore) over a
+  `flex-1 min-h-0 overflow-auto` body (sectioned `ConfigView`). Both panes `lg:h-[70vh]` and
+  scroll on their own; stack below `lg`. Join identifiers got `break-all`/`min-w-0`
+  (`config-view.tsx`) to kill the overflow. `SqlCodeBlock` keeps its horizontal scroll
+  (comfortable at the new width).
 - **Slice C — multi-select compare in the rail (fixes #4).** Checkbox per rail row; a compare
   tray appears when exactly 2 are picked ("Compare 2 versions"), >2 capped. Single-click
   still opens detail; checkboxes drive compare (avoids click-nav vs multi-select ambiguity —
