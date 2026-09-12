@@ -1,14 +1,17 @@
 """Delta-backed immutable version ledger (M02).
 
-Parameter-bound SQL over the target-owned `genie_space_versions` table plus the
-`vc_snapshots` Volume; M08 supplies the explicitly target-authenticated SQL and
-artifact adapters. This adapter is fail-closed and append-only:
+Parameter-bound SQL over the target-owned `genie_space_versions` table; M08
+supplies the explicitly target-authenticated SQL adapter. A read-only artifact
+adapter is retained solely to resolve legacy envelope pointers. This adapter is
+fail-closed and append-only:
 
 * `append_observation` never treats a submitted desired payload as an
   observation — only a `Snapshot` produced by the canonicalizer from a real GET
   envelope is durable.
-* A large response envelope is published to the Volume and its digest verified
-  by read-back *before* the pointer row is inserted (crash-safe ordering).
+* The response envelope is stored inline in Delta (CUJ-1 mimics the optimizer);
+  the write path never forks to a Volume. An envelope over the inline guard is a
+  loud, explicit failure, never a silent divert. See
+  OBSERVE_ONLY_PIVOT_PLAN.md §16.
 * Idempotency is keyed on the caller's `observation_key`, not a content hash: an
   A→B→A history retains the final A, an exact adjacent re-read reuses the prior
   version, and a lost INSERT response resolves by re-reading the same key.
@@ -38,6 +41,14 @@ from backend.services.version_control.contracts import (
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _ENVELOPE_DOMAIN = "vc-envelope/1"
+
+# CUJ-1 stores the whole config inline in Delta. The binding constraint is the
+# SQL Statement Execution API request budget (~16 MiB max query text), not Delta
+# storage; one INSERT carries ~3 large JSON copies (envelope + canonical_state +
+# serialized_space), so we guard the dominant payload (the envelope) at ~1/3 of
+# the budget with headroom. This is a defensive tripwire — a real Genie config is
+# 5–300 KB, orders of magnitude below it. See OBSERVE_ONLY_PIVOT_PLAN.md §16.
+_INLINE_ENVELOPE_GUARD_BYTES = 4 * 1024 * 1024
 
 # Timestamp columns are bound as ISO-8601 strings and cast target-side so the
 # adapter never depends on a particular driver's datetime binding.
@@ -80,7 +91,7 @@ def _iso(value):
 class DeltaVersionLedger:
     def __init__(self, sql, catalog, control_schema, target_workspace_id, *,
                  write_artifact=None, read_artifact=None, writes_enabled=False,
-                 new_version_id=None, inline_max_bytes=32768):
+                 new_version_id=None, inline_max_bytes=_INLINE_ENVELOPE_GUARD_BYTES):
         if any(not _IDENTIFIER.fullmatch(name) for name in (catalog, control_schema)):
             raise ValueError("Invalid control catalog or schema identifier")
         self.sql = sql
@@ -124,18 +135,18 @@ class DeltaVersionLedger:
         return self._reference(version_id, binding, snapshot)
 
     def _publish_envelope(self, snapshot: Snapshot):
+        # CUJ-1 stores the envelope inline in Delta and never forks to a Volume.
+        # Oversize is a loud, explicit failure — never a silent divert. The read
+        # path still resolves legacy `_uri` pointers; nothing here writes one.
         encoded = _compact(snapshot.response_envelope).encode("utf-8")
-        if len(encoded) <= self.inline_max_bytes:
-            return encoded.decode("utf-8"), None
-        if self.write_artifact is None or self.read_artifact is None:
-            raise PermissionError("Snapshot Volume adapter unavailable for large envelope")
-        relative = f"envelopes/sha256/{snapshot.response_envelope_digest}.json"
-        self.write_artifact(relative, encoded)
-        # Publish the pointer only after a digest-verified read-back.
-        committed = self.read_artifact(relative)
-        if not isinstance(committed, bytes) or self._envelope_digest(committed) != snapshot.response_envelope_digest:
-            raise ValueError("Snapshot envelope integrity failure on read-back")
-        return None, self.volume_prefix + relative
+        if len(encoded) > self.inline_max_bytes:
+            raise ValueError(
+                "Genie space config too large to version inline: response envelope is "
+                f"{len(encoded)} bytes, over the {self.inline_max_bytes}-byte inline guard "
+                f"(digest {snapshot.response_envelope_digest}). This guard is a defensive "
+                "tripwire; a real config is orders of magnitude smaller, so investigate the "
+                "space rather than raising the guard.")
+        return encoded.decode("utf-8"), None
 
     @staticmethod
     def _envelope_digest(content: bytes) -> str:

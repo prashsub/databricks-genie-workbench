@@ -19,6 +19,7 @@ from backend.services.version_control.contracts import (
     Origin,
 )
 from backend.services.version_control.ledger import (
+    _INLINE_ENVELOPE_GUARD_BYTES,
     AmbiguousVersions,
     DeltaVersionLedger,
 )
@@ -103,7 +104,8 @@ class FakeVolume:
         return self.files[relative]
 
 
-def make_ledger(sql=None, *, enabled=True, volume=None, inline_max_bytes=32768, ids=None):
+def make_ledger(sql=None, *, enabled=True, volume=None,
+                inline_max_bytes=_INLINE_ENVELOPE_GUARD_BYTES, ids=None):
     sql = sql or FakeVersionsSql()
     counter = iter(ids) if ids is not None else None
     ledger = DeltaVersionLedger(
@@ -181,38 +183,31 @@ def test_workspace_guard_rejects_foreign_binding_and_actor():
     assert sql.rows == []
 
 
-def test_large_envelope_published_to_volume_with_digest_verify_before_pointer():
+def test_large_envelope_inlines_without_volume():
+    # A config well over the old 32 KB cap (the exact nonprod regression) now
+    # writes inline, never diverting to a Volume — CUJ-1 mimics the optimizer.
     volume = FakeVolume()
-    ledger, sql = make_ledger(volume=volume, inline_max_bytes=0, ids=[uid(1)])
-    ref = ledger.append_observation(SNAP_A, ctx("k1"))
+    big = CANON.observe(envelope("x" * 40000))
+    ledger, sql = make_ledger(volume=volume, ids=[uid(1)])
+    ref = ledger.append_observation(big, ctx("k1"))
     row = sql.rows[0]
-    assert row["response_envelope_json"] is None
-    assert row["response_envelope_uri"].startswith("/Volumes/cat/control/vc_snapshots/envelopes/sha256/")
-    assert volume.files  # artifact was uploaded
+    assert row["response_envelope_uri"] is None
+    assert row["response_envelope_json"] is not None
+    assert len(row["response_envelope_json"].encode("utf-8")) > 32768  # over the old cap
+    assert volume.files == {}  # no Volume was touched
     restored = ledger.get_version(binding_fixture(), ref.version_id)
-    assert restored.snapshot.response_envelope == SNAP_A.response_envelope
+    assert restored.snapshot.response_envelope == big.response_envelope
 
 
-def test_volume_tampering_is_detected_on_read_and_before_pointer():
+def test_envelope_over_inline_guard_raises_loud_error_without_volume():
+    # Over the guard is a loud, explicit failure — never a silent Volume divert.
     volume = FakeVolume()
-    ledger, _ = make_ledger(volume=volume, inline_max_bytes=0, ids=[uid(1)])
-    ref = ledger.append_observation(SNAP_A, ctx("k1"))
-    # Corrupt the durable artifact after the fact: reads must fail closed.
-    (relative,) = volume.files.keys()
-    volume.files[relative] = b'{"envelope":{"tampered":true}}'
-    with pytest.raises(ValueError, match="integrity"):
-        ledger.get_version(binding_fixture(), ref.version_id)
-
-    # A read-back that does not match the promised digest blocks the pointer.
-    class BadVolume(FakeVolume):
-        def read(self, relative):
-            return b'{"envelope":{"nope":1}}'
-
-    bad = BadVolume()
-    blocked, blocked_sql = make_ledger(volume=bad, inline_max_bytes=0, ids=[uid(2)])
-    with pytest.raises(ValueError, match="integrity"):
-        blocked.append_observation(SNAP_A, ctx("k1"))
-    assert blocked_sql.rows == []
+    big = CANON.observe(envelope("x" * 40000))
+    ledger, sql = make_ledger(volume=volume, inline_max_bytes=1024, ids=[uid(1)])
+    with pytest.raises(ValueError, match="too large to version inline"):
+        ledger.append_observation(big, ctx("k1"))
+    assert sql.rows == []
+    assert volume.files == {}
 
 
 def test_history_pagination_is_stable_across_cursor():

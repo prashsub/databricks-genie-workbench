@@ -320,3 +320,140 @@ e. `/trigger` enroll + capture-before/after (both) + offline tests with fakes.
 f. Frontend de-mock + route/body fixes + SpaceDetail tab.
 g. (Step 7) deploy to nonprod: provision versions table/Volume, set flags + SP, validate
    one optimizer run writes before+after versions and restore works.
+
+## 16. CUJ-1 persistence: inline-Delta, size-guarded, no Volumes
+
+**Status:** Decided (design) · **Supersedes:** the Volume-fork path in §15.1 / §15.2 /
+§15.5g for the CUJ-1 (in-workspace history + restore) surface.
+
+### 16.1 Decision
+
+Scope the persistence design to **CUJ-1 only** (in-workspace capture / history / restore).
+CUJ-2 (cross-workspace promotion) may be deprecated, so it does not get a vote in this
+design. For CUJ-1 we **mimic the optimizer**: store the whole Genie config **inline in the
+Delta `genie_space_versions` table** and **remove the UC Volume fork entirely**. When a
+config is ever too large to write inline, fail **loudly** with an explicit error — never
+silently divert to a Volume. One write path, one atomic `INSERT`, no second storage system.
+
+Rationale: the optimizer (GSO) already proves the inline pattern at the same payload scale —
+it stores full configs as plain Delta `STRING` columns (`config_snapshot`,
+`config_json`, `observed_config_json` in `optimization/ddl.py`) with no Volume and no size
+cap. The ledger's own row is already 95% inline: `serialized_space_json`,
+`canonical_state_json`, and `restorable_metadata_json` are inline `STRING` today
+(`ledger.py:167-173`). Only the raw `response_envelope` is subject to the 32 KB cap
+(`ledger.py:82` `inline_max_bytes=32768`) and forks to `/Volumes/.../vc_snapshots/`
+(`ledger.py:126-138`). That fork is the sole reason CUJ-1 needs a Volume — and it is the
+exact step that failed in nonprod (see §16.6).
+
+### 16.2 Column type — keep `STRING`, do not switch to `VARIANT`
+
+All payload columns are `STRING` today (`01-versions.sql:21-27`) and stay `STRING`.
+
+| Option | Per-value ceiling | Fit for the ledger |
+|---|---|---|
+| `STRING` (current) | Arbitrary length; practically bounded only by Spark's ~2 GB single-value ceiling | **Chosen** — matches the optimizer; compresses well; no query restrictions |
+| `VARIANT` | Hard **16 MiB** (128 MiB only on DBR ≥17.1) → `VARIANT_SIZE_LIMIT` error | Rejected — hard cliff **and** can't `GROUP BY`/`ORDER BY`/`DISTINCT`/set-op/partition/cluster on it |
+
+`VARIANT`'s only advantage is native `:`/path querying inside the JSON — which we don't
+need, because everything we filter or dedupe on is already extracted into typed sidecar
+columns (`config_fingerprint`, `state_digest`, `origin`, `response_envelope_digest`, …).
+Refs: [VARIANT limitations](https://docs.databricks.com/aws/en/tables/features/variant),
+[VARIANT_SIZE_LIMIT report](https://community.databricks.com/t5/data-engineering/variant-size-limit-cannot-build-variant-bigger-than-16-0-mib-in/td-p/133563).
+
+### 16.3 The real ceiling is the write path, not Delta storage — the 16 MiB anchor
+
+The app has no Spark; it writes via the **SQL Statement Execution API**
+(`POST /api/2.0/sql/statements`, `platform/live_seams.py`), passing each JSON payload as a
+**bound parameter**, not spliced into SQL text. So the binding constraint is the API request,
+not the Delta cell:
+
+| Limit | Value | Binds CUJ-1? |
+|---|---|---|
+| Delta `STRING` cell | ~2 GB (Spark) | No — orders of magnitude above any config |
+| `VARIANT` value | 16 MiB (128 MiB on DBR ≥17.1) | Only if we used VARIANT (we don't) |
+| **SQL Statement Execution API** | **"maximum query text size is 16 MiB"**; ≤256 bound params | **Yes — the real one** |
+
+The **16 MiB** figure is the non-arbitrary anchor (it happens to coincide with the legacy
+VARIANT cap). Source:
+[Execute a SQL statement — API reference](https://docs.databricks.com/api/workspace/statementexecution/executestatement).
+Note the 25 MiB / 100 GiB numbers in that doc are **result-set** limits (reads), not write
+limits.
+
+### 16.4 Derived size-guard (replaces the 32 KB Volume trigger)
+
+Replace `inline_max_bytes=32768`-and-fork with a **loud tripwire** derived from the 16 MiB
+request budget, divided by the number of large JSON copies one `INSERT` carries:
+
+- **Variant A — always inline the envelope (recommended now):** one row binds 3 large JSON
+  params (`serialized_space_json` + `canonical_state_json` + `response_envelope_json`) plus
+  `restorable_metadata_json`. Guard ≈ 16 MiB ÷ ~3 − overhead ≈ **~4–5 MiB per config**.
+  Smallest change: schema and read path are untouched; the `envelope_present` CHECK
+  (`01-versions.sql:44`) is satisfied because `response_envelope_json` is non-null and
+  `response_envelope_uri` is null.
+- **Variant B — stop persisting the raw envelope (optional later):** keep only
+  `response_envelope_digest`; store 2 large copies. Guard rises to **~7 MiB**. Requires a
+  Snapshot-contract + read-path change and dropping/relaxing the `envelope_present` CHECK.
+
+The guard is a **defensive tripwire, not an operating limit.** Genie's own validity rules
+(`schema.md:207-213`: ≤100 instructions, individual strings ≤25,000 chars, array items
+≤10,000) cap a realistic config at **5–50 KB typical, 50–300 KB for a large space** — 1–2
+orders of magnitude below the guard. If the guard ever trips, that is a signal (a malformed
+or pathological config), and the right response is a clear error, not a silent Volume divert.
+
+### 16.5 On-disk footprint
+
+Two distinct numbers: **logical** (`octet_length(...)`, what counts against the 16 MiB
+request budget) vs **on-disk** (Delta/Parquet, Snappy/ZSTD). Genie config JSON is highly
+repetitive, so on-disk is typically **3–10× smaller** than the raw JSON (a 100 KB config is
+~10–30 KB on disk). Storage is a non-concern; only the write-request size is worth guarding.
+Measure with:
+```sql
+SELECT version_id,
+       octet_length(serialized_space_json)  AS ss_bytes,
+       octet_length(canonical_state_json)   AS canon_bytes,
+       octet_length(response_envelope_json) AS env_bytes,
+       response_envelope_uri
+FROM   `${catalog}`.`${control_schema}`.`genie_space_versions`
+ORDER BY observed_at DESC LIMIT 25;
+```
+
+### 16.6 Concrete changes (when implemented — one PLAN→VERIFY slice)
+
+1. `ledger.py:126-138` — replace `_publish_envelope`'s Volume fork with a size-guard: encode
+   the envelope, and if it exceeds the guard, raise a loud `ValueError` naming the space and
+   the measured/allowed bytes; otherwise return `(inline_json, None)`. Never call
+   `write_artifact`/`read_artifact` on the CUJ-1 path.
+2. `ledger.py:80-96` — retire `inline_max_bytes=32768`; introduce the guard constant
+   (~4–5 MiB, Variant A). Stop constructing `volume_prefix` for CUJ-1; drop the
+   `write_artifact`/`read_artifact` seams from the CUJ-1 wiring
+   (`platform/observe_seams.py:169-173`).
+3. Add a ledger test: an envelope **> 32 KB** round-trips **inline** with no `write_artifact`
+   call; an envelope **> guard** raises the loud error.
+4. Refresh live-claim comments and the `vc_snapshots` mentions in this doc (§15.1, §15.2 #1,
+   §15.5g) and in `scripts/version_control/provision_observe_nonprod.py`; decide whether to
+   drop `vc_snapshots` Volume provisioning for a CUJ-1-only deploy.
+5. Fixes the nonprod failure directly: the Aircraft agent's `response_envelope` exceeded the
+   32 KB cap → Volume fork → `write_artifact` wrote a **relative** (non-`/Volumes/`) path
+   (`ledger.py:132`) → `files.upload` failed, masked by an SDK logger bug (`len(BytesIO)`).
+   Removing the fork removes both the relative-path bug and the SDK-logger crash for CUJ-1.
+
+### 16.6.1 Landed (Variant A slice)
+
+`_publish_envelope` now always inlines the envelope and raises a loud
+`ValueError` above a `_INLINE_ENVELOPE_GUARD_BYTES = 4 MiB` guard
+(`ledger.py`); the default `inline_max_bytes` moved from 32 KB to that guard. The
+two Volume-fork ledger tests were replaced by an inline-over-32-KB regression
+test and a loud-guard test (`test_vc_ledger.py`). Schema and the `_response_envelope`
+read path are untouched; `write_artifact`/`read_artifact`/`volume_prefix` remain on
+the ledger (dormant on the write path, still serving legacy `_uri` reads).
+**Deferred** to a follow-up slice (kept out to minimise this diff): dropping the
+now-unused artifact seams from the CUJ-1 wiring (`observe_seams.py:169-173`) and
+removing `vc_snapshots` Volume provisioning
+(`scripts/version_control/provision_observe_nonprod.py`) for a CUJ-1-only deploy.
+
+### 16.7 CUJ-2 note
+
+If cross-workspace promotion is kept, its large-artifact handling (`promotion/store.py`,
+`releases.py` absolute `/Volumes/...` paths) is a **separate** path and may retain a Volume —
+but it must not be reached from the CUJ-1 capture/restore code. This decision governs CUJ-1
+inline persistence only.
