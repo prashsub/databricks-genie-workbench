@@ -75,16 +75,20 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
   // (the slow step is the OBO live GET of the Genie space). The history read below remains
   // the source of truth for what renders.
   const syncOnOpen = useCallback(async () => {
+    // Paint the persisted history immediately — the fast read is the source of truth for
+    // what renders. The observe below is the slow step (an OBO live GET of the Genie space);
+    // it runs in the background and appends a new version only if the live config drifted.
+    await load()
     setSyncing(true)
     setNotice(null)
     try {
       setNotice(describeObservation(await api.spaceObserve(spaceId, crypto.randomUUID())))
+      await load()
     } catch (err) {
       setNotice(describeCaptureError(err))
     } finally {
       setSyncing(false)
     }
-    await load()
   }, [spaceId, load])
 
   useEffect(() => {
@@ -334,7 +338,7 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
             <div className="rounded-xl border border-default bg-surface p-3 lg:h-[70vh] lg:overflow-auto">
               <History
                 page={page}
-                loading={loading || syncing}
+                loading={loading}
                 selectedId={selectedId}
                 currentId={page.items[0]?.version_id ?? null}
                 onNext={() => { if (page.next_cursor) void load(page.next_cursor) }}
