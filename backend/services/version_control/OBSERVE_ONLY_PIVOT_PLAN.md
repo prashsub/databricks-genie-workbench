@@ -530,3 +530,57 @@ inverse of today's layout and directly fixes #2/#3.
   insufficient. **Not chosen now.**
 
 **Suggested order:** A → B → C, D folded into A. Recommended when implementation resumes.
+
+---
+
+## 18. ConfigView redesign — navigable, clearly-labeled Genie config
+
+The right-pane `ConfigView` (`frontend/src/components/version-control/config-view.tsx`,
+rendered by `version-detail-panel.tsx`) is the surface a reviewer reads to understand a
+captured version. Today it stacks a few flat sections; for a real space (e.g. the airline
+demo: 7 data sources, ~20 columns each) it becomes a wall of text. Authoritative shape:
+`backend/references/schema.md` (serialized_space v2).
+
+**Problems (grounded in current code):**
+- Tables and metric views are merged and unlabeled (`config-view.tsx` `[...tables,
+  ...metricViews].map`).
+- Columns are always a flat inline list with none of the schema's per-column metadata
+  (`synonyms`, `exclude`, `enable_entity_matching`, `enable_format_assistance`,
+  `get_example_values`, `build_value_dictionary`).
+- Distinct concepts collapse into one "Sample SQL" bucket (example SQLs + expressions +
+  measures + sql_functions); example SQL `parameters`/`usage_guidance` are dropped.
+- Instructions are a raw `<pre>`; join `--rt=…--` relationship annotations leak into the SQL
+  body; `benchmarks.questions` are not surfaced; there is no in-config navigation.
+
+**Nuance:** in serialized_space a metric view is a data source referenced by `identifier` +
+`column_configs` (its dimensions/measures surface as columns). Space-level
+measures/filters/expressions live under `instructions.sql_snippets`, NOT inside the metric
+view — so "Metric views" is labeled distinctly but its body still shows columns; Measures is
+a separate section.
+
+**UI direction (researched):** schema-browser tree + progressive disclosure (VS Code
+Explorer, DBeaver, UC schema browser) for entities→columns; detail-on-the-side peek
+drawer/popover (Linear/Notion) for a column's full metadata; anchored TOC / jump-nav (docs
+sites, Stripe API ref) for navigation; attribute badges + tooltips for booleans. Prefer
+stacked sections + jump-nav over tabs for a *review* surface. Reuse existing primitives:
+`ui/accordion.tsx` (`AccordionItem`), `ui/collapsible.tsx`, `ui/tabs.tsx`, `ui/tooltip.tsx`,
+`ui/table.tsx`, `ui/badge.tsx`, `SqlCodeBlock`. Keep the `unknown`-safe reads
+(`asObject`/`asArray`/`text`), empty-section omission, unknown-key "Other", and raw-JSON
+disclosure.
+
+**Slices (each PLAN → VERIFY → commit):**
+- **Slice 1 — split & label (this slice).** Separate **Tables** and **Metric views**; break
+  "Sample SQL" into **Measures**, **Expressions**, **Filters**, **SQL functions**, and
+  **Example SQL** (with `parameters` + `usage_guidance`); add **Benchmarks**
+  (`benchmarks.questions` + expected SQL answer); surface `sample_questions` from
+  `config.sample_questions` too. Snippet sections show `synonyms`/`instruction`/`comment`.
+  Columns stay flat for now. Pure restructuring, lowest risk. Tests extend
+  `config-view.test.tsx` with a full schema-shaped fixture.
+- **Slice 2 — collapsible entities + column table + attribute badges + column peek.** Data
+  source entities become collapsible cards (name/description/column-count/quick-stats);
+  columns render as a compact table with attribute badges + tooltips; clicking a column
+  opens a side peek with the full `column_config`.
+- **Slice 3 — in-config section nav.** Sticky section index / two-column at `xl`, chip bar or
+  jump dropdown below; anchors scroll-to.
+- **Slice 4 (polish).** Parse GSL instruction headers (## PURPOSE / DISAMBIGUATION / …) into
+  headings; relationship-type badge from `--rt=…--`.

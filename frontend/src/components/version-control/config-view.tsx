@@ -1,11 +1,12 @@
 import { SqlCodeBlock } from '@/components/SqlCodeBlock'
 
-// A structured, human-readable view of a version's serialized_space (Genie schema v2:
-// data_sources.{tables,metric_views}[].column_configs, instructions.{text_instructions,
-// example_question_sqls, join_specs, sql_snippets.{filters,expressions,measures},
-// sql_functions}). The snapshot type is `unknown`, so every read is defensive: unknown
-// keys are preserved under "Other", empty sections are omitted, and the raw JSON stays
-// available behind a disclosure for power users.
+// A structured, human-readable view of a version's serialized_space (Genie schema v2). Each
+// schema concept gets its own clearly-labeled section: data_sources split into Tables and
+// Metric views; instructions.{text_instructions, join_specs, sql_snippets.{measures,
+// expressions, filters}, sql_functions, example_question_sqls}; sample_questions
+// (config/root); and benchmarks.questions. The snapshot type is `unknown`, so every read is
+// defensive: unknown keys are preserved under "Other", empty sections are omitted, and the
+// raw JSON stays available behind a disclosure for power users.
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -44,6 +45,8 @@ function instructionText(value: unknown): string {
   return text(value)
 }
 
+const box = 'rounded-md border border-default bg-surface p-2'
+
 function Section({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
@@ -55,12 +58,107 @@ function Section({ title, count, children }: { title: string; count?: number; ch
   )
 }
 
+// One table / metric view: identifier, description, and its column list (flat for now —
+// Slice 2 turns this into a collapsible tree with per-column attribute badges).
+function DataSourceCard({ entry, index }: { entry: unknown; index: number }) {
+  const table = asObject(entry)
+  const columns = asArray(table.column_configs)
+  return (
+    <div className={box}>
+      <p className="font-mono text-xs text-secondary break-all">{firstText(table, ['identifier', 'table', 'name']) || `Data source ${index + 1}`}</p>
+      {firstText(table, ['description']) && <p className="mt-0.5 text-xs text-muted break-words">{firstText(table, ['description'])}</p>}
+      {columns.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5">
+          {columns.map((column, ci) => {
+            const col = asObject(column)
+            const description = firstText(col, ['description'])
+            return (
+              <li key={ci} className="text-xs text-muted break-words">
+                <span className="font-mono text-secondary break-all">{firstText(col, ['column_name', 'name'])}</span>
+                {description ? ` — ${description}` : ''}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// A sql_snippet (measure / expression / filter): label, SQL, and its optional API metadata
+// (synonyms, instruction, comment).
 function SqlEntry({ record, index, labelKeys }: { record: Record<string, unknown>; index: number; labelKeys: string[] }) {
   const label = firstText(record, labelKeys) || `#${index + 1}`
   const sql = firstText(record, ['sql', 'answer', 'query'])
+  const synonyms = asArray(record.synonyms).map(text).filter(Boolean)
+  const instruction = firstText(record, ['instruction'])
+  const comment = firstText(record, ['comment'])
   return (
-    <div className="space-y-1">
+    <div className={`${box} space-y-1`}>
       <p className="text-xs text-secondary break-words">{label}</p>
+      {sql ? <SqlCodeBlock code={sql} maxLines={8} /> : null}
+      {synonyms.length > 0 && <p className="text-xs text-muted break-words">Synonyms: {synonyms.join(', ')}</p>}
+      {instruction && <p className="text-xs text-muted break-words">{instruction}</p>}
+      {comment && <p className="text-xs text-muted break-words">{comment}</p>}
+    </div>
+  )
+}
+
+// An example_question_sqls entry: question, SQL, bound parameters, and usage guidance.
+function ExampleSqlEntry({ record, index }: { record: Record<string, unknown>; index: number }) {
+  const question = firstText(record, ['question', 'display_name', 'id']) || `#${index + 1}`
+  const sql = firstText(record, ['sql'])
+  const parameters = asArray(record.parameters)
+  const usage = firstText(record, ['usage_guidance'])
+  return (
+    <div className={`${box} space-y-1`}>
+      <p className="text-xs text-secondary break-words">{question}</p>
+      {sql ? <SqlCodeBlock code={sql} maxLines={8} /> : null}
+      {parameters.length > 0 && (
+        <div className="space-y-0.5">
+          <p className="text-[11px] uppercase tracking-wide text-muted">Parameters</p>
+          {parameters.map((param, pi) => {
+            const p = asObject(param)
+            const name = firstText(p, ['name'])
+            const typeHint = firstText(p, ['type_hint', 'type'])
+            const desc = firstText(p, ['description'])
+            const def = firstText(asObject(p.default_value), ['values']) || firstText(p, ['default_value'])
+            return (
+              <p key={pi} className="text-xs text-muted break-words">
+                <span className="font-mono text-secondary break-all">{name}</span>
+                {typeHint ? ` · ${typeHint}` : ''}
+                {desc ? ` — ${desc}` : ''}
+                {def ? ` (default: ${def})` : ''}
+              </p>
+            )
+          })}
+        </div>
+      )}
+      {usage && <p className="text-xs text-muted break-words">Usage: {usage}</p>}
+    </div>
+  )
+}
+
+// A sql_functions entry: UC identifier + description (no SQL body in the config).
+function FunctionEntry({ record, index }: { record: Record<string, unknown>; index: number }) {
+  const identifier = firstText(record, ['identifier', 'name', 'id']) || `#${index + 1}`
+  const description = firstText(record, ['description'])
+  return (
+    <div className={`${box} space-y-0.5`}>
+      <p className="font-mono text-xs text-secondary break-all">{identifier}</p>
+      {description && <p className="text-xs text-muted break-words">{description}</p>}
+    </div>
+  )
+}
+
+// A benchmarks.questions entry: the evaluation question + its expected SQL answer.
+function BenchmarkEntry({ record, index }: { record: Record<string, unknown>; index: number }) {
+  const question = firstText(record, ['question', 'id']) || `#${index + 1}`
+  const answer = asObject(asArray(record.answer)[0])
+  const sql = firstText(answer, ['content', 'sql'])
+  return (
+    <div className={`${box} space-y-1`}>
+      <p className="text-xs text-secondary break-words">{question}</p>
       {sql ? <SqlCodeBlock code={sql} maxLines={8} /> : null}
     </div>
   )
@@ -85,52 +183,39 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
   const sqlFunctions = asArray(instructions.sql_functions)
   const sampleQuestions = (asArray(root.sample_questions).length
     ? asArray(root.sample_questions)
-    : asArray(instructions.sample_questions))
+    : asArray(instructions.sample_questions).length
+      ? asArray(instructions.sample_questions)
+      : asArray(asObject(root.config).sample_questions))
+  const benchmarkQuestions = asArray(asObject(root.benchmarks).questions)
 
   const metadataEntries = Object.entries(root).filter(
     ([key, value]) =>
-      !['data_sources', 'instructions', 'text_instructions', 'sample_questions'].includes(key) &&
+      !['data_sources', 'instructions', 'text_instructions', 'sample_questions', 'config', 'benchmarks'].includes(key) &&
       (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'),
   )
-  const handled = new Set(['data_sources', 'instructions', 'text_instructions', 'sample_questions', ...metadataEntries.map(([key]) => key)])
+  const handled = new Set(['data_sources', 'instructions', 'text_instructions', 'sample_questions', 'config', 'benchmarks', ...metadataEntries.map(([key]) => key)])
   const otherEntries = Object.entries(root).filter(([key]) => !handled.has(key))
 
-  const sqlSection = exampleSqls.length + expressions.length + measures.length + sqlFunctions.length
   const hasAnything =
     tables.length || metricViews.length || textInstructions.length || joins.length ||
-    filters.length || sqlSection || sampleQuestions.length || metadataEntries.length || otherEntries.length
-
-  const box = 'rounded-md border border-default bg-surface p-2'
+    measures.length || expressions.length || filters.length || sqlFunctions.length ||
+    exampleSqls.length || sampleQuestions.length || benchmarkQuestions.length ||
+    metadataEntries.length || otherEntries.length
 
   return (
     <div className="space-y-4">
-      {(tables.length > 0 || metricViews.length > 0) && (
-        <Section title="Data sources" count={tables.length + metricViews.length}>
+      {tables.length > 0 && (
+        <Section title="Tables" count={tables.length}>
           <div className="space-y-2">
-            {[...tables, ...metricViews].map((entry, index) => {
-              const table = asObject(entry)
-              const columns = asArray(table.column_configs)
-              return (
-                <div key={index} className={box}>
-                  <p className="font-mono text-xs text-secondary break-all">{firstText(table, ['identifier', 'table', 'name']) || `Table ${index + 1}`}</p>
-                  {firstText(table, ['description']) && <p className="mt-0.5 text-xs text-muted break-words">{firstText(table, ['description'])}</p>}
-                  {columns.length > 0 && (
-                    <ul className="mt-1.5 space-y-0.5">
-                      {columns.map((column, ci) => {
-                        const col = asObject(column)
-                        const description = firstText(col, ['description'])
-                        return (
-                          <li key={ci} className="text-xs text-muted break-words">
-                            <span className="font-mono text-secondary break-all">{firstText(col, ['column_name', 'name'])}</span>
-                            {description ? ` — ${description}` : ''}
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  )}
-                </div>
-              )
-            })}
+            {tables.map((entry, index) => <DataSourceCard key={index} entry={entry} index={index} />)}
+          </div>
+        </Section>
+      )}
+
+      {metricViews.length > 0 && (
+        <Section title="Metric views" count={metricViews.length}>
+          <div className="space-y-2">
+            {metricViews.map((entry, index) => <DataSourceCard key={index} entry={entry} index={index} />)}
           </div>
         </Section>
       )}
@@ -142,6 +227,36 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
               <pre key={index} className={`${box} max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-secondary`}>
                 {instructionText(entry)}
               </pre>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {measures.length > 0 && (
+        <Section title="Measures" count={measures.length}>
+          <div className="space-y-2">
+            {measures.map((entry, index) => (
+              <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'name', 'id']} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {expressions.length > 0 && (
+        <Section title="Expressions" count={expressions.length}>
+          <div className="space-y-2">
+            {expressions.map((entry, index) => (
+              <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'name', 'id']} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {filters.length > 0 && (
+        <Section title="Filters" count={filters.length}>
+          <div className="space-y-2">
+            {filters.map((entry, index) => (
+              <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'id']} />
             ))}
           </div>
         </Section>
@@ -167,24 +282,21 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
         </Section>
       )}
 
-      {filters.length > 0 && (
-        <Section title="Filters" count={filters.length}>
+      {sqlFunctions.length > 0 && (
+        <Section title="SQL functions" count={sqlFunctions.length}>
           <div className="space-y-2">
-            {filters.map((entry, index) => (
-              <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'id']} />
+            {sqlFunctions.map((entry, index) => (
+              <FunctionEntry key={index} record={asObject(entry)} index={index} />
             ))}
           </div>
         </Section>
       )}
 
-      {sqlSection > 0 && (
-        <Section title="Sample SQL" count={sqlSection}>
+      {exampleSqls.length > 0 && (
+        <Section title="Example SQL" count={exampleSqls.length}>
           <div className="space-y-2">
             {exampleSqls.map((entry, index) => (
-              <SqlEntry key={`q${index}`} record={asObject(entry)} index={index} labelKeys={['question', 'display_name', 'id']} />
-            ))}
-            {[...expressions, ...measures, ...sqlFunctions].map((entry, index) => (
-              <SqlEntry key={`e${index}`} record={asObject(entry)} index={index} labelKeys={['display_name', 'name', 'id']} />
+              <ExampleSqlEntry key={index} record={asObject(entry)} index={index} />
             ))}
           </div>
         </Section>
@@ -197,6 +309,16 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
               <li key={index} className="text-xs text-secondary">{firstText(asObject(entry), ['question', 'text']) || text(entry)}</li>
             ))}
           </ul>
+        </Section>
+      )}
+
+      {benchmarkQuestions.length > 0 && (
+        <Section title="Benchmarks" count={benchmarkQuestions.length}>
+          <div className="space-y-2">
+            {benchmarkQuestions.map((entry, index) => (
+              <BenchmarkEntry key={index} record={asObject(entry)} index={index} />
+            ))}
+          </div>
         </Section>
       )}
 
