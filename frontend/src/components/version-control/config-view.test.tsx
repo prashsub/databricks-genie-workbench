@@ -58,6 +58,10 @@ it('config_view_renders_friendly_sections_and_preserves_unknowns', () => {
   }
   // The retired conflated bucket is gone.
   expect(html.split('View raw JSON')[0]).not.toContain('Sample SQL')
+  // Jump-nav is present with anchored sections when there is more than one section.
+  expect(html).toContain('aria-label="Config sections"')
+  expect(html).toContain('id="vc-cfg-tables"')
+  expect(html).toContain('id="vc-cfg-benchmarks"')
 })
 
 it('config_view_renders_array_descriptions_as_plain_text', () => {

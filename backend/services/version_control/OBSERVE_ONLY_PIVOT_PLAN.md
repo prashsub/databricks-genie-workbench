@@ -585,7 +585,12 @@ disclosure.
   searchable. The full-detail "column peek" was realized as this in-card expansion (inline
   badges + detail) rather than a separate side drawer — chosen for robustness (no portal/
   overlay); a true side drawer remains an option if deeper per-column metadata is needed.
-- **Slice 3 — in-config section nav.** Sticky section index / two-column at `xl`, chip bar or
-  jump dropdown below; anchors scroll-to.
+- **Slice 3 — in-config section nav. LANDED.** `ConfigView`'s return is now driven by a
+  declarative `defs[]` (the single source of truth for BOTH the nav and the rendered
+  sections, so they cannot drift). A jump-nav (shown only when >1 section) is a wrapping chip
+  bar that becomes a sticky left index in a two-column `xl:grid-cols-[168px_minmax(0,1fr)]`
+  layout; each `Section` carries an `id={vc-cfg-<id>}` and clicking a chip
+  `scrollIntoView`s it (optional-chained for jsdom). Empty state / raw-JSON disclosure
+  unchanged.
 - **Slice 4 (polish).** Parse GSL instruction headers (## PURPOSE / DISAMBIGUATION / …) into
   headings; relationship-type badge from `--rt=…--`.

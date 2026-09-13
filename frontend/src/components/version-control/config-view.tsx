@@ -49,9 +49,9 @@ function instructionText(value: unknown): string {
 
 const box = 'rounded-md border border-default bg-surface p-2'
 
-function Section({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
+function Section({ id, title, count, children }: { id?: string; title: string; count?: number; children: React.ReactNode }) {
   return (
-    <section className="space-y-2">
+    <section id={id} className="space-y-2 scroll-mt-2">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-secondary">
         {title}{typeof count === 'number' ? <span className="ml-1 text-muted">({count})</span> : null}
       </h4>
@@ -237,165 +237,108 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
   const handled = new Set(['data_sources', 'instructions', 'text_instructions', 'sample_questions', 'config', 'benchmarks', ...metadataEntries.map(([key]) => key)])
   const otherEntries = Object.entries(root).filter(([key]) => !handled.has(key))
 
-  const hasAnything =
-    tables.length || metricViews.length || textInstructions.length || joins.length ||
-    measures.length || expressions.length || filters.length || sqlFunctions.length ||
-    exampleSqls.length || sampleQuestions.length || benchmarkQuestions.length ||
-    metadataEntries.length || otherEntries.length
+  // Declarative section list — the single source of truth for BOTH the jump-nav and the
+  // rendered sections, so they can never drift. Only present sections are pushed, in order.
+  type SectionDef = { id: string; label: string; count?: number; node: React.ReactNode }
+  const defs: SectionDef[] = []
+  if (tables.length > 0) defs.push({ id: 'tables', label: 'Tables', count: tables.length, node: (
+    <div className="space-y-2">{tables.map((entry, index) => <DataSourceCard key={index} entry={entry} index={index} />)}</div>
+  ) })
+  if (metricViews.length > 0) defs.push({ id: 'metric-views', label: 'Metric views', count: metricViews.length, node: (
+    <div className="space-y-2">{metricViews.map((entry, index) => <DataSourceCard key={index} entry={entry} index={index} />)}</div>
+  ) })
+  if (textInstructions.length > 0) defs.push({ id: 'instructions', label: 'Instructions', node: (
+    <div className="space-y-2">{textInstructions.map((entry, index) => (
+      <pre key={index} className={`${box} max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-secondary`}>{instructionText(entry)}</pre>
+    ))}</div>
+  ) })
+  if (measures.length > 0) defs.push({ id: 'measures', label: 'Measures', count: measures.length, node: (
+    <div className="space-y-2">{measures.map((entry, index) => <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'name', 'id']} />)}</div>
+  ) })
+  if (expressions.length > 0) defs.push({ id: 'expressions', label: 'Expressions', count: expressions.length, node: (
+    <div className="space-y-2">{expressions.map((entry, index) => <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'name', 'id']} />)}</div>
+  ) })
+  if (filters.length > 0) defs.push({ id: 'filters', label: 'Filters', count: filters.length, node: (
+    <div className="space-y-2">{filters.map((entry, index) => <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'id']} />)}</div>
+  ) })
+  if (joins.length > 0) defs.push({ id: 'joins', label: 'Joins', count: joins.length, node: (
+    <div className="space-y-2">{joins.map((entry, index) => {
+      const join = asObject(entry)
+      const left = firstText(asObject(join.left), ['identifier', 'alias'])
+      const right = firstText(asObject(join.right), ['identifier', 'alias'])
+      const sql = asArray(join.sql).map(text).filter(Boolean).join('\n') || firstText(join, ['sql'])
+      return (
+        <div key={index} className={`${box} space-y-1 min-w-0`}>
+          <p className="text-xs text-secondary break-all">{left && right ? `${left} ⋈ ${right}` : firstText(join, ['id']) || `Join ${index + 1}`}</p>
+          {firstText(join, ['comment', 'instruction']) && <p className="text-xs text-muted break-words">{firstText(join, ['comment', 'instruction'])}</p>}
+          {sql && <SqlCodeBlock code={sql} maxLines={6} />}
+        </div>
+      )
+    })}</div>
+  ) })
+  if (sqlFunctions.length > 0) defs.push({ id: 'sql-functions', label: 'SQL functions', count: sqlFunctions.length, node: (
+    <div className="space-y-2">{sqlFunctions.map((entry, index) => <FunctionEntry key={index} record={asObject(entry)} index={index} />)}</div>
+  ) })
+  if (exampleSqls.length > 0) defs.push({ id: 'example-sql', label: 'Example SQL', count: exampleSqls.length, node: (
+    <div className="space-y-2">{exampleSqls.map((entry, index) => <ExampleSqlEntry key={index} record={asObject(entry)} index={index} />)}</div>
+  ) })
+  if (sampleQuestions.length > 0) defs.push({ id: 'sample-questions', label: 'Sample questions', count: sampleQuestions.length, node: (
+    <ul className="space-y-1">{sampleQuestions.map((entry, index) => (
+      <li key={index} className="text-xs text-secondary">{firstText(asObject(entry), ['question', 'text']) || text(entry)}</li>
+    ))}</ul>
+  ) })
+  if (benchmarkQuestions.length > 0) defs.push({ id: 'benchmarks', label: 'Benchmarks', count: benchmarkQuestions.length, node: (
+    <div className="space-y-2">{benchmarkQuestions.map((entry, index) => <BenchmarkEntry key={index} record={asObject(entry)} index={index} />)}</div>
+  ) })
+  if (metadataEntries.length > 0) defs.push({ id: 'metadata', label: 'Metadata', node: (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">{metadataEntries.map(([key, value]) => (
+      <div key={key} className="contents"><dt className="text-muted">{key}</dt><dd className="text-secondary break-words">{text(value)}</dd></div>
+    ))}</dl>
+  ) })
+  if (otherEntries.length > 0) defs.push({ id: 'other', label: 'Other', node: (
+    <pre className={`${box} max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-muted`}>{JSON.stringify(Object.fromEntries(otherEntries), null, 2)}</pre>
+  ) })
+
+  const showNav = defs.length > 1
+  const scrollToSection = (id: string) => {
+    document.getElementById(`vc-cfg-${id}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  }
 
   return (
-    <div className="space-y-4">
-      {tables.length > 0 && (
-        <Section title="Tables" count={tables.length}>
-          <div className="space-y-2">
-            {tables.map((entry, index) => <DataSourceCard key={index} entry={entry} index={index} />)}
-          </div>
-        </Section>
+    <div className={showNav ? 'xl:grid xl:grid-cols-[168px_minmax(0,1fr)] xl:gap-4' : undefined}>
+      {showNav && (
+        <nav aria-label="Config sections" className="mb-3 flex flex-wrap gap-1.5 xl:mb-0 xl:flex-col xl:flex-nowrap xl:sticky xl:top-0 xl:self-start">
+          {defs.map(d => (
+            <button
+              key={d.id}
+              type="button"
+              onClick={() => scrollToSection(d.id)}
+              className="rounded-md border border-default bg-surface px-2 py-1 text-left text-xs text-secondary hover:bg-surface-secondary transition-colors"
+            >
+              {d.label}{typeof d.count === 'number' ? <span className="ml-1 text-muted">({d.count})</span> : null}
+            </button>
+          ))}
+        </nav>
       )}
 
-      {metricViews.length > 0 && (
-        <Section title="Metric views" count={metricViews.length}>
-          <div className="space-y-2">
-            {metricViews.map((entry, index) => <DataSourceCard key={index} entry={entry} index={index} />)}
-          </div>
-        </Section>
-      )}
+      <div className="space-y-4 min-w-0">
+        {defs.map(d => (
+          <Section key={d.id} id={`vc-cfg-${d.id}`} title={d.label} count={d.count}>{d.node}</Section>
+        ))}
 
-      {textInstructions.length > 0 && (
-        <Section title="Instructions">
-          <div className="space-y-2">
-            {textInstructions.map((entry, index) => (
-              <pre key={index} className={`${box} max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-secondary`}>
-                {instructionText(entry)}
-              </pre>
-            ))}
-          </div>
-        </Section>
-      )}
+        {defs.length === 0 && (
+          <p className="text-xs text-muted">No structured configuration in this snapshot.</p>
+        )}
 
-      {measures.length > 0 && (
-        <Section title="Measures" count={measures.length}>
-          <div className="space-y-2">
-            {measures.map((entry, index) => (
-              <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'name', 'id']} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {expressions.length > 0 && (
-        <Section title="Expressions" count={expressions.length}>
-          <div className="space-y-2">
-            {expressions.map((entry, index) => (
-              <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'name', 'id']} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {filters.length > 0 && (
-        <Section title="Filters" count={filters.length}>
-          <div className="space-y-2">
-            {filters.map((entry, index) => (
-              <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'id']} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {joins.length > 0 && (
-        <Section title="Joins" count={joins.length}>
-          <div className="space-y-2">
-            {joins.map((entry, index) => {
-              const join = asObject(entry)
-              const left = firstText(asObject(join.left), ['identifier', 'alias'])
-              const right = firstText(asObject(join.right), ['identifier', 'alias'])
-              const sql = asArray(join.sql).map(text).filter(Boolean).join('\n') || firstText(join, ['sql'])
-              return (
-                <div key={index} className={`${box} space-y-1 min-w-0`}>
-                  <p className="text-xs text-secondary break-all">{left && right ? `${left} ⋈ ${right}` : firstText(join, ['id']) || `Join ${index + 1}`}</p>
-                  {firstText(join, ['comment', 'instruction']) && <p className="text-xs text-muted break-words">{firstText(join, ['comment', 'instruction'])}</p>}
-                  {sql && <SqlCodeBlock code={sql} maxLines={6} />}
-                </div>
-              )
-            })}
-          </div>
-        </Section>
-      )}
-
-      {sqlFunctions.length > 0 && (
-        <Section title="SQL functions" count={sqlFunctions.length}>
-          <div className="space-y-2">
-            {sqlFunctions.map((entry, index) => (
-              <FunctionEntry key={index} record={asObject(entry)} index={index} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {exampleSqls.length > 0 && (
-        <Section title="Example SQL" count={exampleSqls.length}>
-          <div className="space-y-2">
-            {exampleSqls.map((entry, index) => (
-              <ExampleSqlEntry key={index} record={asObject(entry)} index={index} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {sampleQuestions.length > 0 && (
-        <Section title="Sample questions" count={sampleQuestions.length}>
-          <ul className="space-y-1">
-            {sampleQuestions.map((entry, index) => (
-              <li key={index} className="text-xs text-secondary">{firstText(asObject(entry), ['question', 'text']) || text(entry)}</li>
-            ))}
-          </ul>
-        </Section>
-      )}
-
-      {benchmarkQuestions.length > 0 && (
-        <Section title="Benchmarks" count={benchmarkQuestions.length}>
-          <div className="space-y-2">
-            {benchmarkQuestions.map((entry, index) => (
-              <BenchmarkEntry key={index} record={asObject(entry)} index={index} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {metadataEntries.length > 0 && (
-        <Section title="Metadata">
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-            {metadataEntries.map(([key, value]) => (
-              <div key={key} className="contents">
-                <dt className="text-muted">{key}</dt>
-                <dd className="text-secondary break-words">{text(value)}</dd>
-              </div>
-            ))}
-          </dl>
-        </Section>
-      )}
-
-      {otherEntries.length > 0 && (
-        <Section title="Other">
-          <pre className={`${box} max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-muted`}>
-            {JSON.stringify(Object.fromEntries(otherEntries), null, 2)}
+        <details className="rounded-lg border border-default bg-surface-secondary/40">
+          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-secondary">
+            View raw JSON
+          </summary>
+          <pre className="max-h-80 overflow-auto px-3 pb-3 text-xs text-muted whitespace-pre-wrap break-words">
+            {JSON.stringify(snapshot, null, 2)}
           </pre>
-        </Section>
-      )}
-
-      {!hasAnything && (
-        <p className="text-xs text-muted">No structured configuration in this snapshot.</p>
-      )}
-
-      <details className="rounded-lg border border-default bg-surface-secondary/40">
-        <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-secondary">
-          View raw JSON
-        </summary>
-        <pre className="max-h-80 overflow-auto px-3 pb-3 text-xs text-muted whitespace-pre-wrap break-words">
-          {JSON.stringify(snapshot, null, 2)}
-        </pre>
-      </details>
+        </details>
+      </div>
     </div>
   )
 }
