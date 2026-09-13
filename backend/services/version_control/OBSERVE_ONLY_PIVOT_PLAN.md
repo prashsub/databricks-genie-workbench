@@ -592,5 +592,14 @@ disclosure.
   layout; each `Section` carries an `id={vc-cfg-<id>}` and clicking a chip
   `scrollIntoView`s it (optional-chained for jsdom). Empty state / raw-JSON disclosure
   unchanged.
-- **Slice 4 (polish).** Parse GSL instruction headers (## PURPOSE / DISAMBIGUATION / …) into
-  headings; relationship-type badge from `--rt=…--`.
+- **Slice 4 (join polish) — LANDED.** `config-view.tsx`: `JoinEntry` component renders short
+  table names (mono, full identifier on hover-`title`), the shared `catalog.schema` once, a
+  relationship **badge** lifted from the `--rt=FROM_RELATIONSHIP_TYPE_…--` marker via
+  `parseJoinSql`, and the ON condition as a compact inline snippet (backticks stripped) instead
+  of the oversized `SqlCodeBlock`. The raw `--rt=…--` marker no longer leaks (test asserts
+  `not.toContain('--rt=')` / `'FROM_RELATIONSHIP_TYPE'` on the rendered surface). GSL instruction
+  header parsing (## PURPOSE / DISAMBIGUATION) is **dropped by decision** — parsing the
+  serialized JSON and laying it out is sufficient; instructions stay a faithful `<pre>` of the
+  text. Shipped alongside the non-blocking tab open (`SpaceVersionControlTab.tsx`: history read
+  is painted before the background OBO live-config observe; rail skeletons decoupled from the
+  sync banner).

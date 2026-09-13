@@ -47,6 +47,36 @@ function instructionText(value: unknown): string {
   return text(value)
 }
 
+// "catalog.schema.table" -> { name: "table", qualifier: "catalog.schema" }. Keeps the
+// short table name prominent and the fully-qualified prefix available for context/hover.
+function splitIdentifier(id: string): { name: string; qualifier: string } {
+  const i = id.lastIndexOf('.')
+  return i < 0 ? { name: id, qualifier: '' } : { name: id.slice(i + 1), qualifier: id.slice(0, i) }
+}
+
+const RELATIONSHIP_LABELS: Record<string, string> = {
+  ONE_TO_ONE: 'One-to-one',
+  ONE_TO_MANY: 'One-to-many',
+  MANY_TO_ONE: 'Many-to-one',
+  MANY_TO_MANY: 'Many-to-many',
+}
+
+// join_specs[].sql is a two-element array: (1) the boolean condition, (2) a relationship
+// marker like "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--". Lift the marker into a friendly
+// cardinality label and return the condition on its own (backticks stripped for reading) so
+// the raw "--rt=…--" never leaks into the displayed SQL.
+function parseJoinSql(sqlArr: unknown[]): { relationship: string | null; condition: string } {
+  const parts = sqlArr.map(text).filter(Boolean)
+  let relationship: string | null = null
+  const conds: string[] = []
+  for (const part of parts) {
+    const match = part.match(/--rt=(?:FROM_RELATIONSHIP_TYPE_)?([A-Z_]+?)--/)
+    if (match) relationship = RELATIONSHIP_LABELS[match[1]] ?? match[1].replace(/_/g, ' ').toLowerCase()
+    else conds.push(part)
+  }
+  return { relationship, condition: conds.join('\n').replace(/`/g, '') }
+}
+
 const box = 'rounded-md border border-default bg-surface p-2'
 
 function Section({ id, title, count, children }: { id?: string; title: string; count?: number; children: React.ReactNode }) {
@@ -192,6 +222,35 @@ function FunctionEntry({ record, index }: { record: Record<string, unknown>; ind
   )
 }
 
+// A join_specs entry: two tables + cardinality + the ON condition. Shows the short table
+// names prominently (full identifier on hover), the shared catalog.schema once, a relationship
+// badge lifted from the "--rt=…--" marker, and the condition as a compact inline snippet —
+// the one-line predicate does not warrant the full SqlCodeBlock chrome.
+function JoinEntry({ record, index }: { record: Record<string, unknown>; index: number }) {
+  const left = firstText(asObject(record.left), ['identifier', 'alias'])
+  const right = firstText(asObject(record.right), ['identifier', 'alias'])
+  const l = splitIdentifier(left)
+  const r = splitIdentifier(right)
+  const { relationship, condition } = parseJoinSql(asArray(record.sql))
+  const note = firstText(record, ['comment', 'instruction'])
+  const sharedQualifier = l.qualifier && l.qualifier === r.qualifier ? l.qualifier : ''
+  return (
+    <div className={`${box} space-y-2 min-w-0`}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="font-mono text-xs font-medium text-primary break-all" title={left}>{l.name || `Join ${index + 1}`}</span>
+        <span className="text-muted">⋈</span>
+        {r.name && <span className="font-mono text-xs font-medium text-primary break-all" title={right}>{r.name}</span>}
+        {relationship && <Badge variant="info" className="px-1.5 py-0 text-[10px] font-medium">{relationship}</Badge>}
+      </div>
+      {sharedQualifier
+        ? <p className="text-[11px] text-muted break-all">{sharedQualifier}</p>
+        : (l.qualifier || r.qualifier) && <p className="text-[11px] text-muted break-all">{[l.qualifier, r.qualifier].filter(Boolean).join(' · ')}</p>}
+      {condition && <code className="block w-fit max-w-full overflow-x-auto rounded bg-surface-secondary px-2 py-1 font-mono text-xs text-secondary">{condition}</code>}
+      {note && <p className="text-xs text-muted break-words">{note}</p>}
+    </div>
+  )
+}
+
 // A benchmarks.questions entry: the evaluation question + its expected SQL answer.
 function BenchmarkEntry({ record, index }: { record: Record<string, unknown>; index: number }) {
   const question = firstText(record, ['question', 'id']) || `#${index + 1}`
@@ -262,19 +321,7 @@ export function ConfigView({ snapshot }: { snapshot: unknown }) {
     <div className="space-y-2">{filters.map((entry, index) => <SqlEntry key={index} record={asObject(entry)} index={index} labelKeys={['display_name', 'id']} />)}</div>
   ) })
   if (joins.length > 0) defs.push({ id: 'joins', label: 'Joins', count: joins.length, node: (
-    <div className="space-y-2">{joins.map((entry, index) => {
-      const join = asObject(entry)
-      const left = firstText(asObject(join.left), ['identifier', 'alias'])
-      const right = firstText(asObject(join.right), ['identifier', 'alias'])
-      const sql = asArray(join.sql).map(text).filter(Boolean).join('\n') || firstText(join, ['sql'])
-      return (
-        <div key={index} className={`${box} space-y-1 min-w-0`}>
-          <p className="text-xs text-secondary break-all">{left && right ? `${left} ⋈ ${right}` : firstText(join, ['id']) || `Join ${index + 1}`}</p>
-          {firstText(join, ['comment', 'instruction']) && <p className="text-xs text-muted break-words">{firstText(join, ['comment', 'instruction'])}</p>}
-          {sql && <SqlCodeBlock code={sql} maxLines={6} />}
-        </div>
-      )
-    })}</div>
+    <div className="space-y-2">{joins.map((entry, index) => <JoinEntry key={index} record={asObject(entry)} index={index} />)}</div>
   ) })
   if (sqlFunctions.length > 0) defs.push({ id: 'sql-functions', label: 'SQL functions', count: sqlFunctions.length, node: (
     <div className="space-y-2">{sqlFunctions.map((entry, index) => <FunctionEntry key={index} record={asObject(entry)} index={index} />)}</div>

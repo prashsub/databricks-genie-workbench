@@ -16,7 +16,7 @@ const snapshot = {
   },
   instructions: {
     text_instructions: [{ content: ['Revenue = SUM(amount).\n'] }],
-    join_specs: [{ id: 'j1', left: { identifier: 'orders' }, right: { identifier: 'customers' }, sql: ['`o`.`cid` = `c`.`id`', '--rt=FROM_ONE--'] }],
+    join_specs: [{ id: 'j1', left: { identifier: 'main.sales.orders' }, right: { identifier: 'main.sales.customers' }, sql: ['`orders`.`cid` = `customers`.`id`', '--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--'] }],
     sql_snippets: {
       filters: [{ id: 'f1', display_name: 'Active only', sql: 'status = 1', synonyms: ['live'] }],
       measures: [{ id: 'm1', display_name: 'Total Revenue', sql: 'SUM(amount)', comment: 'non-cancelled only' }],
@@ -42,7 +42,7 @@ it('config_view_renders_friendly_sections_and_preserves_unknowns', () => {
     'Entity match', 'Format assist', 'Excluded', 'etl_ts', 'Synonyms: area',
     'Metric views', 'main.sales.revenue_metrics', 'period',
     'Instructions', 'Revenue = SUM(amount).',
-    'Joins', 'orders ⋈ customers',
+    'Joins', 'orders', 'customers', 'Many-to-one', 'main.sales', 'orders.cid = customers.id',
     'Measures', 'Total Revenue', 'non-cancelled only',
     'Expressions', 'Order Year',
     'Filters', 'Active only', 'Synonyms: live',
@@ -58,6 +58,9 @@ it('config_view_renders_friendly_sections_and_preserves_unknowns', () => {
   }
   // The retired conflated bucket is gone.
   expect(html.split('View raw JSON')[0]).not.toContain('Sample SQL')
+  // The relationship marker is lifted into a badge, never rendered raw in the join surface.
+  expect(html.split('View raw JSON')[0]).not.toContain('--rt=')
+  expect(html.split('View raw JSON')[0]).not.toContain('FROM_RELATIONSHIP_TYPE')
   // Jump-nav is present with anchored sections when there is more than one section.
   expect(html).toContain('aria-label="Config sections"')
   expect(html).toContain('id="vc-cfg-tables"')
