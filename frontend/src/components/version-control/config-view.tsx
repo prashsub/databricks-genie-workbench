@@ -1,3 +1,5 @@
+import { AccordionItem } from '@/components/ui/accordion'
+import { Badge, type BadgeProps } from '@/components/ui/badge'
 import { SqlCodeBlock } from '@/components/SqlCodeBlock'
 
 // A structured, human-readable view of a version's serialized_space (Genie schema v2). Each
@@ -58,30 +60,69 @@ function Section({ title, count, children }: { title: string; count?: number; ch
   )
 }
 
-// One table / metric view: identifier, description, and its column list (flat for now —
-// Slice 2 turns this into a collapsible tree with per-column attribute badges).
+// Attribute badges surface the schema's per-column prompt-matching flags at a glance
+// (native title = the explanation; a hover Tooltip would not render in a review/search).
+function ColumnBadges({ col }: { col: Record<string, unknown> }) {
+  const badge = (label: string, title: string, variant: BadgeProps['variant']) => (
+    <Badge variant={variant} className="px-1.5 py-0 text-[10px] font-medium" title={title}>{label}</Badge>
+  )
+  return (
+    <>
+      {col.exclude === true && badge('Excluded', 'Hidden from Genie', 'secondary')}
+      {col.enable_entity_matching === true && badge('Entity match', 'Matches user terms to actual column values', 'info')}
+      {col.enable_format_assistance === true && badge('Format assist', 'Shows representative values to help Genie understand formats', 'info')}
+      {col.get_example_values === true && badge('Example values', 'Fetches sample values from the column', 'secondary')}
+      {col.build_value_dictionary === true && badge('Value dict', 'Builds a dictionary of distinct values for matching', 'secondary')}
+    </>
+  )
+}
+
+// One table / metric view as a collapsible card: identifier + description + a column-count
+// summary in the header; columns (with attribute badges, description, synonyms) revealed on
+// expansion. Small tables open by default; large ones collapse to tame the wall of columns.
+// AccordionItem keeps the body in the DOM when collapsed, so it stays searchable.
 function DataSourceCard({ entry, index }: { entry: unknown; index: number }) {
   const table = asObject(entry)
   const columns = asArray(table.column_configs)
+  const identifier = firstText(table, ['identifier', 'table', 'name']) || `Data source ${index + 1}`
+  const description = firstText(table, ['description'])
+  const excludedCount = columns.filter(c => asObject(c).exclude === true).length
+  const title = (
+    <div className="min-w-0">
+      <p className="font-mono text-xs text-secondary break-all">{identifier}</p>
+      {description && <p className="text-xs text-muted break-words font-normal">{description}</p>}
+    </div>
+  )
+  const action = (
+    <span className="text-xs text-muted whitespace-nowrap">
+      {columns.length} col{columns.length === 1 ? '' : 's'}{excludedCount ? ` · ${excludedCount} excl` : ''}
+    </span>
+  )
   return (
-    <div className={box}>
-      <p className="font-mono text-xs text-secondary break-all">{firstText(table, ['identifier', 'table', 'name']) || `Data source ${index + 1}`}</p>
-      {firstText(table, ['description']) && <p className="mt-0.5 text-xs text-muted break-words">{firstText(table, ['description'])}</p>}
-      {columns.length > 0 && (
-        <ul className="mt-1.5 space-y-0.5">
+    <AccordionItem title={title} action={action} defaultOpen={columns.length > 0 && columns.length <= 8}>
+      {columns.length > 0 ? (
+        <ul className="space-y-1.5">
           {columns.map((column, ci) => {
             const col = asObject(column)
-            const description = firstText(col, ['description'])
+            const name = firstText(col, ['column_name', 'name'])
+            const colDesc = firstText(col, ['description'])
+            const synonyms = asArray(col.synonyms).map(text).filter(Boolean)
             return (
-              <li key={ci} className="text-xs text-muted break-words">
-                <span className="font-mono text-secondary break-all">{firstText(col, ['column_name', 'name'])}</span>
-                {description ? ` — ${description}` : ''}
+              <li key={ci} className="border-t border-default/50 pt-1.5 first:border-t-0 first:pt-0">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="font-mono text-xs text-secondary break-all">{name}</span>
+                  <ColumnBadges col={col} />
+                </div>
+                {colDesc && <p className="mt-0.5 text-xs text-muted break-words">{colDesc}</p>}
+                {synonyms.length > 0 && <p className="mt-0.5 text-[11px] text-muted break-words">Synonyms: {synonyms.join(', ')}</p>}
               </li>
             )
           })}
         </ul>
+      ) : (
+        <p className="text-xs text-muted">No column configuration.</p>
       )}
-    </div>
+    </AccordionItem>
   )
 }
 

@@ -5,7 +5,10 @@ import { ConfigView } from './config-view'
 const snapshot = {
   data_sources: {
     tables: [
-      { identifier: 'main.sales.orders', description: 'Order facts', column_configs: [{ column_name: 'region', description: 'Sales region' }] },
+      { identifier: 'main.sales.orders', description: 'Order facts', column_configs: [
+        { column_name: 'region', description: 'Sales region', synonyms: ['area'], enable_entity_matching: true, enable_format_assistance: true },
+        { column_name: 'etl_ts', exclude: true },
+      ] },
     ],
     metric_views: [
       { identifier: 'main.sales.revenue_metrics', description: 'Revenue by region', column_configs: [{ column_name: 'period', description: 'Time period' }] },
@@ -36,6 +39,7 @@ it('config_view_renders_friendly_sections_and_preserves_unknowns', () => {
   const html = renderToStaticMarkup(<ConfigView snapshot={snapshot} />)
   for (const text of [
     'Tables', 'main.sales.orders', 'region',
+    'Entity match', 'Format assist', 'Excluded', 'etl_ts', 'Synonyms: area',
     'Metric views', 'main.sales.revenue_metrics', 'period',
     'Instructions', 'Revenue = SUM(amount).',
     'Joins', 'orders ⋈ customers',

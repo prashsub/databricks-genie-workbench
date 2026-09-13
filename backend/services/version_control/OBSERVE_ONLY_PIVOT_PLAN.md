@@ -576,10 +576,15 @@ disclosure.
   `config.sample_questions` too. Snippet sections show `synonyms`/`instruction`/`comment`.
   Columns stay flat for now. Pure restructuring, lowest risk. Tests extend
   `config-view.test.tsx` with a full schema-shaped fixture.
-- **Slice 2 — collapsible entities + column table + attribute badges + column peek.** Data
-  source entities become collapsible cards (name/description/column-count/quick-stats);
-  columns render as a compact table with attribute badges + tooltips; clicking a column
-  opens a side peek with the full `column_config`.
+- **Slice 2 — collapsible entities + column attribute badges. LANDED.** Data source entities
+  are collapsible cards (`AccordionItem`): header = identifier + description + `N cols · M
+  excl`; body reveals columns with per-column attribute badges (`Excluded` / `Entity match` /
+  `Format assist` / `Example values` / `Value dict`, explained via native `title`) plus full
+  description + synonyms. `defaultOpen` when `1 ≤ columns ≤ 8` so big tables (e.g. airline
+  `certifying_staff`) collapse; the body stays in the DOM when collapsed so it remains
+  searchable. The full-detail "column peek" was realized as this in-card expansion (inline
+  badges + detail) rather than a separate side drawer — chosen for robustness (no portal/
+  overlay); a true side drawer remains an option if deeper per-column metadata is needed.
 - **Slice 3 — in-config section nav.** Sticky section index / two-column at `xl`, chip bar or
   jump dropdown below; anchors scroll-to.
 - **Slice 4 (polish).** Parse GSL instruction headers (## PURPOSE / DISAMBIGUATION / …) into
