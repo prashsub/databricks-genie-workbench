@@ -287,17 +287,20 @@ export function SpaceVersionControlTab({ spaceId }: Props) {
       {subTab === 'versions' && (
         <div className="space-y-4">
           <div className="flex items-center justify-end gap-2">
+            {/* The compact icon and the labeled button run the same action — observe the
+                live Genie space (source-check + record). The icon is the quick repeat
+                affordance; "Capture current state" is the explicit, discoverable primary. */}
             <button
-              onClick={() => load()}
-              disabled={loading || capturing}
+              onClick={capture}
+              disabled={capturing || syncing}
               className="p-2 rounded-lg border border-default text-muted hover:text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50"
-              title="Refresh history"
+              title="Check the live space for changes"
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${(capturing || syncing) ? 'animate-spin' : ''}`} />
             </button>
             <button
               onClick={capture}
-              disabled={capturing}
+              disabled={capturing || syncing}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-default text-sm font-medium text-secondary hover:bg-surface-secondary transition-colors disabled:opacity-50"
             >
               <Camera className="w-4 h-4" />

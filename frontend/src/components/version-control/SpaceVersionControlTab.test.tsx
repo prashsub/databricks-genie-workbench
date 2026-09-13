@@ -58,3 +58,9 @@ it('renders the tab with the auto-capture explanation and manual capture', () =>
   expect(html).toContain('auto-captured')
   expect(html).toContain('Capture current state')
 })
+
+it('labels the compact control as a live source-check, not a history reload', () => {
+  const html = renderToStaticMarkup(<SpaceVersionControlTab spaceId="space-1" />)
+  expect(html).toContain('Check the live space for changes')
+  expect(html).not.toContain('Refresh history')
+})
